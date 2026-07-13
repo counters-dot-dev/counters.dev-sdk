@@ -1,0 +1,4 @@
+coverage.out
+
+# compiled e2e example binary
+examples/e2e/example

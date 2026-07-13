@@ -1,0 +1,12 @@
+{
+  "name": "@counters.dev/sdk-example-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Runnable example + end-to-end suite: exercises the entire public SDK surface against a live server.",
+  "scripts": {
+    "start": "node main.mjs"
+  },
+  "dependencies": {
+    "@counters.dev/sdk": "file:../.."
+  }
+}

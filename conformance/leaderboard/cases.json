@@ -1,0 +1,261 @@
+{
+  "description": "Client-side leaderboard/member encode + parse vectors. These pin the parts of the leaderboard surface that do NOT require a live board on the server: query-string encoding for board reads, request-body encoding for member writes, and response parsing. The stateful happy paths (ranking, seasons, min/max acceptance) are pinned separately by the scope:\"http\" cases in ../http/cases.json. Three sections: `encodeQuery` (read params -> query string, presence-exact like series/cases.json — every key listed must appear with that string value, every key not listed must be absent), `encodeBody` (write inputs -> request JSON body, presence-exact on fields with values passed through byte-verbatim), and `parse` (a response body -> typed fields; `kind` selects the schema). Numeric values (value/total/memberValue/percentile) are decimal/integer STRINGS on the wire and MUST stay strings — never parsed to a native float/int (arbitrary precision; see the bignum entry). Loader contract lives in README.md.",
+  "encodeQuery": [
+    {
+      "name": "board-read-all-params",
+      "note": "GET /v1/counters/{key}/leaderboard?limit&offset&order&epoch. All four are passed through as strings; order is one of asc|desc, epoch/limit/offset are non-negative integers rendered without separators.",
+      "params": { "limit": 25, "offset": 50, "order": "asc", "epoch": 3 },
+      "query": { "limit": "25", "offset": "50", "order": "asc", "epoch": "3" }
+    },
+    {
+      "name": "board-read-defaults-omitted",
+      "note": "No params set -> no query string at all (server applies its own defaults). Presence-exact: the empty object means every optional key is absent.",
+      "params": {},
+      "query": {}
+    },
+    {
+      "name": "window-read-passthrough",
+      "note": "GET /v1/counters/{key}/leaderboard?window=7d returns a WindowLeaderboard. `window` reaches the query verbatim.",
+      "params": { "window": "7d" },
+      "query": { "window": "7d" }
+    },
+    {
+      "name": "window-read-with-limit",
+      "params": { "window": "1h", "limit": 10 },
+      "query": { "window": "1h", "limit": "10" }
+    },
+    {
+      "name": "window-invalid-value-local-reject",
+      "note": "`window` is a fixed enum (1h|6h|12h|1d|7d|30d). An SDK that exposes the windowed read validates it client-side and rejects a bad value with the 'validation' taxonomy type before issuing the request. Error case: has `expect.taxonomy`, no `query`.",
+      "params": { "window": "2h" },
+      "expect": { "taxonomy": "validation" }
+    }
+  ],
+  "encodeBody": [
+    {
+      "name": "member-add-amount-only",
+      "note": "POST /v1/counters/{key}/members/{member}/add body. Only `amount` set: metadata and occurredAt MUST be absent from the body (presence-exact).",
+      "op": "memberAdd",
+      "input": { "amount": "10" },
+      "body": { "amount": "10" }
+    },
+    {
+      "name": "member-add-full",
+      "note": "amount + metadata + occurredAt all present; each value passes through byte-verbatim (amount is an arbitrary-precision integer string, never reformatted; metadata is opaque).",
+      "op": "memberAdd",
+      "input": { "amount": "170141183460469231731687303715884105728", "metadata": "room1:500", "occurredAt": "2026-01-01T00:00:00Z" },
+      "body": { "amount": "170141183460469231731687303715884105728", "metadata": "room1:500", "occurredAt": "2026-01-01T00:00:00Z" }
+    },
+    {
+      "name": "member-subtract-amount-only",
+      "op": "memberSubtract",
+      "input": { "amount": "3" },
+      "body": { "amount": "3" }
+    },
+    {
+      "name": "member-submit-value-and-mode",
+      "note": "POST /v1/counters/{key}/members/{member}/submit body. value + mode; metadata and occurredAt absent.",
+      "op": "memberSubmit",
+      "input": { "value": "1502", "mode": "min" },
+      "body": { "value": "1502", "mode": "min" }
+    },
+    {
+      "name": "member-submit-full",
+      "op": "memberSubmit",
+      "input": { "value": "1417", "mode": "max", "metadata": "room1:400", "occurredAt": "2026-01-01T00:00:00Z" },
+      "body": { "value": "1417", "mode": "max", "metadata": "room1:400", "occurredAt": "2026-01-01T00:00:00Z" }
+    }
+  ],
+  "parse": [
+    {
+      "name": "leaderboard-sum-with-total",
+      "kind": "leaderboard",
+      "note": "A sum board carries `total`; entries are ranked (competition rank: ties share, next skips). `value`/`total` stay decimal strings. `metadata` is present only on entries that have it. One entry value overflows i64 to pin no-native-int parsing.",
+      "body": {
+        "key": "raid",
+        "mode": "sum",
+        "epoch": 0,
+        "order": "desc",
+        "total": "170141183460469231731687303715884105763",
+        "memberCount": 3,
+        "limit": 100,
+        "offset": 0,
+        "entries": [
+          { "rank": 1, "member": "bob", "value": "170141183460469231731687303715884105728", "updatedAt": "2026-01-01T00:00:02Z" },
+          { "rank": 2, "member": "alice", "value": "25", "metadata": "room1:500", "updatedAt": "2026-01-01T00:00:00Z" },
+          { "rank": 2, "member": "carol", "value": "10", "updatedAt": "2026-01-01T00:00:01Z" }
+        ]
+      },
+      "expect": {
+        "key": "raid",
+        "mode": "sum",
+        "epoch": 0,
+        "order": "desc",
+        "total": "170141183460469231731687303715884105763",
+        "memberCount": 3,
+        "entries": [
+          { "rank": 1, "member": "bob", "value": "170141183460469231731687303715884105728" },
+          { "rank": 2, "member": "alice", "value": "25", "metadata": "room1:500" },
+          { "rank": 2, "member": "carol", "value": "10" }
+        ]
+      }
+    },
+    {
+      "name": "leaderboard-min-without-total",
+      "kind": "leaderboard",
+      "note": "A min/max/latest board has NO `total` (total is meaningful only for sum boards). Parsing MUST tolerate its absence (the field is optional in openapi.yaml Leaderboard).",
+      "body": {
+        "key": "scores",
+        "mode": "min",
+        "epoch": 1,
+        "order": "asc",
+        "memberCount": 2,
+        "limit": 100,
+        "offset": 0,
+        "entries": [
+          { "rank": 1, "member": "dan", "value": "1300", "updatedAt": "2026-01-01T00:00:00Z" },
+          { "rank": 2, "member": "alice|bob|carol", "value": "1417", "metadata": "room1:400", "updatedAt": "2026-01-01T00:00:01Z" }
+        ]
+      },
+      "expect": {
+        "key": "scores",
+        "mode": "min",
+        "epoch": 1,
+        "order": "asc",
+        "totalAbsent": true,
+        "memberCount": 2,
+        "entries": [
+          { "rank": 1, "member": "dan", "value": "1300" },
+          { "rank": 2, "member": "alice|bob|carol", "value": "1417", "metadata": "room1:400" }
+        ]
+      }
+    },
+    {
+      "name": "window-leaderboard",
+      "kind": "windowLeaderboard",
+      "note": "A WindowLeaderboard is always a sum board; it carries `window`, `effectiveStart`/`effectiveEnd` (the floored range actually summed) and a `total`. WindowEntry has no metadata/updatedAt.",
+      "body": {
+        "key": "rocks",
+        "mode": "sum",
+        "window": "7d",
+        "order": "desc",
+        "total": "45",
+        "memberCount": 3,
+        "limit": 100,
+        "offset": 0,
+        "effectiveStart": "2025-12-25T00:00:00Z",
+        "effectiveEnd": "2026-01-01T00:00:00Z",
+        "entries": [
+          { "rank": 1, "member": "bob", "value": "25" },
+          { "rank": 2, "member": "alice", "value": "10" },
+          { "rank": 2, "member": "carol", "value": "10" }
+        ]
+      },
+      "expect": {
+        "key": "rocks",
+        "mode": "sum",
+        "window": "7d",
+        "order": "desc",
+        "total": "45",
+        "memberCount": 3,
+        "effectiveStart": "2025-12-25T00:00:00Z",
+        "effectiveEnd": "2026-01-01T00:00:00Z",
+        "entries": [
+          { "rank": 1, "member": "bob", "value": "25" },
+          { "rank": 2, "member": "alice", "value": "10" },
+          { "rank": 2, "member": "carol", "value": "10" }
+        ]
+      }
+    },
+    {
+      "name": "member-value-accepted",
+      "kind": "memberValue",
+      "note": "The body returned by a member add/subtract/submit that changed the standing value. `memberValue` is this member's value; `value` is the board total (present on sum boards). Both stay strings.",
+      "body": {
+        "key": "lb",
+        "member": "alice",
+        "memberValue": "10",
+        "memberAccepted": true,
+        "mode": "sum",
+        "epoch": 0,
+        "value": "10"
+      },
+      "expect": {
+        "key": "lb",
+        "member": "alice",
+        "memberValue": "10",
+        "memberAccepted": true,
+        "mode": "sum",
+        "epoch": 0,
+        "value": "10"
+      }
+    },
+    {
+      "name": "member-value-rejected",
+      "kind": "memberValue",
+      "note": "A min/max submit that did NOT beat the standing best: memberAccepted=false, memberValue is the KEPT best (not the rejected submission). SDKs surface this without throwing.",
+      "body": {
+        "key": "raid",
+        "member": "alice|bob|carol",
+        "memberValue": "1417",
+        "memberAccepted": false,
+        "mode": "min",
+        "epoch": 0
+      },
+      "expect": {
+        "key": "raid",
+        "member": "alice|bob|carol",
+        "memberValue": "1417",
+        "memberAccepted": false,
+        "mode": "min",
+        "epoch": 0,
+        "valueAbsent": true
+      }
+    },
+    {
+      "name": "member-snapshot",
+      "kind": "memberSnapshot",
+      "note": "GET /v1/counters/{key}/members/{member}. `percentile` is a scale-2 STRING (e.g. \"83.33\"); parsing it to a float would lose the trailing-zero contract and is banned. `rank` is a competition rank.",
+      "body": {
+        "key": "snap",
+        "member": "alice",
+        "value": "10",
+        "metadata": "room1:500",
+        "rank": 2,
+        "percentile": "83.33",
+        "memberCount": 6,
+        "mode": "sum",
+        "epoch": 0,
+        "updatedAt": "2026-01-01T00:00:00Z"
+      },
+      "expect": {
+        "key": "snap",
+        "member": "alice",
+        "value": "10",
+        "metadata": "room1:500",
+        "rank": 2,
+        "percentile": "83.33",
+        "memberCount": 6,
+        "mode": "sum",
+        "epoch": 0
+      }
+    },
+    {
+      "name": "member-removed",
+      "kind": "memberRemoved",
+      "note": "The body returned by DELETE /v1/counters/{key}/members/{member}. `value` (board total after removal) is present on sum boards.",
+      "body": {
+        "key": "rm",
+        "member": "alice",
+        "epoch": 0,
+        "value": "15"
+      },
+      "expect": {
+        "key": "rm",
+        "member": "alice",
+        "epoch": 0,
+        "value": "15"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1509 @@
+openapi: 3.1.0
+info:
+  title: Counters API
+  version: 0.5.1
+  summary: Multi-tenant arbitrary-precision counter service.
+  description: |
+    The public REST API for Counters, and the shape source of truth for the hand-written SDKs
+    (drift-checked in CI; there is no client codegen).
+
+    ## Conventions
+    - **Arbitrary precision:** counter `amount` and `value` are JSON **strings** of decimal digits, never JSON
+      numbers (a JSON number is an IEEE-754 double and loses precision above 2^53). `amount` is a non-negative
+      integer string; `value` is a signed integer string.
+    - **Idempotency:** every write — `add`, `subtract`, `clear`, `delete`, and the member operations — accepts an
+      `Idempotency-Key` header. Retrying with the same key is safe and is not double-applied (at-least-once delivery +
+      dedup = effectively-once): the retry replays the original result (same value/epoch, or the original `204` for a
+      delete) instead of re-running the write. A key is scoped to the operation that first used it; reusing the same key
+      for a **different** operation (e.g. an `add` key replayed on a `clear`) is rejected with `409 Conflict` rather than
+      returning a result the second operation never produced.
+    - **Auth:** SDK/machine calls use an organization API key (HTTP Bearer). All data is scoped to the key's organization.
+    - **Counters may go negative.** `clear` resets to zero by starting a new epoch; historical series are retained.
+
+    ## Quotas & coalescing
+    - Quotas meter **operations, not magnitude**: an `add` of any size is **one op** (`add(key, 500)` costs
+      the same as `add(key, 1)`). Local aggregation therefore gives you effectively unlimited increments —
+      accumulate client-side and flush the total. Success never punishes you.
+    - `/batch` is the coalesced-flush surface: up to 1000 ops in one call (each op still counts as one).
+    - Read your live quota state with a single keyed `GET /v1/usage`: current-month ops used/quota, the
+      reset instant, counter headroom, and plan limits. It is for **periodic polling**, not per-write
+      interrogation.
+    - Every quota `403` body carries machine-readable extension members — `limit`, `used`, and (for the
+      time-windowed monthly-ops quota) `resetsAt` — so a client learns exactly where it stands without
+      parsing prose.
+
+servers:
+  - url: https://api.counters.dev/v1
+    description: Production (placeholder host)
+
+security:
+  - apiKey: []
+
+tags:
+  - name: counters
+    description: Counter registry and metadata.
+  - name: operations
+    description: Mutations — add, subtract, clear, delete, and batch.
+  - name: read
+    description: Reads — current value and time series.
+  - name: public
+    description: |
+      Key-less demo endpoints backing the landing page's global tap counter. No authentication:
+      access is restricted server-side to an operator-configured allowlist of counters owned by a
+      dedicated demo organization, and abuse is controlled by per-IP and global rate limits. Served
+      at the **API origin root** (`https://api.counters.dev/public/...`), not under `/v1`.
+  - name: dashboard
+    description: |
+      Dashboard-only browser surfaces. These are documented here for contract visibility but are
+      not part of the machine (/v1, SDK) contract; the SDKs do not implement them.
+
+paths:
+  /dashboard/plane-token:
+    servers:
+      - url: https://api.counters.dev
+        description: Dashboard hub endpoints live at the API origin root, not under /v1.
+    post:
+      operationId: mintDashboardPlaneToken
+      summary: Mint a short-lived direct-to-plane dashboard read token
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: |
+        WorkOS-authenticated dashboard endpoint. The hub resolves the caller's organization plane,
+        signs a `dt_` token scoped to that org and plane, and returns the plane base URL. The token is
+        valid for at most 10 minutes and is accepted only by `/dashboard-read/*` routes on the target
+        plane.
+      responses:
+        '200':
+          description: A short-lived read token and target plane URL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardPlaneToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /dashboard-read/usage:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    get:
+      operationId: getDashboardReadUsage
+      summary: Read dashboard quota usage directly from a plane
+      description: Returns the current-month write-operation usage for the caller’s org, served from the plane’s local store without any hub round-trip.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      responses:
+        '200':
+          description: Dashboard current-month write-op usage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardUsage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /dashboard-read/counters:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    get:
+      operationId: listDashboardReadCounters
+      summary: List counters directly from a plane for dashboard views
+      description: Lists the org’s counters directly from the plane the org is assigned to, using the short-lived plane-scoped read token.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /dashboard-read/counters/values:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    get:
+      operationId: getDashboardReadCounterValues
+      summary: Batch-read counter values directly from a plane
+      description: Bulk-reads current counter values for the org directly from the plane, for dashboard overview tiles.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - name: keys
+          in: query
+          required: true
+          description: Comma-separated counter keys; maximum 100.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Current values for the requested counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /dashboard-read/counters/{counterKey}:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getDashboardReadCounter
+      summary: Read one counter directly from a plane
+      description: Reads a single counter’s current state directly from the plane.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      responses:
+        '200':
+          description: The counter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard-read/counters/{counterKey}/series:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getDashboardReadCounterSeries
+      summary: Read a counter series directly from a plane
+      description: Reads a counter’s time series directly from the plane for dashboard charts.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: bucket
+          in: query
+          required: true
+          schema: { type: string, enum: ['1m', '5m', '1h', '1d', '1w', '1mo'] }
+        - name: tz
+          in: query
+          schema: { type: string, default: UTC }
+        - name: gapfill
+          in: query
+          schema: { type: boolean, default: false }
+        - name: member
+          in: query
+          schema: { type: string }
+        - name: groupBy
+          in: query
+          schema: { type: string, enum: [member] }
+      responses:
+        '200':
+          description: Counter or member-dimensional series.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SeriesResponse'
+                  - $ref: '#/components/schemas/MemberSeriesResponse'
+                  - $ref: '#/components/schemas/MemberGroupSeriesResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /dashboard-read/counters/{counterKey}/leaderboard:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getDashboardReadCounterLeaderboard
+      summary: Read a counter leaderboard directly from a plane
+      description: Reads a counter’s leaderboard directly from the plane.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+        - name: window
+          in: query
+          schema: { type: string, enum: ['1h', '6h', '12h', '1d', '7d', '30d'] }
+        - $ref: '#/components/parameters/Epoch'
+      responses:
+        '200':
+          description: A ranked page of members.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Leaderboard'
+                  - $ref: '#/components/schemas/WindowLeaderboard'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard-read/counters/{counterKey}/members/{member}:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/MemberKey'
+    get:
+      operationId: getDashboardReadMember
+      summary: Read a member snapshot directly from a plane
+      description: Reads a single leaderboard member’s snapshot for a counter directly from the plane.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - $ref: '#/components/parameters/Epoch'
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+      responses:
+        '200':
+          description: The member snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberSnapshot' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard-read/derived/{derivedKey}/value:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/DerivedKey'
+    get:
+      operationId: getDashboardReadDerivedValue
+      summary: Read a derived counter value directly from a plane
+      description: Reads a derived counter’s current value directly from the plane.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      responses:
+        '200':
+          description: The evaluated value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DerivedValueResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard-read/derived/{derivedKey}/series:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    parameters:
+      - $ref: '#/components/parameters/DerivedKey'
+    get:
+      operationId: getDashboardReadDerivedSeries
+      summary: Read a derived counter series directly from a plane
+      description: Reads a derived counter’s time series directly from the plane.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: bucket
+          in: query
+          required: true
+          schema: { type: string, enum: ['1m', '5m', '1h', '1d', '1w', '1mo'] }
+        - name: tz
+          in: query
+          schema: { type: string, default: UTC }
+      responses:
+        '200':
+          description: The dense derived series.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DerivedSeriesResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /counters:
+    get:
+      operationId: listCounters
+      summary: List counters in the organization
+      description: Pages through the organization's counters in key order; follow `nextCursor` until absent.
+      tags: [counters]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /counters/{counterKey}:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getCounter
+      summary: Get a counter's metadata and current value
+      description: The counter's key, current-epoch value, and epoch. 404 once deleted.
+      tags: [counters]
+      responses:
+        '200':
+          description: The counter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteCounter
+      summary: Delete (tombstone) a counter
+      description: Marks the counter deleted and stops serving it; events are purged asynchronously per retention.
+      tags: [operations]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /counters/{counterKey}/add:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: addToCounter
+      summary: Add to a counter
+      description: Increments by a non-negative amount. Creates the counter if absent (subject to the plan's counter limit).
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AmountRequest' }
+      responses:
+        '200':
+          description: Applied; returns the new value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /counters/{counterKey}/subtract:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: subtractFromCounter
+      summary: Subtract from a counter
+      description: Decrements by a non-negative amount. The counter may go negative.
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AmountRequest' }
+      responses:
+        '200':
+          description: Applied; returns the new value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /counters/{counterKey}/clear:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: clearCounter
+      summary: Clear a counter (reset to zero)
+      description: Starts a new epoch; the current value becomes zero. Historical series are retained.
+      tags: [operations]
+      responses:
+        '200':
+          description: Cleared; returns the counter at value 0 in the new epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Counter' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /counters/{counterKey}/value:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getCounterValue
+      summary: Get a counter's current value
+      description: The value in the current epoch, as a decimal string. Publishable (`pk_`) bearers get CORS + cache headers.
+      tags: [read]
+      responses:
+        '200':
+          description: The current value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValueResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /counters/{counterKey}/series:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getCounterSeries
+      summary: Get a counter's time series (delta per bucket)
+      description: |
+        Returns the per-bucket change in the counter over [from, to). Granularity (`bucket`) is constrained by the
+        organization's plan; lookback is bounded by the storage lifecycle, not read-gated. Empty buckets are omitted
+        unless `gapfill=true`; clients treat a missing bucket as zero.
+      tags: [read]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: bucket
+          in: query
+          required: true
+          description: Bucket size. Allowed values depend on plan (finer buckets require higher plans).
+          schema: { type: string, enum: ['1m', '5m', '1h', '1d', '1w', '1mo'] }
+        - name: mode
+          in: query
+          description: Only delta-per-bucket is supported in v0.1; cumulative is a future, separate read path.
+          schema: { type: string, enum: [delta], default: delta }
+        - name: tz
+          in: query
+          description: IANA timezone for calendar bucket boundaries (e.g. Europe/London).
+          schema: { type: string, default: UTC }
+        - name: gapfill
+          in: query
+          description: >-
+            Emit a zero-valued point for empty buckets instead of omitting them. Defaults to false;
+            because false is the default, clients omit the parameter entirely when false (an explicit
+            `gapfill=false` is treated identically to omission).
+          schema: { type: boolean, default: false }
+        - name: member
+          in: query
+          description: >-
+            Dimensional member series (member-series): return one member's per-bucket series instead
+            of the counter's. Requires the counter to have member series enabled and `bucket` at the
+            1h floor or coarser. Mutually exclusive with `groupBy`. On a score board (`min`/`max`/
+            `latest`) each point is the bucket-best/latest value, points are sparse, and `gapfill=true`
+            is rejected (400) — a gap is "no submission", not zero.
+          schema: { type: string }
+        - name: groupBy
+          in: query
+          description: >-
+            `groupBy=member` returns a series for every member with data in range (member-series):
+            gapfilled dense on a sum board, sparse per member on a score board. Requires member series
+            enabled and `bucket` >= 1h. Mutually exclusive with `member`.
+          schema: { type: string, enum: [member] }
+      responses:
+        '200':
+          description: >-
+            The series. Shape depends on the query: `SeriesResponse` for the counter, `MemberSeriesResponse`
+            with `member=`, `MemberGroupSeriesResponse` with `groupBy=member`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SeriesResponse'
+                  - $ref: '#/components/schemas/MemberSeriesResponse'
+                  - $ref: '#/components/schemas/MemberGroupSeriesResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Requested granularity exceeds the plan's entitlement; lookback is bounded by storage lifecycle, not read-gated.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /counters/{counterKey}/leaderboard:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getCounterLeaderboard
+      summary: Read a counter's ranked member leaderboard
+      description: |
+        Ranked page of members with values (top-N). Identical across board modes. `total` (the group
+        total) is present only on `sum` boards. Publishable (`pk_`) bearers may read (the embeddable
+        public leaderboard) and receive CORS + cache headers. Default `order` is `desc`, except `min`
+        boards which default to `asc` (fastest-first); an explicit `order` overrides.
+      tags: [read]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+        - name: window
+          in: query
+          description: >-
+            Windowed leaderboard (member-series): rank members by their activity over the trailing
+            window instead of all-time standing — the window-sum on a sum board, the window-best
+            (`min`/`max`) or window-latest (`latest`) value on a score board. Requires member series
+            enabled. Default `order` follows the board mode (`asc` for `min`, else `desc`). Members with
+            no activity in the window are absent (a windowed board ranks activity, not standing).
+            Ignores `epoch` (member rollups are epoch-agnostic).
+          schema: { type: string, enum: ['1h', '6h', '12h', '1d', '7d', '30d'] }
+        - $ref: '#/components/parameters/Epoch'
+      responses:
+        '200':
+          description: >-
+            A ranked page of members — `Leaderboard` (all-time standing) or, with `window=`,
+            `WindowLeaderboard` (windowed activity).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Leaderboard'
+                  - $ref: '#/components/schemas/WindowLeaderboard'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /counters/{counterKey}/members/{member}:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/MemberKey'
+    get:
+      operationId: getMember
+      summary: Get a member's rank and percentile
+      description: |
+        The member's value, competition rank, and percentile (share of members at-or-behind, e.g.
+        "83.33"; the leader and a sole member both read "100.00"). Publishable (`pk_`) bearers may read.
+      tags: [read]
+      parameters:
+        - $ref: '#/components/parameters/Epoch'
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+      responses:
+        '200':
+          description: The member snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberSnapshot' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: removeMember
+      summary: Remove a member from the current board
+      description: |
+        Removes the member from the current epoch. On `sum` boards a non-zero value is compensated
+        into the group total (returned as `value`); score boards delete without state math.
+      tags: [operations]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberRemoved' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /counters/{counterKey}/members/{member}/add:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/MemberKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: addToMember
+      summary: Add to a member's value (sum board)
+      description: Accumulates a non-negative delta onto the member's value; configures the board as `sum` on first use.
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberAmountRequest' }
+      responses:
+        '200':
+          description: Applied; returns the member's new value and the group total.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberValue' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /counters/{counterKey}/members/{member}/subtract:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/MemberKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: subtractFromMember
+      summary: Subtract from a member's value (sum board)
+      description: Decrements the member's value by a non-negative delta. The member (and group) may go negative.
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberAmountRequest' }
+      responses:
+        '200':
+          description: Applied; returns the member's new value and the group total.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberValue' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /counters/{counterKey}/members/{member}/submit:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+      - $ref: '#/components/parameters/MemberKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: submitMember
+      summary: Submit a member's score (latest/min/max board)
+      description: |
+        Submits a signed score to a score board — `latest` overwrites, `min`/`max` keep-best. A
+        worse-than-standing submit is still a successful, metered call returning the standing value
+        with `memberAccepted: false`. `mode` is required on the first submit to an unconfigured board.
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitRequest' }
+      responses:
+        '200':
+          description: Recorded; returns the standing value and whether it was accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberValue' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /usage:
+    get:
+      operationId: getUsage
+      summary: Read current quota state
+      tags: [counters]
+      description: |
+        Machine-readable quota state for the calling organization: current-month ops used and quota,
+        the reset instant, counter headroom, and the plan's core limits. Intended for **periodic
+        polling** (e.g. once a minute), not per-write interrogation — the hot write path deliberately
+        exposes no per-request usage headers. `quota`/`monthlyOpsQuota` are `null` for unlimited plans.
+      responses:
+        '200':
+          description: Current quota state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Usage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /batch:
+    post:
+      operationId: batchOperations
+      summary: Apply a batch of operations
+      description: |
+        The SDK's primary write path. Operations are coalesced client-side and submitted together. Each operation
+        carries its own idempotency key, so the batch is safe to retry. The HTTP call succeeding means the batch was
+        accepted — inspect each per-operation result.
+      tags: [operations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchRequest' }
+      responses:
+        '200':
+          description: Per-operation results.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /derived/{derivedKey}/value:
+    parameters:
+      - $ref: '#/components/parameters/DerivedKey'
+    get:
+      operationId: getDerivedValue
+      summary: Evaluate a derived counter's current value
+      description: |
+        A derived counter is a stored, named, read-only expression over the organization's counters
+        (e.g. `conversion = c('signups') / c('visits')`), evaluated at read time. Definitions are
+        managed out-of-band (dashboard) and referenced counters need not exist — a missing or deleted
+        counter reads as `0`, made visible in `inputs`. Arithmetic is exact-decimal (DECIMAL128) and
+        the final result is rounded HALF_UP to the definition's `scale`. Division by zero anywhere in
+        the expression makes the whole `value` `null` with a `reason`. Derived keys are a separate
+        namespace from counter keys. Requires a full-access organization API key (no publishable
+        tokens).
+      tags: [read]
+      responses:
+        '200':
+          description: The evaluated value (or null on division by zero).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DerivedValueResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /derived/{derivedKey}/series:
+    parameters:
+      - $ref: '#/components/parameters/DerivedKey'
+    get:
+      operationId: getDerivedSeries
+      summary: Evaluate a derived counter as a per-bucket time series
+      description: |
+        Evaluates the derived expression per bucket over [from, to). Each referenced counter's series
+        is gap-filled to zeros, so the derived series is always dense; a per-bucket division by zero
+        yields `v: null` for that bucket. Granularity (`bucket`) is constrained by the organization's plan,
+        and lookback is bounded by storage lifecycle exactly as for counter series. Requires a full-access
+        organization API key.
+      tags: [read]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: bucket
+          in: query
+          required: true
+          description: Bucket size. Allowed values depend on plan (finer buckets require higher plans).
+          schema: { type: string, enum: ['1m', '5m', '1h', '1d', '1w', '1mo'] }
+        - name: tz
+          in: query
+          description: IANA timezone for calendar bucket boundaries (e.g. Europe/London).
+          schema: { type: string, default: UTC }
+      responses:
+        '200':
+          description: The dense derived series.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DerivedSeriesResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/counters/{counterKey}/value:
+    servers:
+      - url: https://api.counters.dev
+        description: Public demo endpoints live at the API origin root, not under /v1.
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    get:
+      operationId: getPublicCounterValue
+      summary: Read a public demo counter (key-less)
+      security: []
+      tags: [public]
+      description: |
+        Current value of an allowlisted public counter — no auth, callable straight from a browser.
+        Responses carry `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=2,
+        stale-while-revalidate=5`, so a CDN in front of the origin absorbs polling fan-out. An
+        allowlisted counter that has never been written reads as `"0"` (epoch 0), never 404. A key
+        outside the allowlist — or an operator that hasn't configured the feature — is a plain 404.
+        `OPTIONS` preflight is supported (methods `GET, POST, OPTIONS`; headers `Content-Type`).
+      responses:
+        '200':
+          description: The current value.
+          headers:
+            Cache-Control:
+              description: '`public, max-age=2, stale-while-revalidate=5` — short shared-cache TTL for CDN absorption.'
+              schema: { type: string }
+            Access-Control-Allow-Origin:
+              description: Always `*` on this endpoint.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValueResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/counters/{counterKey}/tap:
+    servers:
+      - url: https://api.counters.dev
+        description: Public demo endpoints live at the API origin root, not under /v1.
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    post:
+      operationId: tapPublicCounter
+      summary: Tap a public demo counter (+1, key-less)
+      security: []
+      tags: [public]
+      description: |
+        Adds exactly **+1** to an allowlisted public counter — the amount is fixed server-side and no
+        request body is accepted. Deliberately **not idempotent**: every accepted tap counts, and the
+        per-IP + global rate limits (429 with `Retry-After` beyond them) are the abuse control. Returns
+        the post-increment value so clients can render the click instantly. Responses carry
+        `Access-Control-Allow-Origin: *` and `Cache-Control: no-store`. `OPTIONS` preflight is
+        supported (methods `GET, POST, OPTIONS`; headers `Content-Type`).
+      responses:
+        '200':
+          description: Applied; the post-increment value.
+          headers:
+            Cache-Control:
+              description: Always `no-store` — tap responses are never cached.
+              schema: { type: string }
+            Access-Control-Allow-Origin:
+              description: Always `*` on this endpoint.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValueResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: Organization API key. Verified locally; never round-trips to WorkOS on the request hot path.
+    workOs:
+      type: http
+      scheme: bearer
+      description: WorkOS AuthKit access token for dashboard hub endpoints.
+    dashboardReadToken:
+      type: http
+      scheme: bearer
+      bearerFormat: dt_
+      description: |
+        Short-lived `dt_` dashboard read token minted by the hub and verified locally by a data plane.
+
+  parameters:
+    CounterKey:
+      name: counterKey
+      in: path
+      required: true
+      description: Counter identifier, unique within the organization (e.g. "registrations").
+      schema: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+    DerivedKey:
+      name: derivedKey
+      in: path
+      required: true
+      description: Derived-counter identifier, unique within the organization (separate namespace from counter keys).
+      schema: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-supplied key; retries with the same key are de-duplicated within the dedup window.
+      schema: { type: string, maxLength: 255 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor from a previous response.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    MemberKey:
+      name: member
+      in: path
+      required: true
+      description: Member identifier within a counter's board (e.g. "playerX", or a composite "alice|bob").
+      schema: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9._:@|-]+$' }
+    Epoch:
+      name: epoch
+      in: query
+      description: Season to read; defaults to the counter's current epoch. Past seasons stay readable after clear.
+      schema: { type: integer, format: int64 }
+
+  schemas:
+    Amount:
+      type: string
+      pattern: '^[0-9]+$'
+      description: Non-negative integer magnitude, arbitrary precision, as a decimal-digit string.
+      examples: ['1', '42', '100000000000000000000000']
+    Value:
+      type: string
+      pattern: '^-?[0-9]+$'
+      description: Signed integer counter value, arbitrary precision, as a string.
+      examples: ['0', '-5', '999999999999999999999999999']
+    AmountRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount: { $ref: '#/components/schemas/Amount' }
+        occurredAt:
+          type: string
+          format: date-time
+          description: |
+            Optional event time. When set, the operation is bucketed into the time series at this
+            instant instead of ingest time (for offline spools flushing late). Bounded: at most 5
+            minutes in the future and no older than the plan's retention window (400 otherwise).
+            Totals are unaffected — only series bucketing.
+    Counter:
+      type: object
+      required: [key, value, epoch]
+      properties:
+        key: { type: string }
+        value: { $ref: '#/components/schemas/Value' }
+        epoch:
+          type: integer
+          description: Incremented by clear; the value sums deltas in the current epoch.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ValueResponse:
+      type: object
+      required: [key, value, epoch]
+      properties:
+        key: { type: string }
+        value: { $ref: '#/components/schemas/Value' }
+        epoch: { type: integer }
+    DashboardPlaneToken:
+      type: object
+      required: [token, plane_base_url, expires_at]
+      properties:
+        token:
+          type: string
+          description: Ed25519-signed `dt_` token scoped to one org, one plane, and read-only dashboard access.
+        plane_base_url:
+          type: string
+          format: uri
+          description: Origin root for the target data plane.
+        expires_at:
+          type: string
+          format: date-time
+          description: Token expiry; at most 10 minutes after issue time.
+    DashboardUsage:
+      type: object
+      required: [month, opsUsed, opsQuota]
+      properties:
+        month: { type: string, description: 'UTC month, e.g. "2026-07".' }
+        opsUsed: { type: integer, description: Write ops recorded this UTC month. }
+        opsQuota:
+          type: [integer, 'null']
+          description: Monthly op ceiling; null for unlimited plans.
+    CounterPage:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Counter' }
+        nextCursor:
+          type: string
+          description: Present when more results exist.
+    SeriesResponse:
+      type: object
+      required: [counterKey, bucket, mode, range, points]
+      properties:
+        counterKey: { type: string }
+        bucket: { type: string }
+        mode: { type: string, enum: [delta] }
+        tz: { type: string }
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/SeriesPoint' }
+    SeriesPoint:
+      type: object
+      required: [t, v]
+      properties:
+        t: { type: string, format: date-time, description: Bucket start (inclusive). }
+        v: { $ref: '#/components/schemas/Value' }
+    DecimalValue:
+      type: string
+      nullable: true
+      pattern: '^-?[0-9]+(\.[0-9]+)?$'
+      description: |
+        Signed decimal value, arbitrary precision, as a string (e.g. a ratio). `null` when the
+        expression divided by zero. Distinct from `Value`, which is integer-only.
+      examples: ['0', '0.052337', '-3.5']
+    DerivedValueResponse:
+      type: object
+      required: [key, value, scale, inputs]
+      properties:
+        key: { type: string }
+        value: { $ref: '#/components/schemas/DecimalValue' }
+        scale:
+          type: integer
+          description: Decimal places the value is rounded to (HALF_UP), fixed per definition.
+        inputs:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/Value' }
+          description: Each referenced counter's current value (integer string); a missing/deleted counter reads as "0".
+        reason:
+          type: string
+          description: Present only when `value` is null (e.g. "division by zero").
+    DerivedSeriesPoint:
+      type: object
+      required: [t, v]
+      properties:
+        t: { type: string, format: date-time, description: Bucket start (inclusive). }
+        v: { $ref: '#/components/schemas/DecimalValue' }
+    DerivedSeriesResponse:
+      type: object
+      required: [key, bucket, scale, range, points]
+      properties:
+        key: { type: string }
+        bucket: { type: string }
+        tz: { type: string }
+        scale: { type: integer }
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/DerivedSeriesPoint' }
+    Operation:
+      type: object
+      required: [counterKey, op]
+      description: |
+        `amount` is required for add/subtract and ignored for clear/delete. When `member` is set, an
+        add/subtract becomes a delta member write and delete becomes a member removal. `op: submit`
+        requires `member` and `value` and targets an already-configured score board.
+      properties:
+        counterKey: { type: string }
+        op: { type: string, enum: [add, subtract, clear, delete, submit] }
+        amount: { $ref: '#/components/schemas/Amount' }
+        member:
+          type: string
+          maxLength: 256
+          pattern: '^[A-Za-z0-9._:@|-]+$'
+          description: Member key; turns the op into a member-attributed write.
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        value: { $ref: '#/components/schemas/Value' }
+        idempotencyKey: { type: string, maxLength: 255 }
+        occurredAt:
+          type: string
+          format: date-time
+          description: Optional event time for series bucketing (see AmountRequest.occurredAt).
+    BatchRequest:
+      type: object
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/Operation' }
+    BatchResult:
+      type: object
+      required: [counterKey, status]
+      properties:
+        counterKey: { type: string }
+        status: { type: string, enum: [applied, deduplicated, error] }
+        value: { $ref: '#/components/schemas/Value' }
+        error: { $ref: '#/components/schemas/Problem' }
+        memberValue: { $ref: '#/components/schemas/Value' }
+        memberAccepted:
+          type: boolean
+          description: False when a min/max submit kept the standing best (absent for non-submit ops).
+    BatchResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchResult' }
+    Metadata:
+      type: string
+      maxLength: 1024
+      description: |
+        Opaque, client-parsed per-entry payload, stored and returned verbatim. Capped at 1024 UTF-8
+        bytes (the server counts bytes, not characters). Rides accepted values only.
+    Mode:
+      type: string
+      enum: [sum, latest, min, max]
+      description: |
+        Board aggregation mode. `sum` accumulates deltas (fully counter-integrated); `latest`/`min`/`max`
+        submit replace/keep-best scores. Set by the first member write, then immutable.
+    MemberAmountRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount: { $ref: '#/components/schemas/Amount' }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        occurredAt:
+          type: string
+          format: date-time
+          description: Optional event time for series bucketing (see AmountRequest.occurredAt).
+    SubmitRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { $ref: '#/components/schemas/Value' }
+        mode: { $ref: '#/components/schemas/Mode' }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        occurredAt:
+          type: string
+          format: date-time
+          description: Optional event time for series bucketing (see AmountRequest.occurredAt).
+    MemberValue:
+      type: object
+      required: [key, member, memberValue, memberAccepted, mode, epoch]
+      properties:
+        key: { type: string }
+        member: { type: string }
+        memberValue: { $ref: '#/components/schemas/Value' }
+        memberAccepted:
+          type: boolean
+          description: False when a min/max submit kept the standing best.
+        mode: { $ref: '#/components/schemas/Mode' }
+        epoch: { type: integer, format: int64 }
+        value:
+          $ref: '#/components/schemas/Value'
+    MemberRemoved:
+      type: object
+      required: [key, member, epoch]
+      properties:
+        key: { type: string }
+        member: { type: string }
+        epoch: { type: integer, format: int64 }
+        value:
+          $ref: '#/components/schemas/Value'
+    MemberSnapshot:
+      type: object
+      required: [key, member, value, rank, percentile, memberCount, mode, epoch, updatedAt]
+      properties:
+        key: { type: string }
+        member: { type: string }
+        value: { $ref: '#/components/schemas/Value' }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        rank: { type: integer, format: int64, description: 'Competition rank (ties share; next skips: 1,2,2,4).' }
+        percentile:
+          type: string
+          pattern: '^-?[0-9]+\.[0-9]{2}$'
+          description: Share of members at-or-behind, scale 2 (e.g. "83.33"); leader and sole member read "100.00".
+        memberCount: { type: integer }
+        mode: { $ref: '#/components/schemas/Mode' }
+        epoch: { type: integer, format: int64 }
+        updatedAt: { type: string, format: date-time }
+    LeaderboardEntry:
+      type: object
+      required: [rank, member, value, updatedAt]
+      properties:
+        rank: { type: integer, format: int64 }
+        member: { type: string }
+        value: { $ref: '#/components/schemas/Value' }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        updatedAt: { type: string, format: date-time }
+    Leaderboard:
+      type: object
+      required: [key, mode, epoch, order, memberCount, limit, offset, entries]
+      properties:
+        key: { type: string }
+        mode: { $ref: '#/components/schemas/Mode' }
+        epoch: { type: integer, format: int64 }
+        order: { type: string, enum: [asc, desc] }
+        total:
+          $ref: '#/components/schemas/Value'
+        memberCount: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/LeaderboardEntry' }
+    Usage:
+      type: object
+      required: [month, ops, counters, limits]
+      description: Current quota state for the organization (see GET /usage).
+      properties:
+        month: { type: string, description: 'UTC month, e.g. "2026-07".' }
+        ops:
+          type: object
+          required: [used, resetsAt]
+          properties:
+            used: { type: integer, description: Write ops recorded this UTC month. }
+            quota:
+              type: [integer, 'null']
+              description: Monthly op ceiling; null for unlimited plans.
+            resetsAt:
+              type: string
+              format: date-time
+              description: First instant of the next UTC month; present even when quota is null.
+        counters:
+          type: object
+          required: [used, max]
+          properties:
+            used: { type: integer, description: Live (non-deleted) counters in the org. }
+            max: { type: integer, description: Counter cap for the plan. }
+        limits:
+          type: object
+          required: [rateLimitRps, maxCounters]
+          properties:
+            rateLimitRps: { type: integer }
+            maxCounters: { type: integer }
+            monthlyOpsQuota:
+              type: [integer, 'null']
+              description: Monthly op ceiling; null for unlimited plans.
+    MemberSeriesResponse:
+      type: object
+      description: >-
+        One member's per-bucket series (dimensional member series). On a sum board each point is the
+        bucket's signed delta sum; on a score board it is the bucket-best (`min`/`max`) or bucket-latest
+        (`latest`) value. Score-board points are sparse — an empty bucket means "no submission", not
+        zero, and `gapfill=true` is rejected (400); clients wanting a running best compute a cumulative
+        min/max over the sparse points client-side.
+      required: [counterKey, member, bucket, mode, range, points]
+      properties:
+        counterKey: { type: string }
+        member: { type: string }
+        bucket: { type: string }
+        mode:
+          type: string
+          enum: [delta, min, max, latest]
+          description: >-
+            The point value-type. `delta` on a sum board (per-bucket delta); on a score board the board
+            mode (`min`/`max`/`latest`), telling clients how to read each bucket's value.
+        tz: { type: string }
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/SeriesPoint' }
+    MemberSeriesEntry:
+      type: object
+      required: [member, points]
+      properties:
+        member: { type: string }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/SeriesPoint' }
+    MemberGroupSeriesResponse:
+      type: object
+      description: >-
+        Per-member multi-series (`groupBy=member`). Sum boards are gapfilled dense; score boards return
+        sparse per-member point lists (same rule as the single-member score series — a gap is "no
+        submission", not zero).
+      required: [counterKey, bucket, mode, range, series]
+      properties:
+        counterKey: { type: string }
+        bucket: { type: string }
+        mode:
+          type: string
+          enum: [delta, min, max, latest]
+          description: >-
+            The point value-type: `delta` on a sum board, else the board mode (`min`/`max`/`latest`).
+        tz: { type: string }
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        series:
+          type: array
+          items: { $ref: '#/components/schemas/MemberSeriesEntry' }
+    WindowEntry:
+      type: object
+      required: [rank, member, value]
+      properties:
+        rank: { type: integer, format: int64 }
+        member: { type: string }
+        value: { $ref: '#/components/schemas/Value' }
+    WindowLeaderboard:
+      type: object
+      description: >-
+        Members ranked by their activity over a trailing window. Sum boards rank the window-sum; score
+        boards rank the window-best (`min`/`max`) or window-latest (`latest`) value. Default `order`
+        follows the board mode — `asc` for `min` (fastest-first), `desc` otherwise; an explicit `order`
+        overrides. `total` is non-null on sum boards only (`null` on score boards, mirroring the
+        all-time `Leaderboard`).
+      required: [key, mode, window, order, memberCount, limit, offset, effectiveStart, effectiveEnd, entries]
+      properties:
+        key: { type: string }
+        mode: { type: string, enum: [sum, min, max, latest] }
+        window: { type: string, enum: ['1h', '6h', '12h', '1d', '7d', '30d'] }
+        order: { type: string, enum: [asc, desc] }
+        total:
+          oneOf:
+            - $ref: '#/components/schemas/Value'
+            - type: 'null'
+          description: Window group total (window sum of counter_rollup) — the value on sum boards, `null` on score boards.
+        memberCount: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        effectiveStart:
+          type: string
+          format: date-time
+          description: >-
+            The effective lower bound actually summed, floored to the 1h member-rollup storage boundary
+            so `entries` and `total` cover the identical range. May be earlier than `now − window`.
+        effectiveEnd:
+          type: string
+          format: date-time
+          description: The effective upper bound actually summed (the request instant).
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/WindowEntry' }
+    Problem:
+      type: object
+      description: Error details, per RFC 9457 (application/problem+json).
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+    QuotaProblem:
+      description: |
+        A quota (403) problem. Extends Problem with RFC 9457 extension members telling a machine caller
+        exactly where it stands. Members are optional — old Problem consumers keep parsing these bodies.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          properties:
+            limit: { type: integer, description: The entitlement ceiling that was hit. }
+            used: { type: integer, description: Current usage against that ceiling. }
+            resetsAt:
+              type: string
+              format: date-time
+              description: When the usage resets (time-windowed quotas only, e.g. monthly ops).
+
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Counter not found.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: The request exceeds the plan's entitlements, or the credential lacks full access.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    QuotaExceeded:
+      description: A plan limit was reached (e.g. maximum counters or the monthly ops quota).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/QuotaProblem' }
+    RateLimited:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: >-
+        The `Idempotency-Key` was first used for a different operation; replaying it here would return a
+        result this operation never produced. Retry with a fresh key (or the operation the key belongs to).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }

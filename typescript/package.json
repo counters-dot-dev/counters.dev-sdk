@@ -1,0 +1,24 @@
+{
+  "name": "@counters.dev/sdk",
+  "version": "0.1.0",
+  "description": "Counters — arbitrary-precision counter service. Official TypeScript SDK.",
+  "homepage": "https://counters.dev",
+  "repository": { "type": "git", "url": "git+https://github.com/counters-dot-dev/counters.dev-sdk.git", "directory": "typescript" },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^3.0.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}

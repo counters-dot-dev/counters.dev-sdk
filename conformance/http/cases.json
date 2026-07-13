@@ -1,0 +1,371 @@
+{
+  "description": "Stateful HTTP interaction cases. See conformance/http/README.md for the schema, the op->HTTP mapping, and runner rules (key namespacing, org labels, relative times).",
+  "cases": [
+    {
+      "name": "add-then-value",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "basic", "amount": "5" }, "expect": { "status": 200, "key": "basic", "value": "5", "epoch": 0 } },
+        { "do": { "org": "A", "op": "value", "key": "basic" }, "expect": { "status": 200, "key": "basic", "value": "5", "epoch": 0 } }
+      ]
+    },
+    {
+      "name": "add-accumulates",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "acc", "amount": "5" }, "expect": { "status": 200, "value": "5" } },
+        { "do": { "org": "A", "op": "add", "key": "acc", "amount": "7" }, "expect": { "status": 200, "value": "12" } },
+        { "do": { "org": "A", "op": "value", "key": "acc" }, "expect": { "status": 200, "value": "12" } }
+      ]
+    },
+    {
+      "name": "subtract-goes-negative",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "subtract", "key": "neg", "amount": "7" }, "expect": { "status": 200, "value": "-7" } },
+        { "do": { "org": "A", "op": "value", "key": "neg" }, "expect": { "status": 200, "value": "-7" } }
+      ]
+    },
+    {
+      "name": "amount-zero-applies",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "zero", "amount": "0" }, "expect": { "status": 200, "value": "0", "epoch": 0 } }
+      ]
+    },
+    {
+      "name": "u64-boundary-crossing",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "u64", "amount": "18446744073709551615" }, "expect": { "status": 200, "value": "18446744073709551615" } },
+        { "do": { "org": "A", "op": "add", "key": "u64", "amount": "1" }, "expect": { "status": 200, "value": "18446744073709551616" } },
+        { "do": { "org": "A", "op": "value", "key": "u64" }, "expect": { "status": 200, "value": "18446744073709551616" } }
+      ]
+    },
+    {
+      "name": "bignum-1e32-round-trip",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "big", "amount": "99999999999999999999999999999999" }, "expect": { "status": 200, "value": "99999999999999999999999999999999" } },
+        { "do": { "org": "A", "op": "add", "key": "big", "amount": "1" }, "expect": { "status": 200, "value": "100000000000000000000000000000000" } },
+        { "do": { "org": "A", "op": "value", "key": "big" }, "expect": { "status": 200, "value": "100000000000000000000000000000000" } }
+      ]
+    },
+    {
+      "name": "bignum-subtract-back-down",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "bigsub", "amount": "100000000000000000000000000000000" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "subtract", "key": "bigsub", "amount": "99999999999999999999999999999999" }, "expect": { "status": 200, "value": "1" } }
+      ]
+    },
+    {
+      "name": "clear-resets-and-bumps-epoch",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "clr", "amount": "5" }, "expect": { "status": 200, "value": "5", "epoch": 0 } },
+        { "do": { "org": "A", "op": "clear", "key": "clr" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "value", "key": "clr" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "add", "key": "clr", "amount": "3" }, "expect": { "status": 200, "value": "3", "epoch": 1 } }
+      ]
+    },
+    {
+      "name": "delete-tombstones",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "gone", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "delete", "key": "gone" }, "expect": { "status": 204 } },
+        { "do": { "org": "A", "op": "value", "key": "gone" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "clear", "key": "gone" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "delete", "key": "gone" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "add", "key": "gone", "amount": "1" }, "expect": { "status": 404 } }
+      ]
+    },
+    {
+      "name": "cross-tenant-isolation",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "B", "op": "add", "key": "secret", "amount": "9" }, "expect": { "status": 200, "value": "9" } },
+        { "do": { "org": "A", "op": "value", "key": "secret" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "clear", "key": "secret" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "delete", "key": "secret" }, "expect": { "status": 404 } },
+        { "do": { "org": "A", "op": "add", "key": "secret", "amount": "1" }, "expect": { "status": 200, "value": "1" } },
+        { "do": { "org": "B", "op": "value", "key": "secret" }, "expect": { "status": 200, "value": "9" } }
+      ]
+    },
+    {
+      "name": "occurredat-buckets-at-event-time",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "spool", "amount": "5", "occurredAtMin": -120 }, "expect": { "status": 200, "value": "5" } },
+        { "do": { "org": "A", "op": "add", "key": "spool", "amount": "3" }, "expect": { "status": 200, "value": "8" } },
+        { "do": { "org": "A", "op": "value", "key": "spool" }, "expect": { "status": 200, "value": "8" } },
+        { "do": { "org": "A", "op": "series", "key": "spool", "series": { "fromMin": -1440, "toMin": 60, "bucket": "1h" } }, "expect": { "status": 200, "pointsSum": "8", "pointsAtLeast": 2 } }
+      ]
+    },
+    {
+      "name": "series-gapfill-window",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "gap", "amount": "5", "occurredAtMin": -120 }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "series", "key": "gap", "series": { "fromMin": -300, "toMin": -30, "bucket": "1h", "gapfill": true } }, "expect": { "status": 200, "pointsSum": "5", "pointsAtLeast": 4 } },
+        { "do": { "org": "A", "op": "series", "key": "gap", "series": { "fromMin": -300, "toMin": -30, "bucket": "1h" } }, "expect": { "status": 200, "pointsSum": "5", "pointsAtLeast": 1 } }
+      ]
+    },
+    {
+      "name": "list-pagination-walk",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "pg-a", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "add", "key": "pg-b", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "add", "key": "pg-c", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "list", "list": { "limit": 2 } }, "expect": { "status": 200, "containsInOrder": ["pg-a", "pg-b", "pg-c"] } }
+      ]
+    },
+    {
+      "name": "encoded-key-characters",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "enc:a.b_c-d", "amount": "1" }, "expect": { "status": 200, "key": "enc:a.b_c-d", "value": "1" } },
+        { "do": { "org": "A", "op": "value", "key": "enc:a.b_c-d" }, "expect": { "status": 200, "value": "1" } }
+      ]
+    },
+    {
+      "name": "get-counter-metadata",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "meta", "amount": "41" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "get", "key": "meta" }, "expect": { "status": 200, "key": "meta", "value": "41", "epoch": 0 } },
+        { "do": { "org": "A", "op": "get", "key": "meta-missing" }, "expect": { "status": 404 } }
+      ]
+    },
+    {
+      "name": "problem-responses-use-problem-json",
+      "scope": "http",
+      "steps": [
+        {
+          "do": { "org": "A", "op": "add", "key": "problem-json", "amount": "-1" },
+          "expect": { "status": 400, "headers": { "Content-Type": "application/problem+json" } }
+        },
+        {
+          "do": { "org": "A", "op": "value", "key": "problem-json-missing" },
+          "expect": { "status": 404, "headers": { "Content-Type": "application/problem+json" } }
+        }
+      ]
+    },
+    {
+      "name": "single-op-idempotent-retry",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "retry", "amount": "5", "idempotencyKey": "retry-1" }, "expect": { "status": 200, "value": "5" } },
+        { "do": { "org": "A", "op": "add", "key": "retry", "amount": "5", "idempotencyKey": "retry-1" }, "expect": { "status": 200, "value": "5" } },
+        { "do": { "org": "A", "op": "value", "key": "retry" }, "expect": { "status": 200, "value": "5" } }
+      ]
+    },
+    {
+      "name": "clear-idempotent-retry-replays-same-epoch",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "clridem", "amount": "5" }, "expect": { "status": 200, "value": "5", "epoch": 0 } },
+        { "do": { "org": "A", "op": "clear", "key": "clridem", "idempotencyKey": "clr-1" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "add", "key": "clridem", "amount": "3" }, "expect": { "status": 200, "value": "3", "epoch": 1 } },
+        { "do": { "org": "A", "op": "clear", "key": "clridem", "idempotencyKey": "clr-1" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "value", "key": "clridem" }, "expect": { "status": 200, "value": "3", "epoch": 1 } }
+      ]
+    },
+    {
+      "name": "delete-idempotent-retry-replays-204",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "delidem", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "delete", "key": "delidem", "idempotencyKey": "del-1" }, "expect": { "status": 204 } },
+        { "do": { "org": "A", "op": "delete", "key": "delidem", "idempotencyKey": "del-1" }, "expect": { "status": 204 } },
+        { "do": { "org": "A", "op": "value", "key": "delidem" }, "expect": { "status": 404 } }
+      ]
+    },
+    {
+      "name": "cross-kind-idempotency-reuse-conflicts",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "xkind", "amount": "5", "idempotencyKey": "xk-1" }, "expect": { "status": 200, "value": "5", "epoch": 0 } },
+        { "do": { "org": "A", "op": "clear", "key": "xkind", "idempotencyKey": "xk-1" }, "expect": { "status": 409 } },
+        { "do": { "org": "A", "op": "value", "key": "xkind" }, "expect": { "status": 200, "value": "5", "epoch": 0 } },
+        { "do": { "org": "A", "op": "clear", "key": "xkind", "idempotencyKey": "xk-2" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "delete", "key": "xkind", "idempotencyKey": "xk-2" }, "expect": { "status": 409 } },
+        { "do": { "org": "A", "op": "value", "key": "xkind" }, "expect": { "status": 200, "value": "0", "epoch": 1 } }
+      ]
+    },
+    {
+      "name": "batch-mixed-operations",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "bz", "amount": "3" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "add", "key": "bdel", "amount": "1" }, "expect": { "status": 200 } },
+        {
+          "do": {
+            "org": "A", "op": "batch",
+            "batch": [
+              { "key": "bx", "op": "add", "amount": "5" },
+              { "key": "bx", "op": "subtract", "amount": "2" },
+              { "key": "bz", "op": "clear" },
+              { "key": "bdel", "op": "delete" }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "results": [
+              { "status": "applied", "value": "5" },
+              { "status": "applied", "value": "3" },
+              { "status": "applied", "value": "0" },
+              { "status": "applied" }
+            ]
+          }
+        },
+        { "do": { "org": "A", "op": "value", "key": "bx" }, "expect": { "status": 200, "value": "3", "epoch": 0 } },
+        { "do": { "org": "A", "op": "value", "key": "bz" }, "expect": { "status": 200, "value": "0", "epoch": 1 } },
+        { "do": { "org": "A", "op": "value", "key": "bdel" }, "expect": { "status": 404 } }
+      ]
+    },
+    {
+      "name": "batch-dedup-by-idempotency-key",
+      "scope": "http",
+      "steps": [
+        {
+          "do": {
+            "org": "A", "op": "batch",
+            "batch": [
+              { "key": "dd", "op": "add", "amount": "5", "idempotencyKey": "dd-1" },
+              { "key": "dd", "op": "add", "amount": "5", "idempotencyKey": "dd-1" }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "results": [
+              { "status": "applied", "value": "5" },
+              { "status": "deduplicated", "value": "5" }
+            ]
+          }
+        },
+        { "do": { "org": "A", "op": "value", "key": "dd" }, "expect": { "status": 200, "value": "5" } }
+      ]
+    },
+    {
+      "name": "batch-partial-error",
+      "scope": "http",
+      "steps": [
+        {
+          "do": {
+            "org": "A", "op": "batch",
+            "batch": [
+              { "key": "pe", "op": "add", "amount": "1" },
+              { "key": "pe", "op": "add" }
+            ]
+          },
+          "expect": {
+            "status": 200,
+            "results": [
+              { "status": "applied", "value": "1" },
+              { "status": "error", "errorStatus": 400 }
+            ]
+          }
+        },
+        { "do": { "org": "A", "op": "value", "key": "pe" }, "expect": { "status": 200, "value": "1" } }
+      ]
+    },
+    {
+      "name": "usage-counts-ops",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "add", "key": "use-a", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "add", "key": "use-b", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "add", "key": "use-c", "amount": "1" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "usage" }, "expect": { "status": 200, "usage": { "opsUsedAtLeast": 3, "countersUsedAtLeast": 1, "hasResetsAt": true } } }
+      ]
+    },
+    {
+      "name": "usage-requires-full-key",
+      "scope": "http",
+      "steps": [
+        { "do": { "org": "A", "op": "usage", "auth": "pk" }, "expect": { "status": 403 } }
+      ]
+    },
+    {
+      "name": "leaderboard-sum-board-ranks-and-total",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "memberAdd", "key": "lb", "member": "alice", "amount": "10" }, "expect": { "status": 200, "memberValue": "10", "memberAccepted": true, "mode": "sum", "epoch": 0, "value": "10" } },
+        { "do": { "org": "A", "op": "memberAdd", "key": "lb", "member": "bob", "amount": "25" }, "expect": { "status": 200, "memberValue": "25", "value": "35" } },
+        { "do": { "org": "A", "op": "memberAdd", "key": "lb", "member": "carol", "amount": "10" }, "expect": { "status": 200, "memberValue": "10", "value": "45" } },
+        { "do": { "org": "A", "op": "add", "key": "lb", "amount": "5" }, "expect": { "status": 200, "value": "50" } },
+        {
+          "do": { "org": "A", "op": "leaderboard", "key": "lb" },
+          "expect": {
+            "status": 200, "mode": "sum", "epoch": 0, "order": "desc", "total": "50", "memberCount": 3,
+            "entries": [
+              { "rank": 1, "member": "bob", "value": "25" },
+              { "rank": 2, "member": "alice", "value": "10" },
+              { "rank": 2, "member": "carol", "value": "10" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "member-rank-percentile-snapshot",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "memberAdd", "key": "snap", "member": "alice", "amount": "10" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "memberAdd", "key": "snap", "member": "bob", "amount": "25" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "memberAdd", "key": "snap", "member": "carol", "amount": "10" }, "expect": { "status": 200 } },
+        { "do": { "org": "A", "op": "memberGet", "key": "snap", "member": "bob" }, "expect": { "status": 200, "value": "25", "rank": 1, "memberCount": 3, "percentile": "100.00", "mode": "sum", "epoch": 0 } },
+        { "do": { "org": "A", "op": "memberGet", "key": "snap", "member": "alice" }, "expect": { "status": 200, "value": "10", "rank": 2, "percentile": "66.67" } },
+        { "do": { "org": "A", "op": "memberGet", "key": "snap", "member": "carol" }, "expect": { "status": 200, "value": "10", "rank": 2, "percentile": "66.67" } }
+      ]
+    },
+    {
+      "name": "leaderboard-seasons-survive-clear",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "memberAdd", "key": "season", "member": "alice", "amount": "10" }, "expect": { "status": 200, "epoch": 0 } },
+        { "do": { "org": "A", "op": "clear", "key": "season" }, "expect": { "status": 200, "epoch": 1 } },
+        { "do": { "org": "A", "op": "leaderboard", "key": "season" }, "expect": { "status": 200, "epoch": 1, "memberCount": 0, "total": "0", "entries": [] } },
+        {
+          "do": { "org": "A", "op": "leaderboard", "key": "season", "epoch": 0 },
+          "expect": { "status": 200, "epoch": 0, "memberCount": 1, "total": "10", "entries": [ { "rank": 1, "member": "alice", "value": "10" } ] }
+        }
+      ]
+    },
+    {
+      "name": "member-removal-adjusts-total",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "memberAdd", "key": "rm", "member": "alice", "amount": "10" }, "expect": { "status": 200, "value": "10" } },
+        { "do": { "org": "A", "op": "memberAdd", "key": "rm", "member": "bob", "amount": "15" }, "expect": { "status": 200, "value": "25" } },
+        { "do": { "org": "A", "op": "memberRemove", "key": "rm", "member": "alice" }, "expect": { "status": 200, "value": "15", "epoch": 0 } },
+        { "do": { "org": "A", "op": "leaderboard", "key": "rm" }, "expect": { "status": 200, "total": "15", "memberCount": 1, "entries": [ { "rank": 1, "member": "bob", "value": "15" } ] } },
+        { "do": { "org": "A", "op": "memberGet", "key": "rm", "member": "alice" }, "expect": { "status": 404 } }
+      ]
+    },
+    {
+      "name": "score-board-min-keeps-best-with-metadata",
+      "scope": "all",
+      "steps": [
+        { "do": { "org": "A", "op": "memberSubmit", "key": "raid", "member": "alice|bob|carol", "value": "1502", "mode": "min", "metadata": "room1:500" }, "expect": { "status": 200, "memberValue": "1502", "memberAccepted": true, "mode": "min", "epoch": 0 } },
+        { "do": { "org": "A", "op": "memberSubmit", "key": "raid", "member": "alice|bob|carol", "value": "1417", "mode": "min", "metadata": "room1:400" }, "expect": { "status": 200, "memberValue": "1417", "memberAccepted": true } },
+        { "do": { "org": "A", "op": "memberSubmit", "key": "raid", "member": "alice|bob|carol", "value": "1600", "mode": "min", "metadata": "room1:999" }, "expect": { "status": 200, "memberValue": "1417", "memberAccepted": false } },
+        { "do": { "org": "A", "op": "memberGet", "key": "raid", "member": "alice|bob|carol" }, "expect": { "status": 200, "value": "1417", "metadata": "room1:400", "rank": 1, "memberCount": 1, "percentile": "100.00", "mode": "min", "epoch": 0 } },
+        { "do": { "org": "A", "op": "memberSubmit", "key": "raid", "member": "dan", "value": "1300", "mode": "min" }, "expect": { "status": 200, "memberValue": "1300", "memberAccepted": true } },
+        {
+          "do": { "org": "A", "op": "leaderboard", "key": "raid" },
+          "expect": {
+            "status": 200, "mode": "min", "order": "asc", "memberCount": 2,
+            "entries": [
+              { "rank": 1, "member": "dan", "value": "1300" },
+              { "rank": 2, "member": "alice|bob|carol", "value": "1417", "metadata": "room1:400" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

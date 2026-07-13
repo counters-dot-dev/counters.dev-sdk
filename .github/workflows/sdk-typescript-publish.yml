@@ -1,0 +1,112 @@
+name: sdk-typescript-publish
+
+# Publishes the TypeScript SDK (@counters.dev/sdk) to npm on a release tag like `ts-v0.1.0`.
+# Publishing is currently ON HOLD — no release tag is pushed yet. Requires the NPM_TOKEN repo
+# secret: a Granular Access Token scoped to `@counters.dev/*`. Release tags are packaged
+# without credentials first; the credentialed job only publishes the downloaded tarball.
+on:
+  push:
+    tags: ["ts-v*"]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["typescript/package.json", ".github/workflows/sdk-typescript-publish.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: typescript
+
+jobs:
+  dry-run:
+    if: (github.event_name != 'push') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Example app - compile against the packaged surface
+        shell: bash
+        working-directory: typescript
+        run: |
+          npm ci
+          npm run build
+          cd examples/e2e
+          npm install --no-fund --no-audit
+          node --check main.mjs
+      - name: Publish dry-run (pack only, no upload)
+        run: npm publish --dry-run --access public
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag source
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD^{commit})"
+          if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid release source sha: $source_sha" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "$source_sha" origin/main
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Example app - compile against the packaged surface
+        shell: bash
+        working-directory: typescript
+        run: |
+          npm ci
+          npm run build
+          cd examples/e2e
+          npm install --no-fund --no-audit
+          node --check main.mjs
+      - name: Pack release tarball
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk-typescript-package
+          path: typescript/artifacts/*.tgz
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sdk-typescript-package
+          path: artifacts
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish downloaded tarball to npm
+        working-directory: .
+        run: npm publish artifacts/*.tgz --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
