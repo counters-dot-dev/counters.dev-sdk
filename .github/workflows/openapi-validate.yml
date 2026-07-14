@@ -3,10 +3,10 @@ name: openapi-validate
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", ".github/workflows/openapi-validate.yml"]
+    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", "tools/spec-lint/**", ".github/workflows/openapi-validate.yml"]
   push:
     branches: [main]
-    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", ".github/workflows/openapi-validate.yml"]
+    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", "tools/spec-lint/**", ".github/workflows/openapi-validate.yml"]
 
 permissions:
   contents: read
@@ -21,10 +21,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/spec-lint/package-lock.json
+      - name: Install the pinned Spectral toolchain
+        shell: bash
+        run: npm ci --no-audit --no-fund --prefix tools/spec-lint
       - name: Spectral lint (spec hygiene)
         id: spectral
         shell: bash
-        run: npx --yes @stoplight/spectral-cli@6 lint openapi/openapi.yaml --ruleset .spectral.yaml --fail-severity=warn 2>&1 | tee /tmp/spectral.log
+        run: tools/spec-lint/node_modules/.bin/spectral lint openapi/openapi.yaml --ruleset .spectral.yaml --fail-severity=warn 2>&1 | tee /tmp/spectral.log
       - name: SDK drift guard (hand-written clients vs spec operations)
         id: drift
         if: always() # report drift even when spectral failed — both results belong on the PR
