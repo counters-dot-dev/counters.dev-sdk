@@ -8,8 +8,8 @@ Official TypeScript SDK for [counters.dev](https://counters.dev), the
   `Idempotency-Key`, so retries are safe.
 - Amounts and values are **arbitrary precision**: `bigint` internally, **strings on the wire**. The
   SDK never represents a counter value as a JS `number`. Decimal (derived) values stay strings too.
-- Response timestamps (`createdAt`, `updatedAt`, and series point `timestamp`) are native JavaScript
-  `Date` values.
+- Every timestamp on the typed machine-SDK surface is a native JavaScript `Date`, including series
+  bounds and points, usage resets, and window-leaderboard boundaries.
 - This is the **reference SDK** — the dashboard dogfoods it and the other language SDKs mirror its shape.
 
 ## The mental model
@@ -86,7 +86,7 @@ Two kinds of write, deliberately:
   coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
   give `batch.onError` a sink or they are silent. Its argument is `CountersError`, so the same three
   `instanceof` checks below apply. Call `close()` before exit.
-- **Immediate** — `addNow`/`subtractNow` (pass `occurredAt` to stamp an event time for
+- **Immediate** — `addNow`/`subtractNow` (pass a `Date` as `occurredAt` to stamp an event time for
   late-arriving data). One request now, returning the new state. Every write carries a fresh
   idempotency key, so retries never double-count.
 
@@ -98,17 +98,18 @@ this SDK against a live server — it is the fastest way to see the whole surfac
 A series is the **per-bucket delta**: how much the counter changed in each bucket of `[from, to)`,
 not a running total. `bucket` is one of `1m | 5m | 1h | 1d | 1w | 1mo` (finer buckets are
 plan-gated server-side). Empty buckets are omitted unless `gapfill: true` — treat a missing bucket
-as zero. `tz` sets an IANA timezone so calendar buckets (`1d`, `1w`, `1mo`) break on local
-boundaries.
+as zero. `timeZone` sets an IANA time zone so calendar buckets (`1d`, `1w`, `1mo`) break on local
+boundaries. Request bounds and the returned `range` are `Date` values.
 
 ```ts
 const series = await registrations.series({
-  from: "2026-07-04T00:00:00Z", // or a Date
-  to: "2026-07-05T00:00:00Z",
+  from: new Date("2026-07-04T00:00:00Z"),
+  to: new Date("2026-07-05T00:00:00Z"),
   bucket: "1h",
-  tz: "Europe/London", // optional
+  timeZone: "Europe/London", // optional; encoded as `tz` on the wire
   gapfill: true, // optional
 });
+console.log(series.range.from.toISOString(), series.range.to.toISOString());
 for (const point of series.points) {
   console.log(point.timestamp.toISOString(), point.value); // Date + arbitrary-precision string
 }
@@ -149,10 +150,11 @@ console.log(r.memberAccepted); // false when the standing best was better
 
 // Windowed leaderboard: rank trailing-window activity, not all-time standing.
 const windowed = await board.leaderboard({ window: "7d" }); // 1h | 6h | 12h | 1d | 7d | 30d
+console.log(windowed.effectiveStart.toISOString(), windowed.effectiveEnd.toISOString());
 ```
 
 Member writes carry optional `metadata` (≤ 1024 **UTF-8 bytes** — byte-counted, validated
-client-side) and `occurredAt`.
+client-side) and `occurredAt` (a `Date`).
 
 ## Derived counters
 
@@ -163,13 +165,16 @@ everything above:
 - It is **decimal**, not integer — the result is rounded to a fixed `scale`.
 - Its value can be **null**. Division by zero does not throw and is not `"0"`; the SDK gives you
   `value: null` with a human-readable `reason`. Handle the null. In a series, a bucket that divided
-  by zero is a `v: null` hole preserved in place.
+  by zero is a `value: null` hole preserved in place.
 
 ```ts
 const conversion = client.derived("conversion");
 const v = await conversion.value(); // { value: string | null, scale, inputs, reason? }
 if (v.value === null) console.warn(v.reason); // e.g. "division by zero" — never coerced to "0"
-const ds = await conversion.series({ from, to, bucket: "1d" }); // points: { t, v: string | null }[]
+const ds = await conversion.series({ from, to, bucket: "1d" });
+for (const point of ds.points) {
+  console.log(point.timestamp.toISOString(), point.value); // value is string | null
+}
 ```
 
 Derived values are **signed decimals as strings** — never parse them with `Number()`/`parseFloat()`
@@ -194,8 +199,10 @@ make retried writes safe.
 
 ## Odds and ends
 
-- **Usage**: `client.usage()` returns month-to-date ops, quota, reset instant, and counter
-  headroom. Poll it periodically, not per write.
+- **Usage**: `client.usage()` returns month-to-date `operations`, quota, a native-Date reset instant,
+  and counter headroom. Poll it periodically, not per write. The public names expand the compact
+  wire keys: `usage.operations.resetsAt.toISOString()`,
+  `usage.limits.rateLimitRequestsPerSecond`, and `usage.limits.monthlyOperationsQuota`.
 - **Publishable tokens**: construct `PublishableCountersClient` with a scoped, read-only `pk_` token
   for browser-safe values, series, leaderboards, and member snapshots. Its handles do not expose
   writes, organization-wide listing/usage, derived counters, or a write buffer, so those calls fail

@@ -21,7 +21,7 @@ describe("Batcher coalescing", () => {
     await b.flush();
     expect(batches).toHaveLength(1);
     expect(batches[0]).toHaveLength(1);
-    expect(batches[0]![0]).toMatchObject({ counterKey: "c", op: "add", amount: "6" });
+    expect(batches[0]![0]).toMatchObject({ counterKey: "c", operation: "add", amount: "6" });
     expect(batches[0]![0]!.idempotencyKey).toBeTruthy();
   });
 
@@ -31,7 +31,7 @@ describe("Batcher coalescing", () => {
     b.enqueue("c", 10n);
     b.enqueue("c", -3n);
     await b.flush();
-    expect(batches[0]![0]).toMatchObject({ op: "add", amount: "7" });
+    expect(batches[0]![0]).toMatchObject({ operation: "add", amount: "7" });
   });
 
   it("emits a subtract when the net is negative", async () => {
@@ -40,7 +40,7 @@ describe("Batcher coalescing", () => {
     b.enqueue("c", 2n);
     b.enqueue("c", -9n);
     await b.flush();
-    expect(batches[0]![0]).toMatchObject({ op: "subtract", amount: "7" });
+    expect(batches[0]![0]).toMatchObject({ operation: "subtract", amount: "7" });
   });
 
   it("skips net-zero counters entirely", async () => {

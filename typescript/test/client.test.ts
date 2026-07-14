@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CountersClient, PublishableCountersClient } from "../src/client.js";
 import { CountersApiError, CountersError, CountersValidationError } from "../src/errors.js";
+import type { Operation } from "../src/types.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
 describe("CountersClient", () => {
@@ -51,8 +52,8 @@ describe("CountersClient", () => {
     expect(counter.key).toBe("views");
     expect((await counter.value()).value).toBe("7");
     const series = await counter.series({
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-01T01:00:00Z",
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-01T01:00:00Z"),
       bucket: "1h",
     });
     expect(series.points[0]).toEqual({
@@ -91,6 +92,35 @@ describe("CountersClient", () => {
       op: "add",
       amount: "6",
     });
+  });
+
+  it("maps ergonomic batch operation fields to the compact wire shape", async () => {
+    let body!: { operations: Record<string, unknown>[] };
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch((_url, init) => {
+        body = JSON.parse(init.body as string) as typeof body;
+        return jsonResponse(200, { results: [] });
+      }),
+      batch: { intervalMs: 0 },
+    });
+    const operation: Operation = {
+      counterKey: "registrations",
+      operation: "add",
+      amount: "1",
+      occurredAt: new Date("2026-07-01T12:00:00Z"),
+    };
+    await (
+      c as unknown as { submitBatch(operations: Operation[]): Promise<void> }
+    ).submitBatch([operation]);
+    expect(body.operations[0]).toEqual({
+      counterKey: "registrations",
+      op: "add",
+      amount: "1",
+      occurredAt: "2026-07-01T12:00:00.000Z",
+    });
+    expect(body.operations[0]).not.toHaveProperty("operation");
   });
 
   it("addNow forwards occurredAt for event-time bucketing", async () => {
@@ -157,31 +187,45 @@ describe("CountersClient", () => {
         counterKey: "c",
         bucket: "1h",
         mode: "delta",
-        range: { from: "", to: "" },
+        tz: "Europe/London",
+        range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" },
         points: [],
       });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     await c.counter("c").series({
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-02T00:00:00Z",
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
       bucket: "1h",
-      tz: "Europe/London",
+      timeZone: "Europe/London",
     });
     expect(url.pathname).toBe("/v1/counters/c/series");
     expect(url.searchParams.get("bucket")).toBe("1h");
-    expect(url.searchParams.get("from")).toBe("2026-01-01T00:00:00Z");
+    expect(url.searchParams.get("from")).toBe("2026-01-01T00:00:00.000Z");
     expect(url.searchParams.get("tz")).toBe("Europe/London");
+    const result = await c.counter("c").series({
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
+      bucket: "1h",
+    });
+    expect(result.timeZone).toBe("Europe/London");
+    expect(result.range.from).toBeInstanceOf(Date);
+    expect(result.range.to.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+    expect(result).not.toHaveProperty("tz");
   });
 
   it("omits gapfill when false, sends it only when true", async () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" }, points: [] });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
-    const base = { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z", bucket: "1d" } as const;
+    const base = {
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
+      bucket: "1d",
+    } as const;
 
     // omit-when-false: an explicit gapfill:false must not put gapfill=false on the wire.
     await c.counter("c").series({ ...base, gapfill: false });
@@ -194,11 +238,11 @@ describe("CountersClient", () => {
     expect(url.searchParams.get("gapfill")).toBe("true");
   });
 
-  it("accepts a Date for series bounds", async () => {
+  it("serializes native Date series bounds", async () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" }, points: [] });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     await c.counter("c").series({ from: new Date("2026-01-01T00:00:00Z"), to: new Date("2026-01-02T00:00:00Z"), bucket: "1d" });

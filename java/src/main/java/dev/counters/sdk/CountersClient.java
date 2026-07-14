@@ -3,7 +3,6 @@ package dev.counters.sdk;
 import java.math.BigInteger;
 import java.net.http.HttpClient;
 import java.time.Instant;
-import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -124,10 +123,10 @@ public final class CountersClient implements ReadOnlyCountersClient {
         });
     }
 
-    Counter applyNow(String key, String op, BigInteger amount, OffsetDateTime occurredAt) {
+    Counter applyNow(String key, String op, BigInteger amount, Instant occurredAt) {
         Map<String, String> body = new LinkedHashMap<>();
         body.put("amount", amount.toString());
-        if (occurredAt != null) body.put("occurredAt", rfc3339Utc(occurredAt));
+        if (occurredAt != null) body.put("occurredAt", occurredAt.toString());
         Object res = http.request(
                 "POST", "/counters/" + Http.encodePathSegment(key) + "/" + op, body, Idempotency.newKey(), null);
         return toCounter(asMap(res));
@@ -221,7 +220,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
         body.put("amount", amount.toString());
         if (opts != null) {
             if (opts.metadata() != null) body.put("metadata", opts.metadata());
-            if (opts.occurredAt() != null) body.put("occurredAt", rfc3339Utc(opts.occurredAt()));
+            if (opts.occurredAt() != null) body.put("occurredAt", opts.occurredAt().toString());
         }
         Object res = http.request(
                 "POST",
@@ -239,7 +238,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
         if (opts != null) {
             if (opts.mode() != null) body.put("mode", opts.mode());
             if (opts.metadata() != null) body.put("metadata", opts.metadata());
-            if (opts.occurredAt() != null) body.put("occurredAt", rfc3339Utc(opts.occurredAt()));
+            if (opts.occurredAt() != null) body.put("occurredAt", opts.occurredAt().toString());
         }
         Object res = http.request(
                 "POST",
@@ -258,10 +257,10 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
     DerivedSeriesResponse getDerivedSeries(String key, DerivedSeriesParams params) {
         Map<String, String> query = new LinkedHashMap<>();
-        query.put("from", rfc3339Utc(params.from()));
-        query.put("to", rfc3339Utc(params.to()));
+        query.put("from", params.from().toString());
+        query.put("to", params.to().toString());
         query.put("bucket", params.bucket());
-        if (params.tz() != null) query.put("tz", params.tz());
+        if (params.timeZone() != null) query.put("tz", params.timeZone());
         Object res = http.request(
                 "GET", "/derived/" + Http.encodePathSegment(key) + "/series", null, null, query);
         return toDerivedSeries(asMap(res));
@@ -308,10 +307,6 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
     // ---- JSON mapping (tolerant of missing optional fields) ----
 
-    private static String rfc3339Utc(OffsetDateTime t) {
-        return t.toInstant().toString(); // RFC 3339, UTC, 'Z' suffix
-    }
-
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(Object o) {
         if (o instanceof Map) return (Map<String, Object>) o;
@@ -348,11 +343,11 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
     private static Map<String, String> seriesQuery(SeriesParams params) {
         Map<String, String> query = new LinkedHashMap<>();
-        query.put("from", rfc3339Utc(params.from()));
-        query.put("to", rfc3339Utc(params.to()));
+        query.put("from", params.from().toString());
+        query.put("to", params.to().toString());
         query.put("bucket", params.bucket());
         if (params.mode() != null) query.put("mode", params.mode());
-        if (params.tz() != null) query.put("tz", params.tz());
+        if (params.timeZone() != null) query.put("tz", params.timeZone());
         if (Boolean.TRUE.equals(params.gapfill())) query.put("gapfill", "true");
         return query;
     }
@@ -386,7 +381,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
             points.add(new SeriesPoint(instant(pm, "t"), str(pm, "v")));
         }
         return new SeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "mode"), str(m, "tz"),
-                new SeriesResponse.Range(str(range, "from"), str(range, "to")), List.copyOf(points));
+                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(points));
     }
 
     private static Usage toUsage(Map<String, Object> m) {
@@ -395,7 +390,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
         Map<String, Object> limits = m.get("limits") instanceof Map ? asMap(m.get("limits")) : Map.of();
         return new Usage(
                 str(m, "month"),
-                new Usage.Ops(longVal(ops, "used"), nullableLong(ops, "quota"), str(ops, "resetsAt")),
+                new Usage.Operations(longVal(ops, "used"), nullableLong(ops, "quota"), instant(ops, "resetsAt")),
                 new Usage.Counters(longVal(counters, "used"), longVal(counters, "max")),
                 new Usage.Limits(
                         longVal(limits, "rateLimitRps"),
@@ -437,8 +432,8 @@ public final class CountersClient implements ReadOnlyCountersClient {
                 longVal(m, "memberCount"),
                 longVal(m, "limit"),
                 longVal(m, "offset"),
-                str(m, "effectiveStart"),
-                str(m, "effectiveEnd"),
+                instant(m, "effectiveStart"),
+                instant(m, "effectiveEnd"),
                 List.copyOf(entries));
     }
 
@@ -474,7 +469,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
         }
         return new MemberSeriesResponse(str(m, "counterKey"), str(m, "member"), str(m, "bucket"),
                 str(m, "mode"), str(m, "tz"),
-                new SeriesResponse.Range(str(range, "from"), str(range, "to")), List.copyOf(points));
+                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(points));
     }
 
     private static MemberGroupSeriesResponse toMemberGroupSeries(Map<String, Object> m) {
@@ -490,7 +485,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
             series.add(new MemberSeriesEntry(str(sm, "member"), List.copyOf(points)));
         }
         return new MemberGroupSeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "tz"),
-                new SeriesResponse.Range(str(range, "from"), str(range, "to")), List.copyOf(series));
+                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(series));
     }
 
     private static DerivedValueResponse toDerivedValue(Map<String, Object> m) {
@@ -509,10 +504,10 @@ public final class CountersClient implements ReadOnlyCountersClient {
         List<DerivedSeriesPoint> points = new ArrayList<>();
         for (Object item : asList(m.get("points"))) {
             Map<String, Object> pm = asMap(item);
-            points.add(new DerivedSeriesPoint(str(pm, "t"), str(pm, "v")));
+            points.add(new DerivedSeriesPoint(instant(pm, "t"), str(pm, "v")));
         }
         return new DerivedSeriesResponse(str(m, "key"), str(m, "bucket"), str(m, "tz"), longVal(m, "scale"),
-                new SeriesResponse.Range(str(range, "from"), str(range, "to")), List.copyOf(points));
+                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(points));
     }
 
     /** Fluent configuration for {@link CountersClient}. Only {@link #apiKey} is required. */

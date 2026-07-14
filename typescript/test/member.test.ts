@@ -59,7 +59,11 @@ describe("MemberHandle — HTTP wiring", () => {
     await client
       .counter("raid")
       .member("alice|bob")
-      .submit("1417", { mode: "max", metadata: "room1:400", occurredAt: "2026-01-01T00:00:00Z" });
+      .submit("1417", {
+        mode: "max",
+        metadata: "room1:400",
+        occurredAt: new Date("2026-01-01T00:00:00Z"),
+      });
     expect(seen.method).toBe("POST");
     // The `|` in the member key is percent-encoded in the path.
     expect(seen.path).toBe("/v1/counters/raid/members/alice%7Cbob/submit");
@@ -67,7 +71,7 @@ describe("MemberHandle — HTTP wiring", () => {
       value: "1417",
       mode: "max",
       metadata: "room1:400",
-      occurredAt: "2026-01-01T00:00:00Z",
+      occurredAt: "2026-01-01T00:00:00.000Z",
     });
   });
 

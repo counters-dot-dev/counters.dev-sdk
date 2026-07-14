@@ -123,7 +123,8 @@ func stringValue(v *string) string {
 func memberWriteOpts(op vectorOp, minutes func(int) time.Time) counters.MemberWriteOpts {
 	opts := counters.MemberWriteOpts{Metadata: op.Metadata}
 	if op.OccurredAtMin != nil {
-		opts.OccurredAt = minutes(*op.OccurredAtMin)
+		occurredAt := minutes(*op.OccurredAtMin)
+		opts.OccurredAt = &occurredAt
 	}
 	return opts
 }
@@ -346,9 +347,9 @@ func tour() {
 	usage, err := client.Usage(ctx)
 	invoked["Client.Usage"] = true
 	check(err, "usage")
-	assert(usage.Ops.Used >= 1, "usage reports at least the writes this run made")
+	assert(usage.Operations.Used >= 1, "usage reports at least the writes this run made")
 	assert(usage.Counters.Used >= 1, "usage reports at least one live counter")
-	assert(usage.Ops.ResetsAt != "", "usage carries a resetsAt instant")
+	assert(!usage.Operations.ResetsAt.IsZero(), "usage carries a resetsAt instant")
 	assert(usage.Month != "", "usage carries the UTC month")
 
 	check(client.Close(), "close(A)")
@@ -646,11 +647,11 @@ func runStep(client *counters.Client, handle *counters.CounterHandle, op vectorO
 	case "series":
 		p := op.Series
 		s, err := handle.Series(ctx, counters.SeriesParams{
-			From:    minutes(p.FromMin),
-			To:      minutes(p.ToMin),
-			Bucket:  p.Bucket,
-			Tz:      p.Tz,
-			Gapfill: p.Gapfill,
+			From:     minutes(p.FromMin),
+			To:       minutes(p.ToMin),
+			Bucket:   p.Bucket,
+			TimeZone: p.Tz,
+			Gapfill:  p.Gapfill,
 		})
 		if err != nil {
 			return stepResult{}, err
@@ -826,15 +827,15 @@ func replayVectors() {
 			}
 			if expect.Usage != nil {
 				if expect.Usage.OpsUsedAtLeast != nil {
-					assert(res.usage.Ops.Used >= int64(*expect.Usage.OpsUsedAtLeast),
-						fmt.Sprintf("%s: opsUsedAtLeast %d, got %d", where, *expect.Usage.OpsUsedAtLeast, res.usage.Ops.Used))
+					assert(res.usage.Operations.Used >= int64(*expect.Usage.OpsUsedAtLeast),
+						fmt.Sprintf("%s: opsUsedAtLeast %d, got %d", where, *expect.Usage.OpsUsedAtLeast, res.usage.Operations.Used))
 				}
 				if expect.Usage.CountersUsedAtLeast != nil {
 					assert(res.usage.Counters.Used >= int64(*expect.Usage.CountersUsedAtLeast),
 						fmt.Sprintf("%s: countersUsedAtLeast %d, got %d", where, *expect.Usage.CountersUsedAtLeast, res.usage.Counters.Used))
 				}
 				if expect.Usage.HasResetsAt != nil {
-					assertEq(res.usage.Ops.ResetsAt != "", *expect.Usage.HasResetsAt, where+": hasResetsAt")
+					assertEq(!res.usage.Operations.ResetsAt.IsZero(), *expect.Usage.HasResetsAt, where+": hasResetsAt")
 				}
 			}
 			if expect.MemberValue != nil {

@@ -6,6 +6,6 @@ import java.util.List;
 public record MemberGroupSeriesResponse(
         String counterKey,
         String bucket,
-        String tz,
+        String timeZone,
         SeriesResponse.Range range,
         List<MemberSeriesEntry> series) {}

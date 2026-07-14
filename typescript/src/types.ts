@@ -10,7 +10,7 @@ export type Value = string; // signed integer, arbitrary precision
  */
 export type DecimalValue = string;
 export type Granularity = "1m" | "5m" | "1h" | "1d" | "1w" | "1mo";
-export type OpType = "add" | "subtract" | "clear" | "delete";
+export type OperationType = "add" | "subtract" | "clear" | "delete";
 /** Leaderboard aggregation mode. Set by the first member write to a board, then immutable. */
 export type Mode = "sum" | "latest" | "min" | "max";
 /** Trailing-window sizes for a windowed leaderboard read (`leaderboard?window=`). */
@@ -48,24 +48,25 @@ export interface SeriesResponse {
   counterKey: string;
   bucket: string;
   mode: "delta";
-  tz?: string;
-  range: { from: string; to: string };
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
+  range: { from: Date; to: Date };
   points: SeriesPoint[];
 }
 
 export interface Operation {
   counterKey: string;
-  op: OpType;
+  operation: OperationType;
   amount?: Amount;
   idempotencyKey?: string;
-  /** RFC 3339 event time; buckets the op at event time instead of ingest time (offline spools). */
-  occurredAt?: string;
+  /** Event time; buckets the operation at event time instead of ingest time (offline spools). */
+  occurredAt?: Date;
 }
 
 /** Options for immediate (non-buffered) writes. */
 export interface ApplyOptions {
   /** Event time for series bucketing; bounded server-side to the plan's retention window. */
-  occurredAt?: string | Date;
+  occurredAt?: Date;
 }
 
 export interface BatchResult {
@@ -88,11 +89,12 @@ export interface Problem {
 }
 
 export interface SeriesParams {
-  from: string | Date;
-  to: string | Date;
+  from: Date;
+  to: Date;
   bucket: Granularity;
   mode?: "delta";
-  tz?: string;
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
   gapfill?: boolean;
 }
 
@@ -104,17 +106,17 @@ export type ValueInput = bigint | number | string;
 
 // ── Usage (GET /v1/usage) ─────────────────────────────────────────────────────────────────────────
 
-/** Current quota state for the organization. `quota`/`monthlyOpsQuota` are `null` on unlimited plans. */
+/** Current quota state for the organization. `quota`/`monthlyOperationsQuota` are `null` on unlimited plans. */
 export interface Usage {
   /** UTC month, e.g. "2026-07". */
   month: string;
-  ops: {
-    /** Write ops recorded this UTC month. */
+  operations: {
+    /** Write operations recorded this UTC month. */
     used: number;
-    /** Monthly op ceiling; `null` for unlimited plans. */
+    /** Monthly operation ceiling; `null` for unlimited plans. */
     quota: number | null;
     /** First instant of the next UTC month (present even when `quota` is null). */
-    resetsAt: string;
+    resetsAt: Date;
   };
   counters: {
     /** Live (non-deleted) counters in the org. */
@@ -123,10 +125,10 @@ export interface Usage {
     max: number;
   };
   limits: {
-    rateLimitRps: number;
+    rateLimitRequestsPerSecond: number;
     maxCounters: number;
-    /** Monthly op ceiling; `null` for unlimited plans. */
-    monthlyOpsQuota: number | null;
+    /** Monthly operation ceiling; `null` for unlimited plans. */
+    monthlyOperationsQuota: number | null;
   };
 }
 
@@ -185,9 +187,9 @@ export interface WindowLeaderboard {
   limit: number;
   offset: number;
   /** Effective lower bound actually summed (floored to the 1h rollup boundary; may precede `now − window`). */
-  effectiveStart: string;
+  effectiveStart: Date;
   /** Effective upper bound actually summed (the request instant). */
-  effectiveEnd: string;
+  effectiveEnd: Date;
   entries: WindowEntry[];
 }
 
@@ -198,7 +200,7 @@ export interface MemberApplyOptions {
   /** Opaque payload (≤ 1024 UTF-8 bytes); stored and returned verbatim, riding accepted values only. */
   metadata?: string;
   /** Event time for series bucketing (see {@link ApplyOptions.occurredAt}). */
-  occurredAt?: string | Date;
+  occurredAt?: Date;
 }
 
 /** Options for a member score submit. */
@@ -260,8 +262,9 @@ export interface MemberSeriesResponse {
   member: string;
   bucket: string;
   mode: "delta";
-  tz?: string;
-  range: { from: string; to: string };
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
+  range: { from: Date; to: Date };
   points: SeriesPoint[];
 }
 
@@ -274,8 +277,9 @@ export interface MemberSeriesEntry {
 export interface MemberGroupSeriesResponse {
   counterKey: string;
   bucket: string;
-  tz?: string;
-  range: { from: string; to: string };
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
+  range: { from: Date; to: Date };
   series: MemberSeriesEntry[];
 }
 
@@ -295,25 +299,28 @@ export interface DerivedValueResponse {
 }
 
 export interface DerivedSeriesPoint {
-  t: string;
+  /** Inclusive start of this bucket. */
+  timestamp: Date;
   /** Signed decimal string, or `null` for a bucket that divided by zero (a hole preserved in place). Never a float. */
-  v: DecimalValue | null;
+  value: DecimalValue | null;
 }
 
 /** A derived counter evaluated per bucket over [from, to). Always dense. */
 export interface DerivedSeriesResponse {
   key: string;
   bucket: string;
-  tz?: string;
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
   scale: number;
-  range: { from: string; to: string };
+  range: { from: Date; to: Date };
   points: DerivedSeriesPoint[];
 }
 
-/** Read parameters for a derived series. Only `from`/`to`/`bucket`/`tz` — no `gapfill`/`mode`/`member`/`groupBy`. */
+/** Read parameters for a derived series. Only `from`/`to`/`bucket`/`timeZone` — no `gapfill`/`mode`/`member`/`groupBy`. */
 export interface DerivedSeriesParams {
-  from: string | Date;
-  to: string | Date;
+  from: Date;
+  to: Date;
   bucket: Granularity;
-  tz?: string;
+  /** IANA time zone used for calendar bucket boundaries. */
+  timeZone?: string;
 }

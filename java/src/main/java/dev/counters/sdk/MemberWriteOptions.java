@@ -1,9 +1,9 @@
 package dev.counters.sdk;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
 
 /** Options for an immediate member delta write. */
-public record MemberWriteOptions(String metadata, OffsetDateTime occurredAt) {
+public record MemberWriteOptions(String metadata, Instant occurredAt) {
     public MemberWriteOptions {
         if (metadata != null) Validation.assertMetadata(metadata);
     }
@@ -12,7 +12,7 @@ public record MemberWriteOptions(String metadata, OffsetDateTime occurredAt) {
         this(metadata, null);
     }
 
-    public MemberWriteOptions(OffsetDateTime occurredAt) {
+    public MemberWriteOptions(Instant occurredAt) {
         this(null, occurredAt);
     }
 }

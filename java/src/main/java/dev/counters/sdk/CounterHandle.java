@@ -1,7 +1,7 @@
 package dev.counters.sdk;
 
 import java.math.BigInteger;
-import java.time.OffsetDateTime;
+import java.time.Instant;
 
 /**
  * A typed handle to a single counter, obtained from {@link CountersClient#counter(String)} (which validates
@@ -63,7 +63,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time (series bucket lands at {@code occurredAt}). */
-    public Counter addNow(long amount, OffsetDateTime occurredAt) {
+    public Counter addNow(long amount, Instant occurredAt) {
         return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
     }
 
@@ -73,7 +73,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time. */
-    public Counter addNow(String amount, OffsetDateTime occurredAt) {
+    public Counter addNow(String amount, Instant occurredAt) {
         return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
     }
 
@@ -83,7 +83,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time. */
-    public Counter addNow(BigInteger amount, OffsetDateTime occurredAt) {
+    public Counter addNow(BigInteger amount, Instant occurredAt) {
         return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
     }
 
@@ -93,7 +93,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(long amount, OffsetDateTime occurredAt) {
+    public Counter subtractNow(long amount, Instant occurredAt) {
         return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
     }
 
@@ -103,7 +103,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(String amount, OffsetDateTime occurredAt) {
+    public Counter subtractNow(String amount, Instant occurredAt) {
         return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
     }
 
@@ -113,7 +113,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(BigInteger amount, OffsetDateTime occurredAt) {
+    public Counter subtractNow(BigInteger amount, Instant occurredAt) {
         return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
     }
 

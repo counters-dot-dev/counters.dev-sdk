@@ -18,7 +18,7 @@ func TestBatcherCoalesce(t *testing.T) {
 	if len(captured) != 1 || len(captured[0]) != 1 {
 		t.Fatalf("got %v", captured)
 	}
-	if captured[0][0].Amount != "6" || captured[0][0].Op != "add" {
+	if captured[0][0].Amount != "6" || captured[0][0].Operation != "add" {
 		t.Errorf("op=%+v", captured[0][0])
 	}
 }
@@ -36,7 +36,7 @@ func TestBatcherNetNegativeAndZeroSkip(t *testing.T) {
 	if len(captured) != 1 || len(captured[0]) != 1 {
 		t.Fatalf("expected 1 op (z skipped), got %v", captured)
 	}
-	if captured[0][0].Op != "subtract" || captured[0][0].Amount != "7" {
+	if captured[0][0].Operation != "subtract" || captured[0][0].Amount != "7" {
 		t.Errorf("op=%+v", captured[0][0])
 	}
 }

@@ -401,6 +401,225 @@ func TestSeriesPointPublicShapeAndWireMapping(t *testing.T) {
 	}
 }
 
+func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
+	timeType := reflect.TypeOf(time.Time{})
+	timePointerType := reflect.TypeOf((*time.Time)(nil))
+	stringPointerType := reflect.TypeOf((*string)(nil))
+
+	for _, tc := range []struct {
+		owner reflect.Type
+		field string
+		want  reflect.Type
+		json  string
+	}{
+		{reflect.TypeOf(Counter{}), "CreatedAt", timePointerType, "createdAt,omitempty"},
+		{reflect.TypeOf(Counter{}), "UpdatedAt", timePointerType, "updatedAt,omitempty"},
+		{reflect.TypeOf(SeriesPoint{}), "Timestamp", timeType, "t"},
+		{reflect.TypeOf(LeaderboardEntry{}), "UpdatedAt", timeType, "updatedAt"},
+		{reflect.TypeOf(MemberSnapshot{}), "UpdatedAt", timeType, "updatedAt"},
+		{reflect.TypeOf(WindowLeaderboard{}), "EffectiveStart", timeType, "effectiveStart"},
+		{reflect.TypeOf(WindowLeaderboard{}), "EffectiveEnd", timeType, "effectiveEnd"},
+		{reflect.TypeOf(MemberWriteOpts{}), "OccurredAt", timePointerType, ""},
+		{reflect.TypeOf(SubmitOpts{}), "OccurredAt", timePointerType, ""},
+		{reflect.TypeOf(Operation{}), "OccurredAt", timePointerType, "occurredAt,omitempty"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "Timestamp", timeType, "t"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "Value", stringPointerType, "v"},
+		{reflect.TypeOf(SeriesParams{}), "From", timeType, ""},
+		{reflect.TypeOf(SeriesParams{}), "To", timeType, ""},
+		{reflect.TypeOf(DerivedSeriesParams{}), "From", timeType, ""},
+		{reflect.TypeOf(DerivedSeriesParams{}), "To", timeType, ""},
+	} {
+		assertStructField(t, tc.owner, tc.field, tc.want, tc.json)
+	}
+
+	usageType := reflect.TypeOf(Usage{})
+	operations, ok := usageType.FieldByName("Operations")
+	if !ok || operations.Tag.Get("json") != "ops" {
+		t.Fatalf("Usage.Operations=%+v present=%v", operations, ok)
+	}
+	assertStructField(t, operations.Type, "ResetsAt", timeType, "resetsAt")
+	limits, ok := usageType.FieldByName("Limits")
+	if !ok {
+		t.Fatal("Usage.Limits is absent")
+	}
+	assertStructField(t, limits.Type, "RateLimitRequestsPerSecond", reflect.TypeOf(int64(0)), "rateLimitRps")
+	assertStructField(t, limits.Type, "MonthlyOperationsQuota", reflect.TypeOf((*int64)(nil)), "monthlyOpsQuota")
+
+	for _, owner := range []reflect.Type{
+		reflect.TypeOf(SeriesResponse{}),
+		reflect.TypeOf(MemberSeriesResponse{}),
+		reflect.TypeOf(MemberGroupSeriesResponse{}),
+		reflect.TypeOf(DerivedSeriesResponse{}),
+	} {
+		rangeField, ok := owner.FieldByName("Range")
+		if !ok {
+			t.Fatalf("%s.Range is absent", owner.Name())
+		}
+		assertStructField(t, rangeField.Type, "From", timeType, "from")
+		assertStructField(t, rangeField.Type, "To", timeType, "to")
+		assertStructField(t, owner, "TimeZone", reflect.TypeOf(""), "tz")
+	}
+	assertStructField(t, reflect.TypeOf(SeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
+	assertStructField(t, reflect.TypeOf(DerivedSeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
+	assertStructField(t, reflect.TypeOf(Operation{}), "Operation", reflect.TypeOf(""), "op")
+
+	for _, old := range []struct {
+		owner reflect.Type
+		field string
+	}{
+		{reflect.TypeOf(DerivedSeriesPoint{}), "T"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "V"},
+		{reflect.TypeOf(SeriesParams{}), "Tz"},
+		{reflect.TypeOf(DerivedSeriesParams{}), "Tz"},
+		{reflect.TypeOf(Operation{}), "Op"},
+		{usageType, "Ops"},
+		{limits.Type, "RateLimitRps"},
+		{limits.Type, "MonthlyOpsQuota"},
+	} {
+		if _, ok := old.owner.FieldByName(old.field); ok {
+			t.Errorf("obsolete shorthand %s.%s remains public", old.owner.Name(), old.field)
+		}
+	}
+}
+
+func assertStructField(t *testing.T, owner reflect.Type, name string, wantType reflect.Type, wantJSON string) {
+	t.Helper()
+	field, ok := owner.FieldByName(name)
+	if !ok {
+		t.Fatalf("%s.%s is absent", owner.Name(), name)
+	}
+	if field.Type != wantType || field.Tag.Get("json") != wantJSON {
+		t.Errorf("%s.%s type/tag=%v %q, want %v %q", owner.Name(), name, field.Type, field.Tag.Get("json"), wantType, wantJSON)
+	}
+}
+
+func TestOptionalRequestDateTimesStayNilWhenAbsent(t *testing.T) {
+	if (MemberWriteOpts{}).OccurredAt != nil || (SubmitOpts{}).OccurredAt != nil {
+		t.Fatal("absent member request timestamps must remain nil")
+	}
+
+	var operation Operation
+	if err := json.Unmarshal([]byte(`{"counterKey":"c","op":"clear"}`), &operation); err != nil {
+		t.Fatal(err)
+	}
+	if operation.OccurredAt != nil {
+		t.Fatalf("absent Operation.OccurredAt=%v, want nil", operation.OccurredAt)
+	}
+	wire, err := json.Marshal(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(wire) != `{"counterKey":"c","op":"clear"}` {
+		t.Fatalf("operation wire=%s", wire)
+	}
+
+	at := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	wire, err = json.Marshal(Operation{CounterKey: "c", Operation: "add", OccurredAt: &at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(wire) != `{"counterKey":"c","op":"add","occurredAt":"2026-07-01T12:30:00Z"}` {
+		t.Fatalf("timestamped operation wire=%s", wire)
+	}
+}
+
+func TestResponseDateTimesDecodeAcrossAllPublicTypes(t *testing.T) {
+	const fromWire = "2026-07-01T12:30:00Z"
+	const toWire = "2026-07-02T08:45:00Z"
+	wantFrom, _ := time.Parse(time.RFC3339, fromWire)
+	wantTo, _ := time.Parse(time.RFC3339, toWire)
+	rangeBody := `{"range":{"from":"` + fromWire + `","to":"` + toWire + `"}}`
+
+	for _, tc := range []struct {
+		name string
+		body string
+		read func([]byte) (time.Time, time.Time, error)
+	}{
+		{
+			name: "counter series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response SeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "member series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response MemberSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "member group series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response MemberGroupSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "derived series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response DerivedSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "window leaderboard bounds",
+			body: `{"effectiveStart":"` + fromWire + `","effectiveEnd":"` + toWire + `"}`,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response WindowLeaderboard
+				err := json.Unmarshal(body, &response)
+				return response.EffectiveStart, response.EffectiveEnd, err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFrom, gotTo, err := tc.read([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gotFrom.Equal(wantFrom) || !gotTo.Equal(wantTo) {
+				t.Fatalf("date-times=%v..%v, want %v..%v", gotFrom, gotTo, wantFrom, wantTo)
+			}
+		})
+	}
+
+	var usage Usage
+	if err := json.Unmarshal([]byte(`{"ops":{"resetsAt":"`+toWire+`"}}`), &usage); err != nil {
+		t.Fatal(err)
+	}
+	if !usage.Operations.ResetsAt.Equal(wantTo) {
+		t.Fatalf("usage reset=%v, want %v", usage.Operations.ResetsAt, wantTo)
+	}
+}
+
+func TestDerivedSeriesPointPreservesNullValueOnErgonomicFields(t *testing.T) {
+	const wire = `{"t":"2026-07-01T12:30:00Z","v":null}`
+	var point DerivedSeriesPoint
+	if err := json.Unmarshal([]byte(wire), &point); err != nil {
+		t.Fatal(err)
+	}
+	wantTimestamp := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	if !point.Timestamp.Equal(wantTimestamp) || point.Value != nil {
+		t.Fatalf("derived point=%+v, want timestamp %v and nil value", point, wantTimestamp)
+	}
+	roundTripped, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(roundTripped) != wire {
+		t.Fatalf("derived point wire=%s, want %s", roundTripped, wire)
+	}
+}
+
 func TestPublishablePublicMethodSets(t *testing.T) {
 	tests := []struct {
 		name string
@@ -709,7 +928,10 @@ func TestUsageMethod(t *testing.T) {
 	if idem != "" {
 		t.Errorf("usage must not carry idempotency key, got %q", idem)
 	}
-	if u.Month != "2026-07" || u.Ops.Used != 42 || u.Ops.Quota != nil || u.Limits.MonthlyOpsQuota != nil || u.Ops.ResetsAt == "" {
+	wantReset := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if u.Month != "2026-07" || u.Operations.Used != 42 || u.Operations.Quota != nil ||
+		u.Limits.RateLimitRequestsPerSecond != 50 || u.Limits.MaxCounters != 1000 ||
+		u.Limits.MonthlyOperationsQuota != nil || !u.Operations.ResetsAt.Equal(wantReset) {
 		t.Errorf("usage=%+v", u)
 	}
 }
@@ -762,7 +984,7 @@ func TestMemberHandleMethodsLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := m.Add(context.Background(), huge, MemberWriteOpts{Metadata: "room1:500", OccurredAt: at})
+	added, err := m.Add(context.Background(), huge, MemberWriteOpts{Metadata: "room1:500", OccurredAt: &at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -919,7 +1141,7 @@ func TestSeriesQueryEncodingAndPoints(t *testing.T) {
 		params SeriesParams
 		want   map[string]string // "" means the key must be absent
 	}{
-		{"all params", SeriesParams{From: from, To: to, Bucket: "1h", Mode: "delta", Tz: "Europe/Amsterdam", Gapfill: true},
+		{"all params", SeriesParams{From: from, To: to, Bucket: "1h", Mode: "delta", TimeZone: "Europe/Amsterdam", Gapfill: true},
 			map[string]string{"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "1h", "mode": "delta", "tz": "Europe/Amsterdam", "gapfill": "true"}},
 		{"minimal", SeriesParams{From: from, To: to, Bucket: "1d"},
 			map[string]string{"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "1d", "mode": "", "tz": "", "gapfill": ""}},
@@ -956,6 +1178,9 @@ func TestSeriesQueryEncodingAndPoints(t *testing.T) {
 			}
 			if s.CounterKey != "c" || s.Bucket != tc.params.Bucket {
 				t.Errorf("series=%+v", s)
+			}
+			if s.TimeZone != "UTC" || !s.Range.From.Equal(from) || !s.Range.To.Equal(to) {
+				t.Errorf("series timezone/range=%q %v..%v", s.TimeZone, s.Range.From, s.Range.To)
 			}
 			if len(s.Points) != 2 || s.Points[0].Value != "1" || s.Points[1].Value != "100000000000000000000000000000000" {
 				t.Errorf("points=%+v", s.Points)
@@ -994,7 +1219,7 @@ func TestSeriesConformance(t *testing.T) {
 			}
 			params := SeriesParams{From: from, To: to, Bucket: p["bucket"].(string)}
 			if tz, ok := p["tz"].(string); ok {
-				params.Tz = tz
+				params.TimeZone = tz
 			}
 			if gf, ok := p["gapfill"].(bool); ok {
 				params.Gapfill = gf
@@ -1006,7 +1231,7 @@ func TestSeriesConformance(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotQuery = r.URL.Query()
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"counterKey":"c","bucket":"` + params.Bucket + `","mode":"delta","range":{"from":"","to":""},"points":[]}`))
+				_, _ = w.Write([]byte(`{"counterKey":"c","bucket":"` + params.Bucket + `","mode":"delta","range":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"points":[]}`))
 			}))
 			defer srv.Close()
 			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
@@ -1063,6 +1288,7 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Member != exp["member"].(string) || s.Bucket != exp["bucket"].(string) || s.Mode != exp["mode"].(string) {
 					t.Errorf("member series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				assertSeriesPoints(t, s.Points, exp["points"].([]any))
 			case "memberGroupSeries":
 				s, err := h.GroupSeries(context.Background(), params)
@@ -1072,6 +1298,7 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Bucket != exp["bucket"].(string) {
 					t.Errorf("member group series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				expSeries := exp["series"].([]any)
 				if len(s.Series) != len(expSeries) {
 					t.Fatalf("series len=%d, want %d", len(s.Series), len(expSeries))
@@ -1091,9 +1318,25 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Bucket != exp["bucket"].(string) || s.Mode != exp["mode"].(string) {
 					t.Errorf("series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				assertSeriesPoints(t, s.Points, exp["points"].([]any))
 			}
 		})
+	}
+}
+
+func assertTimeRange(t *testing.T, gotFrom, gotTo time.Time, want map[string]any) {
+	t.Helper()
+	wantFrom, err := time.Parse(time.RFC3339, want["from"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTo, err := time.Parse(time.RFC3339, want["to"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotFrom.Equal(wantFrom) || !gotTo.Equal(wantTo) {
+		t.Errorf("range=%v..%v, want %v..%v", gotFrom, gotTo, wantFrom, wantTo)
 	}
 }
 
@@ -1174,7 +1417,7 @@ func TestLeaderboardConformance(t *testing.T) {
 			cl := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
 				got = r.URL.Query()
 				if w, ok := params["window"].(string); ok {
-					return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","window":"`+w+`","order":"desc","total":"0","memberCount":0,"limit":100,"offset":0,"effectiveStart":"","effectiveEnd":"","entries":[]}`), nil
+					return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","window":"`+w+`","order":"desc","total":"0","memberCount":0,"limit":100,"offset":0,"effectiveStart":"2026-01-01T00:00:00Z","effectiveEnd":"2026-01-02T00:00:00Z","entries":[]}`), nil
 				}
 				return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","epoch":0,"order":"desc","memberCount":0,"limit":100,"offset":0,"entries":[]}`), nil
 			})
@@ -1331,7 +1574,7 @@ func memberWriteOptsFromInput(t *testing.T, input map[string]any) MemberWriteOpt
 		if err != nil {
 			t.Fatal(err)
 		}
-		opts.OccurredAt = parsed
+		opts.OccurredAt = &parsed
 	}
 	return opts
 }
@@ -1379,7 +1622,15 @@ func assertWindowLeaderboard(t *testing.T, got *WindowLeaderboard, exp map[strin
 	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) || got.Total != exp["total"].(string) {
 		t.Errorf("window leaderboard=%+v, expect=%v", got, exp)
 	}
-	if got.EffectiveStart != exp["effectiveStart"].(string) || got.EffectiveEnd != exp["effectiveEnd"].(string) {
+	wantStart, err := time.Parse(time.RFC3339, exp["effectiveStart"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd, err := time.Parse(time.RFC3339, exp["effectiveEnd"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.EffectiveStart.Equal(wantStart) || !got.EffectiveEnd.Equal(wantEnd) {
 		t.Errorf("effective range=%s..%s", got.EffectiveStart, got.EffectiveEnd)
 	}
 	want := exp["entries"].([]any)
@@ -1447,7 +1698,7 @@ func TestDerivedConformance(t *testing.T) {
 				if r.URL.Path != "/v1/derived/conversion/series" {
 					t.Errorf("path=%s", r.URL.Path)
 				}
-				return jsonLoopbackResponse(200, `{"key":"conversion","bucket":"`+params["bucket"].(string)+`","scale":6,"range":{"from":"","to":""},"points":[]}`), nil
+				return jsonLoopbackResponse(200, `{"key":"conversion","bucket":"`+params["bucket"].(string)+`","scale":6,"range":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"points":[]}`), nil
 			})
 			d, err := cl.Derived("conversion")
 			if err != nil {
@@ -1456,10 +1707,10 @@ func TestDerivedConformance(t *testing.T) {
 			from, _ := time.Parse(time.RFC3339, params["from"].(string))
 			to, _ := time.Parse(time.RFC3339, params["to"].(string))
 			_, err = d.Series(context.Background(), DerivedSeriesParams{
-				From:   from,
-				To:     to,
-				Bucket: params["bucket"].(string),
-				Tz:     stringFromAny(params["tz"]),
+				From:     from,
+				To:       to,
+				Bucket:   params["bucket"].(string),
+				TimeZone: stringFromAny(params["tz"]),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1515,8 +1766,9 @@ func TestDerivedConformance(t *testing.T) {
 					}
 				}
 			case "derivedSeries":
-				from, _ := time.Parse(time.RFC3339, body["range"].(map[string]any)["from"].(string))
-				to, _ := time.Parse(time.RFC3339, body["range"].(map[string]any)["to"].(string))
+				rng := body["range"].(map[string]any)
+				from, _ := time.Parse(time.RFC3339, rng["from"].(string))
+				to, _ := time.Parse(time.RFC3339, rng["to"].(string))
 				got, err := d.Series(context.Background(), DerivedSeriesParams{From: from, To: to, Bucket: body["bucket"].(string)})
 				if err != nil {
 					t.Fatal(err)
@@ -1524,21 +1776,26 @@ func TestDerivedConformance(t *testing.T) {
 				if got.Key != exp["key"].(string) || got.Bucket != exp["bucket"].(string) || got.Scale != intFromAny(exp["scale"]) {
 					t.Errorf("derived series=%+v, expect=%v", got, exp)
 				}
+				assertTimeRange(t, got.Range.From, got.Range.To, rng)
 				wantPoints := exp["points"].([]any)
 				if len(got.Points) != len(wantPoints) {
 					t.Fatalf("points len=%d, want %d", len(got.Points), len(wantPoints))
 				}
 				for i, rawPoint := range wantPoints {
 					wantPoint := rawPoint.(map[string]any)
-					if got.Points[i].T != wantPoint["t"].(string) {
-						t.Errorf("point %d t=%q, want %q", i, got.Points[i].T, wantPoint["t"])
+					wantTimestamp, err := time.Parse(time.RFC3339, wantPoint["t"].(string))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !got.Points[i].Timestamp.Equal(wantTimestamp) {
+						t.Errorf("point %d timestamp=%v, want %v", i, got.Points[i].Timestamp, wantTimestamp)
 					}
 					if wantPoint["v"] == nil {
-						if got.Points[i].V != nil {
-							t.Errorf("point %d v=%q, want nil", i, *got.Points[i].V)
+						if got.Points[i].Value != nil {
+							t.Errorf("point %d value=%q, want nil", i, *got.Points[i].Value)
 						}
-					} else if got.Points[i].V == nil || *got.Points[i].V != wantPoint["v"].(string) {
-						t.Errorf("point %d v=%v, want %q", i, got.Points[i].V, wantPoint["v"])
+					} else if got.Points[i].Value == nil || *got.Points[i].Value != wantPoint["v"].(string) {
+						t.Errorf("point %d value=%v, want %q", i, got.Points[i].Value, wantPoint["v"])
 					}
 				}
 			default:

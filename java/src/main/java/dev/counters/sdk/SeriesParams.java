@@ -1,19 +1,19 @@
 package dev.counters.sdk;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.Set;
 
 /**
  * Parameters for {@link CounterHandle#series(SeriesParams)}. {@code from}, {@code to}, and {@code bucket}
- * are required; {@code mode}, {@code tz} (IANA timezone for calendar bucket boundaries), and
+ * are required; {@code mode}, {@code timeZone} (IANA timezone for calendar bucket boundaries), and
  * {@code gapfill} are optional (pass {@code null} to omit).
  */
 public record SeriesParams(
-        OffsetDateTime from,
-        OffsetDateTime to,
+        Instant from,
+        Instant to,
         String bucket,
         String mode,
-        String tz,
+        String timeZone,
         Boolean gapfill) {
 
     /** Allowed bucket sizes (finer buckets may require higher plans server-side). */
@@ -30,13 +30,13 @@ public record SeriesParams(
         }
     }
 
-    /** Convenience constructor without the optional {@code tz} / {@code gapfill}. */
-    public SeriesParams(OffsetDateTime from, OffsetDateTime to, String bucket) {
+    /** Convenience constructor without the optional {@code timeZone} / {@code gapfill}. */
+    public SeriesParams(Instant from, Instant to, String bucket) {
         this(from, to, bucket, null, null, null);
     }
 
     /** Back-compatible constructor without {@code mode}. */
-    public SeriesParams(OffsetDateTime from, OffsetDateTime to, String bucket, String tz, Boolean gapfill) {
-        this(from, to, bucket, null, tz, gapfill);
+    public SeriesParams(Instant from, Instant to, String bucket, String timeZone, Boolean gapfill) {
+        this(from, to, bucket, null, timeZone, gapfill);
     }
 }

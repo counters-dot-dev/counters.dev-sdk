@@ -17,8 +17,6 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -140,10 +138,10 @@ class ClientTest {
     void addNowForwardsOccurredAtAndOmitsItWhenAbsent() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200, "{\"key\":\"c\",\"value\":\"1\",\"epoch\":0}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime at = OffsetDateTime.of(2026, 7, 1, 12, 0, 0, 0, ZoneOffset.UTC);
+            Instant at = Instant.parse("2026-07-01T12:00:00Z");
             c.counter("c").addNow(1, at);
             c.counter("c").addNow(1);
-            c.counter("c").subtractNow("2", at.withOffsetSameInstant(ZoneOffset.ofHours(2)));
+            c.counter("c").subtractNow("2", at);
 
             Map<String, Object> withAt = parseBody(recorded.get(0).body());
             assertEquals("2026-07-01T12:00:00Z", withAt.get("occurredAt"));
@@ -152,7 +150,6 @@ class ClientTest {
             Map<String, Object> without = parseBody(recorded.get(1).body());
             assertFalse(without.containsKey("occurredAt"), "plain addNow must not send occurredAt");
 
-            // Non-UTC offsets are normalised to UTC on the wire.
             Recorded sub = recorded.get(2);
             assertEquals("/v1/counters/c/subtract", sub.path());
             assertEquals("2026-07-01T12:00:00Z", parseBody(sub.body()).get("occurredAt"));
@@ -179,8 +176,8 @@ class ClientTest {
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-02T00:00:00Z\"},"
                         + "\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"7\"}]}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime from = OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-            OffsetDateTime to = OffsetDateTime.of(2026, 1, 2, 0, 0, 0, 0, ZoneOffset.UTC);
+            Instant from = Instant.parse("2026-01-01T00:00:00Z");
+            Instant to = Instant.parse("2026-01-02T00:00:00Z");
             SeriesResponse s = c.counter("c").series(new SeriesParams(from, to, "1h", "Europe/London", true));
 
             assertEquals("/v1/counters/c/series", recorded.get(0).path());
@@ -193,7 +190,8 @@ class ClientTest {
 
             assertEquals("c", s.counterKey());
             assertEquals("delta", s.mode());
-            assertEquals("2026-01-01T00:00:00Z", s.range().from());
+            assertEquals("Europe/London", s.timeZone());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.range().from());
             assertEquals(1, s.points().size());
             assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
             assertEquals("7", s.points().get(0).value());
@@ -215,8 +213,8 @@ class ClientTest {
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-02T00:00:00Z\"},"
                         + "\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"" + huge + "\"}]}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime from = OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-            OffsetDateTime to = OffsetDateTime.of(2026, 1, 2, 0, 0, 0, 0, ZoneOffset.UTC);
+            Instant from = Instant.parse("2026-01-01T00:00:00Z");
+            Instant to = Instant.parse("2026-01-02T00:00:00Z");
             SeriesResponse s = c.counter("c").series(new SeriesParams(from, to, "1h"));
 
             assertEquals(1, s.points().size());
@@ -250,14 +248,15 @@ class ClientTest {
             String bucket = (String) p.get("bucket");
             String baseUrl = startServer((ex, r) -> json(ex, 200,
                     "{\"counterKey\":\"c\",\"bucket\":\"" + bucket + "\",\"mode\":\"delta\","
-                            + "\"range\":{\"from\":\"\",\"to\":\"\"},\"points\":[]}"));
+                            + "\"range\":{\"from\":\"" + p.get("from") + "\",\"to\":\""
+                            + p.get("to") + "\"},\"points\":[]}"));
             try (CountersClient c2 = client(baseUrl)) {
-                OffsetDateTime from = OffsetDateTime.parse((String) p.get("from"));
-                OffsetDateTime to = OffsetDateTime.parse((String) p.get("to"));
-                String tz = (String) p.get("tz");
+                Instant from = Instant.parse((String) p.get("from"));
+                Instant to = Instant.parse((String) p.get("to"));
+                String timeZone = (String) p.get("tz");
                 Boolean gapfill = (Boolean) p.get("gapfill");
                 String mode = (String) p.get("mode");
-                SeriesParams params = new SeriesParams(from, to, bucket, mode, tz, gapfill);
+                SeriesParams params = new SeriesParams(from, to, bucket, mode, timeZone, gapfill);
                 if (p.get("member") instanceof String member) {
                     c2.counter("c").memberSeries(member, params);
                 } else if ("member".equals(p.get("groupBy"))) {
@@ -285,8 +284,8 @@ class ClientTest {
             String baseUrl = startServer((ex, r) -> json(ex, 200, Json.write(body)));
             try (CountersClient c2 = client(baseUrl)) {
                 Map<String, Object> range = (Map<String, Object>) body.get("range");
-                OffsetDateTime from = OffsetDateTime.parse((String) range.get("from"));
-                OffsetDateTime to = OffsetDateTime.parse((String) range.get("to"));
+                Instant from = Instant.parse((String) range.get("from"));
+                Instant to = Instant.parse((String) range.get("to"));
                 SeriesParams params = new SeriesParams(from, to, (String) body.get("bucket"));
                 if ("memberSeries".equals(kind)) {
                     MemberSeriesResponse s = c2.counter((String) body.get("counterKey"))
@@ -334,8 +333,8 @@ class ClientTest {
 
     @Test
     void seriesRejectsUnknownBucket() {
-        OffsetDateTime t = OffsetDateTime.now(ZoneOffset.UTC);
-        assertThrows(CountersValidationException.class, () -> new SeriesParams(t.minusHours(1), t, "2h"));
+        Instant t = Instant.now();
+        assertThrows(CountersValidationException.class, () -> new SeriesParams(t.minusSeconds(3600), t, "2h"));
     }
 
     // ---- retry & error mapping ----

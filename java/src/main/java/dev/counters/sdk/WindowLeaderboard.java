@@ -1,5 +1,6 @@
 package dev.counters.sdk;
 
+import java.time.Instant;
 import java.util.List;
 
 /** Members ranked by summed activity over a trailing window. */
@@ -12,6 +13,6 @@ public record WindowLeaderboard(
         long memberCount,
         long limit,
         long offset,
-        String effectiveStart,
-        String effectiveEnd,
+        Instant effectiveStart,
+        Instant effectiveEnd,
         List<WindowEntry> entries) {}

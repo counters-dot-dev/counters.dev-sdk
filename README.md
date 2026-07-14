@@ -28,11 +28,13 @@ proves it in its test suite with values larger than a `u64`.
   wanted a leaderboard. **Sum boards** accumulate deltas per member; **score boards**
   (`latest`/`min`/`max`) rank submitted scores. The first member write fixes the mode.
 - A **series** is a counter's per-bucket delta over a time range (buckets `1m` … `1mo`) — the
-  change in each bucket, not a running total. Each point exposes `timestamp` as the language's
-  native time type and `value` as an arbitrary-precision decimal string; the compact JSON keys stay
-  inside the transport layer.
+  change in each bucket, not a running total. Request bounds, response ranges, points, reset times,
+  and every other machine-API date-time use the language's native time type. Each point exposes
+  `timestamp` and `value`; compact names such as JSON `t`, `v`, and `tz` stay inside the transport
+  layer.
 - A **derived counter** is a server-defined, read-only **decimal** expression over other counters
-  (e.g. a conversion rate). Its value is **null** on division by zero — data, not an error.
+  (e.g. a conversion rate). Its value—including a derived series point's `value`—is **null** on
+  division by zero: data, not an error.
 - Every SDK surfaces exactly **three error kinds**: *validation* (rejected client-side, no request
   made), *api* (the server answered with an HTTP error), and *transport* (no response was ever
   obtained). The same taxonomy, natively expressed in each language.
@@ -86,6 +88,8 @@ const state = await signups.addNow("18446744073709551616"); // confirmed — and
 console.log(state.value);                              // a decimal string, always
 
 const { value, epoch } = await signups.value();
+const to = new Date();
+const from = new Date(to.getTime() - 60 * 60 * 1000);
 const series = await signups.series({ from, to, bucket: "1h" });
 for (const point of series.points) {
   console.log(point.timestamp.toISOString(), point.value);

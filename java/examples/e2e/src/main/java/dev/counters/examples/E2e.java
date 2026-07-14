@@ -48,8 +48,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -68,7 +66,7 @@ public final class E2e {
     /** Run-unique namespace: fresh counters, stable epochs. */
     private static final String NS = "e2e-java-" + Long.toString(System.currentTimeMillis(), 36) + "-";
     /** Captured once per run, UTC, truncated to seconds; all relative times resolve against it. */
-    private static final OffsetDateTime T0 = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS);
+    private static final Instant T0 = Instant.now().truncatedTo(ChronoUnit.SECONDS);
 
     private static final Set<String> INVOKED = new HashSet<>();
     private static int checks = 0;
@@ -128,15 +126,15 @@ public final class E2e {
         throw new AssertionError(what + ": expected CountersApiException(" + status + "), but the call succeeded");
     }
 
-    private static OffsetDateTime minutes(long n) {
-        return T0.plusMinutes(n);
+    private static Instant minutes(long n) {
+        return T0.plus(n, ChronoUnit.MINUTES);
     }
 
     // ── 1. The grand tour: every public method, the way an integrator would use it ──────────────
 
     private static void tour() {
-        OffsetDateTime from = T0.minusHours(24);
-        OffsetDateTime to = T0.plusHours(24);
+        Instant from = T0.minus(24, ChronoUnit.HOURS);
+        Instant to = T0.plus(24, ChronoUnit.HOURS);
 
         // Every builder knob in one place; try-with-resources flushes buffered writes on the way out.
         try (CountersClient client = CountersClient.builder()
@@ -181,7 +179,7 @@ public final class E2e {
             checkEq(current.value(), "6", "value after confirmed + buffered writes (5-2+4-1)");
 
             // Event-time writes: occurredAt buckets the op into the past; totals are unaffected.
-            signups.addNow(10, T0.minusHours(2));
+            signups.addNow(10, T0.minus(2, ChronoUnit.HOURS));
             checkEq(signups.value().value(), "16", "total after an event-time write");
 
             // Series at every granularity the plan allows (pro: down to 1m). Sum == total delta.
@@ -261,10 +259,9 @@ public final class E2e {
             // across cases and the endpoint reports the whole current month.
             Usage usage = client.usage();
             INVOKED.add("CountersClient.usage");
-            check(usage.ops().used() >= 1, "usage reports at least the writes this run made");
+            check(usage.operations().used() >= 1, "usage reports at least the writes this run made");
             check(usage.counters().used() >= 1, "usage reports at least one live counter");
-            check(usage.ops().resetsAt() != null && !usage.ops().resetsAt().isEmpty(),
-                    "usage carries a resetsAt instant");
+            check(usage.operations().resetsAt() != null, "usage carries a resetsAt instant");
             check(usage.month() != null && !usage.month().isEmpty(), "usage carries the UTC month");
         } // try-with-resources: AutoCloseable close() flushes buffered writes and stops the timer
         INVOKED.add("CountersClient.close");
@@ -273,8 +270,8 @@ public final class E2e {
     // ── 1b. Leaderboards & members: the full board lifecycle against a live server ──────────────
 
     private static void leaderboards() {
-        OffsetDateTime from = T0.minusHours(24);
-        OffsetDateTime to = T0.plusHours(24);
+        Instant from = T0.minus(24, ChronoUnit.HOURS);
+        Instant to = T0.plus(24, ChronoUnit.HOURS);
 
         try (CountersClient client = CountersClient.builder().apiKey(keyA).baseUrl(baseUrl).build()) {
             CounterHandle board = client.counter(NS + "lb");
@@ -382,7 +379,7 @@ public final class E2e {
             checkEq(d.key(), NS + "conversion", "derived handle exposes its validated key");
             expectStatus(() -> d.value(), 404, "derived value with no definition");
             INVOKED.add("DerivedHandle.value");
-            expectStatus(() -> d.series(new DerivedSeriesParams(T0.minusHours(1), T0, "1h")),
+            expectStatus(() -> d.series(new DerivedSeriesParams(T0.minus(1, ChronoUnit.HOURS), T0, "1h")),
                     404, "derived series with no definition");
             INVOKED.add("DerivedHandle.series");
         }
@@ -434,7 +431,7 @@ public final class E2e {
                     Map<String, Object> expect = obj(step.get("expect"));
                     CountersClient client = clients.get((String) op.get("org"));
                     CounterHandle handle = op.get("key") != null ? client.counter(prefix + op.get("key")) : null;
-                    OffsetDateTime occurredAt = op.get("occurredAtMin") != null
+                    Instant occurredAt = op.get("occurredAtMin") != null
                             ? minutes(((Number) op.get("occurredAtMin")).longValue())
                             : null;
                     String where = c.get("name") + " step " + s;
@@ -477,8 +474,9 @@ public final class E2e {
                         Map<String, Object> u = obj(expect.get("usage"));
                         Usage usage = (Usage) body;
                         if (u.get("opsUsedAtLeast") instanceof Number n) {
-                            check(usage.ops().used() >= n.longValue(),
-                                    where + ": opsUsedAtLeast " + n.longValue() + ", got " + usage.ops().used());
+                            check(usage.operations().used() >= n.longValue(),
+                                    where + ": opsUsedAtLeast " + n.longValue()
+                                            + ", got " + usage.operations().used());
                         }
                         if (u.get("countersUsedAtLeast") instanceof Number n) {
                             check(usage.counters().used() >= n.longValue(),
@@ -486,7 +484,7 @@ public final class E2e {
                                             + ", got " + usage.counters().used());
                         }
                         if (u.get("hasResetsAt") instanceof Boolean hasResetsAt) {
-                            checkEq(usage.ops().resetsAt() != null, hasResetsAt, where + ": hasResetsAt");
+                            checkEq(usage.operations().resetsAt() != null, hasResetsAt, where + ": hasResetsAt");
                         }
                     }
                     if (expect.containsKey("memberValue")) {
@@ -545,7 +543,7 @@ public final class E2e {
     }
 
     private static Object runOp(CountersClient client, CounterHandle handle, Map<String, Object> op,
-                                OffsetDateTime occurredAt) {
+                                Instant occurredAt) {
         switch ((String) op.get("op")) {
             case "add":
                 return handle.addNow((String) op.get("amount"), occurredAt);
@@ -610,13 +608,13 @@ public final class E2e {
         }
     }
 
-    private static MemberWriteOptions memberWriteOptions(Map<String, Object> op, OffsetDateTime occurredAt) {
+    private static MemberWriteOptions memberWriteOptions(Map<String, Object> op, Instant occurredAt) {
         String metadata = (String) op.get("metadata");
         if (metadata == null && occurredAt == null) return null;
         return new MemberWriteOptions(metadata, occurredAt);
     }
 
-    private static SubmitOptions submitOptions(Map<String, Object> op, OffsetDateTime occurredAt) {
+    private static SubmitOptions submitOptions(Map<String, Object> op, Instant occurredAt) {
         String mode = (String) op.get("mode");
         String metadata = (String) op.get("metadata");
         if (mode == null && metadata == null && occurredAt == null) return null;

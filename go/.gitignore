@@ -1,4 +1,5 @@
 coverage.out
 
-# compiled e2e example binary
-examples/e2e/example
+# Compiled binaries emitted by the standalone example modules.
+examples/*/example
+examples/*/example.exe

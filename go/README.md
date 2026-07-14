@@ -89,7 +89,7 @@ this SDK against a live server — it is the fastest way to see the whole surfac
 A series is the **per-bucket delta**: how much the counter changed in each bucket of `[From, To)`,
 not a running total. `Bucket` is one of `1m`, `5m`, `1h`, `1d`, `1w`, `1mo` (finer buckets are
 plan-gated server-side). Empty buckets are omitted unless `Gapfill: true` — treat a missing bucket
-as zero. `Tz` sets an IANA timezone so calendar buckets (`1d`, `1w`, `1mo`) break on local
+as zero. `TimeZone` sets an IANA timezone so calendar buckets (`1d`, `1w`, `1mo`) break on local
 boundaries.
 
 ```go
@@ -131,10 +131,11 @@ fmt.Println(r.MemberAccepted) // false when the standing best was better
 recent, _ := board.WindowLeaderboard(ctx, counters.WindowLeaderboardParams{Window: "7d"})
 ```
 
-The `CreatedAt`/`UpdatedAt` response fields use Go's native `time.Time`: required
-`LeaderboardEntry.UpdatedAt` and `MemberSnapshot.UpdatedAt` values are `time.Time`, while optional
-`Counter.CreatedAt` and `Counter.UpdatedAt` values are `*time.Time` and stay `nil` when absent. The
-standard JSON decoder parses their RFC 3339 wire values directly.
+Every machine-SDK date-time uses Go's native `time.Time`. This includes series points and ranges,
+usage resets, leaderboard update times, and window boundaries. Required values are `time.Time`; optional
+values such as `Counter.CreatedAt`, `Counter.UpdatedAt`, and request `OccurredAt` fields are
+`*time.Time` and stay `nil` when absent. The standard JSON encoder and decoder preserve their RFC
+3339 wire representation.
 
 Other fields the API may omit are pointers: `Leaderboard.Total` (sum boards only),
 `MemberValue.Value`, entry/snapshot `Metadata`, and the usage quota fields — `nil` means "not
@@ -161,6 +162,14 @@ if cur.Value == nil {
 	fmt.Println("no value:", *cur.Reason) // e.g. "division by zero"
 } else {
 	fmt.Println(*cur.Value) // a decimal string — do not ParseFloat it
+}
+
+history, err := conv.Series(ctx, counters.DerivedSeriesParams{
+	From: from, To: to, Bucket: "1h", TimeZone: "UTC",
+})
+for _, point := range history.Points {
+	// Value is nil for a bucket whose expression divided by zero.
+	fmt.Println(point.Timestamp, point.Value)
 }
 ```
 
@@ -215,8 +224,8 @@ safe. Writes after `Close` return `ErrClientClosed` (`errors.Is`).
 
 ## Odds and ends
 
-- **Usage**: `client.Usage(ctx)` returns month-to-date ops, quota, reset instant, and counter
-  headroom. Poll it periodically, not per write.
+- **Usage**: `client.Usage(ctx)` returns month-to-date operations, quota, reset instant, and counter
+  headroom. `usage.Operations.ResetsAt` is a `time.Time`. Poll it periodically, not per write.
 - **Validation helpers**: `IsValidCounterKey`, `IsValidMemberKey`, `IsValidMetadata`, `Buckets`,
   `Windows` are exported so you can pre-check user-supplied names.
 

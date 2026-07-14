@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Method;
@@ -13,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -29,11 +31,72 @@ class PublicApiShapeTest {
 
     @Test
     void seriesPointRecordComponentsUseErgonomicNamesAndInstant() {
-        RecordComponent[] components = SeriesPoint.class.getRecordComponents();
-        assertArrayEquals(new String[] {"timestamp", "value"},
-                Arrays.stream(components).map(RecordComponent::getName).toArray(String[]::new));
-        assertArrayEquals(new Class<?>[] {Instant.class, String.class},
-                Arrays.stream(components).map(RecordComponent::getType).toArray(Class<?>[]::new));
+        assertRecordShape(SeriesPoint.class,
+                new String[] {"timestamp", "value"},
+                new Class<?>[] {Instant.class, String.class});
+    }
+
+    @Test
+    void allDateTimesAndWireNamesUseNativeErgonomicPublicShapes() {
+        assertRecordShape(SeriesParams.class,
+                new String[] {"from", "to", "bucket", "mode", "timeZone", "gapfill"},
+                new Class<?>[] {Instant.class, Instant.class, String.class, String.class, String.class, Boolean.class});
+        assertRecordShape(DerivedSeriesParams.class,
+                new String[] {"from", "to", "bucket", "timeZone"},
+                new Class<?>[] {Instant.class, Instant.class, String.class, String.class});
+        assertRecordShape(MemberWriteOptions.class,
+                new String[] {"metadata", "occurredAt"},
+                new Class<?>[] {String.class, Instant.class});
+        assertRecordShape(SubmitOptions.class,
+                new String[] {"mode", "metadata", "occurredAt"},
+                new Class<?>[] {String.class, String.class, Instant.class});
+        assertRecordShape(Operation.class,
+                new String[] {"counterKey", "operation", "amount", "idempotencyKey", "occurredAt"},
+                new Class<?>[] {String.class, String.class, String.class, String.class, Instant.class});
+
+        assertRecordShape(SeriesResponse.class,
+                new String[] {"counterKey", "bucket", "mode", "timeZone", "range", "points"},
+                new Class<?>[] {String.class, String.class, String.class, String.class,
+                        SeriesResponse.Range.class, List.class});
+        assertRecordShape(SeriesResponse.Range.class,
+                new String[] {"from", "to"},
+                new Class<?>[] {Instant.class, Instant.class});
+        assertRecordShape(MemberSeriesResponse.class,
+                new String[] {"counterKey", "member", "bucket", "mode", "timeZone", "range", "points"},
+                new Class<?>[] {String.class, String.class, String.class, String.class, String.class,
+                        SeriesResponse.Range.class, List.class});
+        assertRecordShape(MemberGroupSeriesResponse.class,
+                new String[] {"counterKey", "bucket", "timeZone", "range", "series"},
+                new Class<?>[] {String.class, String.class, String.class, SeriesResponse.Range.class, List.class});
+        assertRecordShape(DerivedSeriesPoint.class,
+                new String[] {"timestamp", "value"},
+                new Class<?>[] {Instant.class, String.class});
+        assertRecordShape(DerivedSeriesResponse.class,
+                new String[] {"key", "bucket", "timeZone", "scale", "range", "points"},
+                new Class<?>[] {String.class, String.class, String.class, long.class,
+                        SeriesResponse.Range.class, List.class});
+
+        assertRecordShape(Usage.class,
+                new String[] {"month", "operations", "counters", "limits"},
+                new Class<?>[] {String.class, Usage.Operations.class, Usage.Counters.class, Usage.Limits.class});
+        assertRecordShape(Usage.Operations.class,
+                new String[] {"used", "quota", "resetsAt"},
+                new Class<?>[] {long.class, Long.class, Instant.class});
+        assertRecordShape(Usage.Limits.class,
+                new String[] {"rateLimitRequestsPerSecond", "maxCounters", "monthlyOperationsQuota"},
+                new Class<?>[] {long.class, long.class, Long.class});
+        assertRecordShape(WindowLeaderboard.class,
+                new String[] {"key", "mode", "window", "order", "total", "memberCount", "limit", "offset",
+                        "effectiveStart", "effectiveEnd", "entries"},
+                new Class<?>[] {String.class, String.class, String.class, String.class, String.class,
+                        long.class, long.class, long.class, Instant.class, Instant.class, List.class});
+
+        assertNull(new MemberWriteOptions((Instant) null).occurredAt(),
+                "absent optional member occurredAt stays null");
+        assertNull(new SubmitOptions("sum").occurredAt(),
+                "absent optional submit occurredAt stays null");
+        assertNull(new DerivedSeriesPoint(Instant.EPOCH, null).value(),
+                "nullable derived DecimalValue remains data");
     }
 
     @Test
@@ -148,5 +211,15 @@ class PublicApiShapeTest {
                                 .collect(Collectors.joining(","))
                         + "):" + method.getReturnType().getSimpleName())
                 .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static void assertRecordShape(Class<?> type, String[] names, Class<?>[] types) {
+        RecordComponent[] components = type.getRecordComponents();
+        assertArrayEquals(names,
+                Arrays.stream(components).map(RecordComponent::getName).toArray(String[]::new),
+                type.getSimpleName() + " component names");
+        assertArrayEquals(types,
+                Arrays.stream(components).map(RecordComponent::getType).toArray(Class<?>[]::new),
+                type.getSimpleName() + " component types");
     }
 }

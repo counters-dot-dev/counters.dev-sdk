@@ -19,8 +19,7 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -108,8 +107,8 @@ class ExpandedSurfaceTest {
         assertTrue(idem.matches(UUID_V4), "Idempotency-Key must be a v4 UUID, got: " + idem);
     }
 
-    private static OffsetDateTime at() {
-        return OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    private static Instant at() {
+        return Instant.parse("2026-01-01T00:00:00Z");
     }
 
     @Test
@@ -123,11 +122,12 @@ class ExpandedSurfaceTest {
             assertEquals("GET", recorded.get(0).method());
             assertEquals("/v1/usage", recorded.get(0).rawPath());
             assertEquals("2026-07", usage.month());
-            assertEquals(12L, usage.ops().used());
-            assertNull(usage.ops().quota());
+            assertEquals(12L, usage.operations().used());
+            assertNull(usage.operations().quota());
+            assertEquals(Instant.parse("2026-08-01T00:00:00Z"), usage.operations().resetsAt());
             assertEquals(3L, usage.counters().used());
-            assertEquals(50L, usage.limits().rateLimitRps());
-            assertNull(usage.limits().monthlyOpsQuota());
+            assertEquals(50L, usage.limits().rateLimitRequestsPerSecond());
+            assertNull(usage.limits().monthlyOperationsQuota());
         }
     }
 
@@ -157,12 +157,17 @@ class ExpandedSurfaceTest {
                         + "{\"t\":\"2026-01-01T01:00:00Z\",\"v\":null}]}"));
         try (CountersClient c = client(baseUrl)) {
             DerivedSeriesResponse s = c.derived("conversion:rate").series(
-                    new DerivedSeriesParams(at(), at().plusHours(2), "1h", "Europe/London"));
+                    new DerivedSeriesParams(at(), at().plus(2, ChronoUnit.HOURS), "1h", "Europe/London"));
             assertEquals("/v1/derived/conversion%3Arate/series", recorded.get(0).rawPath());
             assertEquals(Map.of("from", "2026-01-01T00:00:00Z", "to", "2026-01-01T02:00:00Z",
                     "bucket", "1h", "tz", "Europe/London"), parseQuery(recorded.get(0).query()));
-            assertEquals("0.010000", s.points().get(0).v());
-            assertNull(s.points().get(1).v(), "derived series null point must be preserved in place");
+            assertEquals("Europe/London", s.timeZone());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.range().from());
+            assertEquals(Instant.parse("2026-01-01T02:00:00Z"), s.range().to());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals("0.010000", s.points().get(0).value());
+            assertEquals(Instant.parse("2026-01-01T01:00:00Z"), s.points().get(1).timestamp());
+            assertNull(s.points().get(1).value(), "derived series null point must be preserved in place");
         }
     }
 
@@ -211,7 +216,8 @@ class ExpandedSurfaceTest {
                     new WindowLeaderboardParams("7d", 10, null, null, null));
             assertEquals(Map.of("limit", "10", "window", "7d"), parseQuery(recorded.get(0).query()));
             assertEquals("7d", lb.window());
-            assertEquals("2025-12-25T00:00:00Z", lb.effectiveStart());
+            assertEquals(Instant.parse("2025-12-25T00:00:00Z"), lb.effectiveStart());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), lb.effectiveEnd());
             assertEquals("25", lb.entries().get(0).value());
         }
     }
@@ -329,9 +335,10 @@ class ExpandedSurfaceTest {
                         + "\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"5\"}]}"));
         try (CountersClient c = client(baseUrl)) {
             MemberSeriesResponse s = c.counter("board").memberSeries("alice|bob",
-                    new SeriesParams(at(), at().plusHours(1), "1h", "delta", null, null));
+                    new SeriesParams(at(), at().plus(1, ChronoUnit.HOURS), "1h", "delta", null, null));
             assertEquals("alice|bob", parseQuery(recorded.get(0).query()).get("member"));
             assertEquals("delta", parseQuery(recorded.get(0).query()).get("mode"));
+            assertNull(s.timeZone());
             assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
             assertEquals("5", s.points().get(0).value());
         }
@@ -345,9 +352,10 @@ class ExpandedSurfaceTest {
                         + "\"series\":[{\"member\":\"alice\",\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"5\"}]}]}"));
         try (CountersClient c = client(baseUrl)) {
             MemberGroupSeriesResponse s = c.counter("board").groupSeries(
-                    new SeriesParams(at(), at().plusHours(1), "1h"));
+                    new SeriesParams(at(), at().plus(1, ChronoUnit.HOURS), "1h"));
             assertEquals("member", parseQuery(recorded.get(0).query()).get("groupBy"));
             assertEquals("alice", s.series().get(0).member());
+            assertNull(s.timeZone());
             assertEquals(Instant.parse("2026-01-01T00:00:00Z"),
                     s.series().get(0).points().get(0).timestamp());
             assertEquals("5", s.series().get(0).points().get(0).value());
@@ -424,12 +432,12 @@ class ExpandedSurfaceTest {
                     case "memberAdd" -> member.add((String) input.get("amount"),
                             new MemberWriteOptions((String) input.get("metadata"),
                                     input.get("occurredAt") == null ? null
-                                            : OffsetDateTime.parse((String) input.get("occurredAt"))));
+                                            : Instant.parse((String) input.get("occurredAt"))));
                     case "memberSubtract" -> member.subtract((String) input.get("amount"));
                     case "memberSubmit" -> member.submit((String) input.get("value"),
                             new SubmitOptions((String) input.get("mode"), (String) input.get("metadata"),
                                     input.get("occurredAt") == null ? null
-                                            : OffsetDateTime.parse((String) input.get("occurredAt"))));
+                                            : Instant.parse((String) input.get("occurredAt"))));
                     default -> throw new AssertionError("unknown op " + c.get("op"));
                 }
                 assertEquals(want, parseBody(recorded.get(0).body()), (String) c.get("name"));
@@ -478,8 +486,8 @@ class ExpandedSurfaceTest {
                             + "\"},\"points\":[]}"));
             try (CountersClient client = client(baseUrl)) {
                 client.derived("conversion").series(new DerivedSeriesParams(
-                        OffsetDateTime.parse((String) p.get("from")),
-                        OffsetDateTime.parse((String) p.get("to")),
+                        Instant.parse((String) p.get("from")),
+                        Instant.parse((String) p.get("to")),
                         (String) p.get("bucket"),
                         (String) p.get("tz")));
                 assertQueryExact((Map<String, Object>) c.get("query"), recorded.get(0).query(), (String) c.get("name"));
@@ -509,8 +517,8 @@ class ExpandedSurfaceTest {
                     Map<String, Object> range = (Map<String, Object>) body.get("range");
                     DerivedSeriesResponse s = client.derived((String) body.get("key")).series(
                             new DerivedSeriesParams(
-                                    OffsetDateTime.parse((String) range.get("from")),
-                                    OffsetDateTime.parse((String) range.get("to")),
+                                    Instant.parse((String) range.get("from")),
+                                    Instant.parse((String) range.get("to")),
                                     (String) body.get("bucket")));
                     assertEquals(expect.get("key"), s.key(), (String) c.get("name"));
                     assertEquals(expect.get("bucket"), s.bucket(), (String) c.get("name"));
@@ -519,8 +527,9 @@ class ExpandedSurfaceTest {
                     assertEquals(points.size(), s.points().size(), (String) c.get("name"));
                     for (int i = 0; i < points.size(); i++) {
                         Map<String, Object> ep = (Map<String, Object>) points.get(i);
-                        assertEquals(ep.get("t"), s.points().get(i).t(), (String) c.get("name"));
-                        assertEquals(ep.get("v"), s.points().get(i).v(), (String) c.get("name"));
+                        assertEquals(Instant.parse((String) ep.get("t")),
+                                s.points().get(i).timestamp(), (String) c.get("name"));
+                        assertEquals(ep.get("v"), s.points().get(i).value(), (String) c.get("name"));
                     }
                 }
             }
@@ -573,8 +582,8 @@ class ExpandedSurfaceTest {
                 assertEquals(expect.get("mode"), lb.mode(), name);
                 assertEquals(expect.get("window"), lb.window(), name);
                 assertEquals(expect.get("total"), lb.total(), name);
-                assertEquals(expect.get("effectiveStart"), lb.effectiveStart(), name);
-                assertEquals(expect.get("effectiveEnd"), lb.effectiveEnd(), name);
+                assertEquals(Instant.parse((String) expect.get("effectiveStart")), lb.effectiveStart(), name);
+                assertEquals(Instant.parse((String) expect.get("effectiveEnd")), lb.effectiveEnd(), name);
                 assertEquals(((List<?>) expect.get("entries")).size(), lb.entries().size(), name);
             }
             case "memberValue" -> {

@@ -6,7 +6,7 @@ import java.util.List;
 public record DerivedSeriesResponse(
         String key,
         String bucket,
-        String tz,
+        String timeZone,
         long scale,
         SeriesResponse.Range range,
         List<DerivedSeriesPoint> points) {}

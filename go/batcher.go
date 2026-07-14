@@ -84,9 +84,9 @@ func (b *batcher) Flush() error {
 			continue // add then equal subtract -> net no-op
 		}
 		if delta.Sign() > 0 {
-			ops = append(ops, Operation{CounterKey: key, Op: "add", Amount: delta.String(), IdempotencyKey: NewIdempotencyKey()})
+			ops = append(ops, Operation{CounterKey: key, Operation: "add", Amount: delta.String(), IdempotencyKey: NewIdempotencyKey()})
 		} else {
-			ops = append(ops, Operation{CounterKey: key, Op: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: NewIdempotencyKey()})
+			ops = append(ops, Operation{CounterKey: key, Operation: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: NewIdempotencyKey()})
 		}
 	}
 	b.buf = map[string]*big.Int{}

@@ -17,8 +17,9 @@ Counter values and series deltas remain decimal strings all the way to the UI. I
 `"18446744073709551617"` is exact and even exceeds unsigned 64-bit, while
 `Number("18446744073709551617")` silently rounds it because it is beyond
 `Number.MAX_SAFE_INTEGER`; use the string for display or `BigInt` for integer arithmetic.
-Series bucket starts are native `Date` values, so the route serializes `point.timestamp` explicitly
-while passing the exact delta through as `point.value`.
+Series range bounds and bucket starts are native `Date` values, so the route serializes
+`point.timestamp` explicitly while passing the exact delta through as `point.value`. The public
+series option is `timeZone`; the SDK keeps the compact `tz` name inside its query encoder.
 
 This is documentation that typechecks, not a runnable Next.js app. It uses the platform `Request` and
 `Response` types plus a tiny local route-context type instead of depending on Next.js just for types.

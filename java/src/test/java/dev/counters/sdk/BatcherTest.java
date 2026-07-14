@@ -32,7 +32,7 @@ class BatcherTest {
         assertEquals(1, captured.get(0).size(), "expected one coalesced op");
         Operation op = captured.get(0).get(0);
         assertEquals("c", op.counterKey());
-        assertEquals("add", op.op());
+        assertEquals("add", op.operation());
         assertEquals("6", op.amount());
         assertNotNull(op.idempotencyKey());
     }
@@ -51,7 +51,7 @@ class BatcherTest {
         assertEquals(1, captured.get(0).size(), "z should be dropped: " + captured);
         Operation op = captured.get(0).get(0);
         assertEquals("a", op.counterKey());
-        assertEquals("subtract", op.op());
+        assertEquals("subtract", op.operation());
         assertEquals("7", op.amount());
     }
 

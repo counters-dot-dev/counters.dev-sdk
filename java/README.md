@@ -18,8 +18,9 @@ The one thing you must not do is undo that: parse values with `new BigInteger(va
 `new BigDecimal(value)` for derived values), never `Double.parseDouble` or `Long.parseLong` unless
 you know the magnitude fits.
 
-Response timestamps are native `java.time.Instant` values, including `SeriesPoint.timestamp()` and
-the `createdAt`/`updatedAt` fields.
+Every machine-SDK date-time is a native `java.time.Instant`: request bounds and optional `occurredAt`
+values, series ranges and point timestamps, usage reset time, window-leaderboard boundaries, and
+the `createdAt`/`updatedAt` response fields. Optional date-times remain `null` when absent.
 `Counter.createdAt()` and `Counter.updatedAt()` are nullable because those fields are optional;
 `LeaderboardEntry.updatedAt()` and `MemberSnapshot.updatedAt()` are required instants.
 
@@ -86,7 +87,7 @@ Two kinds of write, deliberately:
   coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
   give `onBatchError` a sink or they are silent. The flush thread is a daemon — it never keeps the
   JVM alive, which also means you must `close()` (try-with-resources) before exit.
-- **Immediate** — `addNow`/`subtractNow` (pass an `OffsetDateTime occurredAt` to stamp an event
+- **Immediate** — `addNow`/`subtractNow` (pass an `Instant occurredAt` to stamp an event
   time for late-arriving data). One request now, returning the new state. Every write carries a
   fresh idempotency key, so retries never double-count.
 
@@ -98,12 +99,14 @@ this SDK against a live server — it is the fastest way to see the whole surfac
 A series is the **per-bucket delta**: how much the counter changed in each bucket of `[from, to)`,
 not a running total. The bucket is one of `1m`, `5m`, `1h`, `1d`, `1w`, `1mo` (finer buckets are
 plan-gated server-side). Empty buckets are omitted unless gapfill is requested — treat a missing
-bucket as zero. `tz` sets an IANA timezone so calendar buckets (`1d`, `1w`, `1mo`) break on local
-boundaries.
+bucket as zero. `SeriesParams.timeZone()` sets an IANA timezone so calendar buckets (`1d`, `1w`,
+`1mo`) break on local boundaries (the SDK maps it to the compact `tz` wire key).
 
 ```java
+Instant to = Instant.now();
 SeriesResponse s = registrations.series(new SeriesParams(
-        OffsetDateTime.now().minusDays(1), OffsetDateTime.now(), "1h"));
+        to.minusSeconds(86_400), to, "1h"));
+Instant coveredFrom = s.range().from();
 for (SeriesPoint point : s.points()) {
     Instant bucketStart = point.timestamp();
     BigInteger delta = new BigInteger(point.value());
@@ -151,7 +154,8 @@ everything above:
 - It is **decimal**, not integer — the result is rounded to a fixed `scale()`.
 - Its value can be **null**. Division by zero does not throw and is not `"0"`; the SDK gives you
   `value() == null` with a human-readable `reason()`. Handle the null. In a series, a bucket that
-  divided by zero is a null `v()` hole preserved in place.
+  divided by zero is a null `value()` hole preserved in place; its `timestamp()` remains an
+  `Instant`.
 
 ```java
 DerivedValueResponse conversion = client.derived("conversion").value();
@@ -220,8 +224,9 @@ has no batching options.
 
 ## Odds and ends
 
-- **Usage**: `client.usage()` returns month-to-date ops, quota, reset instant, and counter
-  headroom. Poll it periodically, not per write. Quota fields are null on unlimited plans.
+- **Usage**: `client.usage()` returns month-to-date operations, quota, reset instant, and counter
+  headroom. The reset is `usage.operations().resetsAt()`—an `Instant`. Poll it periodically, not
+  per write. Quota fields are null on unlimited plans.
 - **Validation helpers**: `Validation.isValidCounterKey`, `isValidMemberKey`, `isValidMetadata`,
   and the `BUCKETS`/`WINDOWS`/`MODES` sets are public so you can pre-check user-supplied names.
 

@@ -10,6 +10,8 @@ sorting would duplicate ranking logic and require many reads. Member values let 
 ranking, ties, percentiles, and aggregate total. Individual raid contributions fit in a Java `long`,
 but cumulative season damage need not, so response strings are converted directly to `BigInteger`
 and never pass through a floating-point or 64-bit parser.
+Leaderboard and member-snapshot update times arrive as native `java.time.Instant` values; the app
+prints `LeaderboardEntry.updatedAt()` directly without parsing the wire timestamp.
 
 The error branches also reflect game-server priorities. API quota failures are logged without
 rolling back the raid, transport failures are dropped after the SDK's built-in retries, and

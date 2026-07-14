@@ -20,7 +20,8 @@ coverage/
 
 # Go
 coverage.out
-go/examples/e2e/example
+go/examples/*/example
+go/examples/*/example.exe
 
 # ---------------------------------------------------------------------------
 # Editors and operating systems

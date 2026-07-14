@@ -259,10 +259,10 @@ type SeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
 	Mode       string `json:"mode"`
-	Tz         string `json:"tz"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []SeriesPoint `json:"points"`
 }
@@ -276,8 +276,8 @@ type SeriesParams struct {
 	Bucket string
 	// Mode is optional; "delta" (per-bucket change) is the only supported mode today.
 	Mode string
-	// Tz is an optional IANA timezone for calendar bucket boundaries (e.g. "Europe/London").
-	Tz string
+	// TimeZone is an optional IANA timezone for calendar bucket boundaries (e.g. "Europe/London").
+	TimeZone string
 	// Gapfill emits zero-valued points for empty buckets instead of omitting them.
 	Gapfill bool
 }
@@ -285,20 +285,20 @@ type SeriesParams struct {
 // Usage is the organization's current quota state (GET /usage). Poll it periodically, not
 // per-write. Quota pointers are nil on unlimited plans.
 type Usage struct {
-	Month string `json:"month"`
-	Ops   struct {
-		Used     int64  `json:"used"`
-		Quota    *int64 `json:"quota"`
-		ResetsAt string `json:"resetsAt"`
+	Month      string `json:"month"`
+	Operations struct {
+		Used     int64     `json:"used"`
+		Quota    *int64    `json:"quota"`
+		ResetsAt time.Time `json:"resetsAt"`
 	} `json:"ops"`
 	Counters struct {
 		Used int64 `json:"used"`
 		Max  int64 `json:"max"`
 	} `json:"counters"`
 	Limits struct {
-		RateLimitRps    int64  `json:"rateLimitRps"`
-		MaxCounters     int64  `json:"maxCounters"`
-		MonthlyOpsQuota *int64 `json:"monthlyOpsQuota"`
+		RateLimitRequestsPerSecond int64  `json:"rateLimitRps"`
+		MaxCounters                int64  `json:"maxCounters"`
+		MonthlyOperationsQuota     *int64 `json:"monthlyOpsQuota"`
 	} `json:"limits"`
 }
 
@@ -363,17 +363,17 @@ type WindowLeaderboard struct {
 	MemberCount    int           `json:"memberCount"`
 	Limit          int           `json:"limit"`
 	Offset         int           `json:"offset"`
-	EffectiveStart string        `json:"effectiveStart"`
-	EffectiveEnd   string        `json:"effectiveEnd"`
+	EffectiveStart time.Time     `json:"effectiveStart"`
+	EffectiveEnd   time.Time     `json:"effectiveEnd"`
 	Entries        []WindowEntry `json:"entries"`
 }
 
 // MemberWriteOpts are the optional fields of an immediate member delta write. Metadata is an
 // opaque payload of at most 1024 UTF-8 bytes, stored and returned verbatim; OccurredAt stamps
-// the write with an event time for series bucketing (zero value = ingest time).
+// the write with an event time for series bucketing (nil = ingest time).
 type MemberWriteOpts struct {
 	Metadata   string
-	OccurredAt time.Time
+	OccurredAt *time.Time
 }
 
 // SubmitOpts are the optional fields of a member score submit. Mode ("sum", "latest", "min",
@@ -381,7 +381,7 @@ type MemberWriteOpts struct {
 type SubmitOpts struct {
 	Mode       string
 	Metadata   string
-	OccurredAt time.Time
+	OccurredAt *time.Time
 }
 
 // MemberGetParams are the read parameters for a member snapshot. Epoch selects a past season
@@ -433,10 +433,10 @@ type MemberSeriesResponse struct {
 	Member     string `json:"member"`
 	Bucket     string `json:"bucket"`
 	Mode       string `json:"mode"`
-	Tz         string `json:"tz"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []SeriesPoint `json:"points"`
 }
@@ -451,21 +451,21 @@ type MemberSeriesEntry struct {
 type MemberGroupSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
-	Tz         string `json:"tz"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Series []MemberSeriesEntry `json:"series"`
 }
 
 // DerivedSeriesParams are the read parameters for a derived series over [From, To). Only
-// From/To/Bucket/Tz — a derived series has no gapfill, mode, or member dimension.
+// From/To/Bucket/TimeZone — a derived series has no gapfill, mode, or member dimension.
 type DerivedSeriesParams struct {
-	From   time.Time
-	To     time.Time
-	Bucket string
-	Tz     string
+	From     time.Time
+	To       time.Time
+	Bucket   string
+	TimeZone string
 }
 
 // DerivedValueResponse is the evaluated value of a derived counter. Value is a signed decimal
@@ -480,23 +480,23 @@ type DerivedValueResponse struct {
 	Reason *string           `json:"reason,omitempty"`
 }
 
-// DerivedSeriesPoint is one derived-series bucket. V is a decimal string, or nil for a bucket
-// whose evaluation divided by zero (a hole preserved in place).
+// DerivedSeriesPoint is one derived-series bucket. Value is a decimal string, or nil for a
+// bucket whose evaluation divided by zero (a hole preserved in place).
 type DerivedSeriesPoint struct {
-	T string  `json:"t"`
-	V *string `json:"v"`
+	Timestamp time.Time `json:"t"`
+	Value     *string   `json:"v"`
 }
 
 // DerivedSeriesResponse is a derived counter evaluated per bucket over [from, to). The series
 // is always dense; Scale is the fixed number of decimal places (rounded HALF_UP).
 type DerivedSeriesResponse struct {
-	Key    string `json:"key"`
-	Bucket string `json:"bucket"`
-	Tz     string `json:"tz"`
-	Scale  int    `json:"scale"`
-	Range  struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+	Key      string `json:"key"`
+	Bucket   string `json:"bucket"`
+	TimeZone string `json:"tz"`
+	Scale    int    `json:"scale"`
+	Range    struct {
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []DerivedSeriesPoint `json:"points"`
 }
@@ -504,11 +504,11 @@ type DerivedSeriesResponse struct {
 // Operation is one entry in a batch.
 type Operation struct {
 	CounterKey     string `json:"counterKey"`
-	Op             string `json:"op"`
+	Operation      string `json:"op"`
 	Amount         string `json:"amount,omitempty"`
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
-	// OccurredAt (RFC 3339) buckets the op at event time instead of ingest time (offline spools).
-	OccurredAt string `json:"occurredAt,omitempty"`
+	// OccurredAt buckets the operation at event time instead of ingest time (offline spools).
+	OccurredAt *time.Time `json:"occurredAt,omitempty"`
 }
 
 // --- client ---
@@ -903,7 +903,7 @@ func (m *MemberHandle) Submit(ctx context.Context, value any, opts SubmitOpts) (
 		}
 		body["metadata"] = opts.Metadata
 	}
-	if !opts.OccurredAt.IsZero() {
+	if opts.OccurredAt != nil {
 		body["occurredAt"] = opts.OccurredAt.UTC().Format(time.RFC3339)
 	}
 	var out MemberValue
@@ -930,7 +930,7 @@ func (m *MemberHandle) applyDelta(ctx context.Context, op string, amount any, op
 		}
 		body["metadata"] = o.Metadata
 	}
-	if !o.OccurredAt.IsZero() {
+	if o.OccurredAt != nil {
 		body["occurredAt"] = o.OccurredAt.UTC().Format(time.RFC3339)
 	}
 	var out MemberValue
@@ -1021,7 +1021,7 @@ func (d *DerivedHandle) Value(ctx context.Context) (*DerivedValueResponse, error
 }
 
 // Series evaluates the derived expression per bucket over [p.From, p.To). The series is
-// always dense; a bucket that divided by zero has a nil V preserved in place.
+// always dense; a bucket that divided by zero has a nil Value preserved in place.
 func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*DerivedSeriesResponse, error) {
 	if !IsValidBucket(p.Bucket) {
 		return nil, &ValidationError{"invalid bucket " + strconv.Quote(p.Bucket) + "; expected one of " + strings.Join(Buckets, ", ")}
@@ -1030,8 +1030,8 @@ func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*Der
 	q.Set("from", p.From.UTC().Format(time.RFC3339))
 	q.Set("to", p.To.UTC().Format(time.RFC3339))
 	q.Set("bucket", p.Bucket)
-	if p.Tz != "" {
-		q.Set("tz", p.Tz)
+	if p.TimeZone != "" {
+		q.Set("tz", p.TimeZone)
 	}
 	var out DerivedSeriesResponse
 	err := d.client.do(ctx, "GET", "/derived/"+url.PathEscape(d.Key)+"/series", nil, "", q, &out)
@@ -1057,8 +1057,8 @@ func seriesQuery(p SeriesParams) (url.Values, error) {
 	if p.Mode != "" {
 		q.Set("mode", p.Mode)
 	}
-	if p.Tz != "" {
-		q.Set("tz", p.Tz)
+	if p.TimeZone != "" {
+		q.Set("tz", p.TimeZone)
 	}
 	if p.Gapfill {
 		q.Set("gapfill", "true")
@@ -1138,9 +1138,9 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	}
 	op := Operation{CounterKey: key, IdempotencyKey: NewIdempotencyKey()}
 	if delta.Sign() >= 0 {
-		op.Op, op.Amount = "add", delta.String()
+		op.Operation, op.Amount = "add", delta.String()
 	} else {
-		op.Op, op.Amount = "subtract", new(big.Int).Neg(delta).String()
+		op.Operation, op.Amount = "subtract", new(big.Int).Neg(delta).String()
 	}
 	// Fire-and-forget, like a background flush — so failures route to the same OnError sink
 	// (previously they were dropped, which silently lost counted writes).

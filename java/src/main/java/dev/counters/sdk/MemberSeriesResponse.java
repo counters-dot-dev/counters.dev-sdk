@@ -8,6 +8,6 @@ public record MemberSeriesResponse(
         String member,
         String bucket,
         String mode,
-        String tz,
+        String timeZone,
         SeriesResponse.Range range,
         List<SeriesPoint> points) {}

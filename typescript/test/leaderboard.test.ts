@@ -92,7 +92,10 @@ describe("leaderboard conformance — encodeBody (member write → request JSON)
     // presence-exact on the object: exactly the keys the vector names.
     expect(new Set(Object.keys(parsed))).toEqual(new Set(Object.keys(c.body)));
     // byte-verbatim on the values (amount/value/metadata copied through unchanged).
-    for (const [k, v] of Object.entries(c.body)) expect(parsed[k]).toBe(v);
+    for (const [k, v] of Object.entries(c.body)) {
+      const expected = k === "occurredAt" ? new Date(v).toISOString() : v;
+      expect(parsed[k]).toBe(expected);
+    }
   });
 });
 
@@ -171,6 +174,14 @@ function assertNativeTimestamps(actual: Record<string, unknown>, vector: ParseCa
     });
   }
   if (vector.kind === "windowLeaderboard") {
+    expect(actual.effectiveStart, "window effectiveStart must be a Date").toBeInstanceOf(Date);
+    expect((actual.effectiveStart as Date).toISOString()).toBe(
+      new Date(vector.body.effectiveStart as string).toISOString(),
+    );
+    expect(actual.effectiveEnd, "window effectiveEnd must be a Date").toBeInstanceOf(Date);
+    expect((actual.effectiveEnd as Date).toISOString()).toBe(
+      new Date(vector.body.effectiveEnd as string).toISOString(),
+    );
     const entries = actual.entries as Record<string, unknown>[];
     entries.forEach((entry, i) => {
       expect(entry, `window entry ${i} must not gain updatedAt`).not.toHaveProperty("updatedAt");
@@ -201,6 +212,11 @@ function assertFields(actual: Record<string, unknown>, expected: Record<string, 
       wantEntries.forEach((we, i) => assertFields(gotEntries[i]!, we));
       continue;
     }
+    if (k === "effectiveStart" || k === "effectiveEnd") {
+      expect(actual[k], `${k} must be a Date`).toBeInstanceOf(Date);
+      expect((actual[k] as Date).toISOString()).toBe(new Date(v as string).toISOString());
+      continue;
+    }
     if (STRING_FIELDS.has(k)) {
       // Arbitrary-precision decimal/integer strings must survive parsing AS strings (never a number).
       expect(typeof actual[k], `${k} must stay a string`).toBe("string");
@@ -209,10 +225,10 @@ function assertFields(actual: Record<string, unknown>, expected: Record<string, 
   }
 }
 
-function optsFrom(input: Record<string, string>): { metadata?: string; occurredAt?: string } {
-  const opts: { metadata?: string; occurredAt?: string } = {};
+function optsFrom(input: Record<string, string>): { metadata?: string; occurredAt?: Date } {
+  const opts: { metadata?: string; occurredAt?: Date } = {};
   if (input.metadata !== undefined) opts.metadata = input.metadata;
-  if (input.occurredAt !== undefined) opts.occurredAt = input.occurredAt;
+  if (input.occurredAt !== undefined) opts.occurredAt = new Date(input.occurredAt);
   return opts;
 }
 
@@ -227,8 +243,8 @@ function leaderboardStub(params: Record<string, unknown>): Record<string, unknow
         memberCount: 0,
         limit: 100,
         offset: 0,
-        effectiveStart: "",
-        effectiveEnd: "",
+        effectiveStart: "2026-01-01T00:00:00Z",
+        effectiveEnd: "2026-01-01T01:00:00Z",
         entries: [],
       }
     : { key: "k", mode: "sum", epoch: 0, order: "desc", memberCount: 0, limit: 100, offset: 0, entries: [] };

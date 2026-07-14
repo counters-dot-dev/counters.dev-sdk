@@ -21,11 +21,16 @@ describe("client.usage()", () => {
     const usage = await client.usage();
     expect(url.pathname).toBe("/v1/usage");
     expect(usage.month).toBe("2026-07");
-    expect(usage.ops.used).toBe(42);
-    expect(usage.ops.quota).toBeNull();
-    expect(usage.ops.resetsAt).toBe("2026-08-01T00:00:00Z");
+    expect(usage.operations.used).toBe(42);
+    expect(usage.operations.quota).toBeNull();
+    expect(usage.operations.resetsAt).toBeInstanceOf(Date);
+    expect(usage.operations.resetsAt.toISOString()).toBe("2026-08-01T00:00:00.000Z");
     expect(usage.counters).toEqual({ used: 3, max: 1000 });
-    expect(usage.limits.monthlyOpsQuota).toBeNull();
+    expect(usage.limits.rateLimitRequestsPerSecond).toBe(50);
+    expect(usage.limits.monthlyOperationsQuota).toBeNull();
+    expect(usage).not.toHaveProperty("ops");
+    expect(usage.limits).not.toHaveProperty("rateLimitRps");
+    expect(usage.limits).not.toHaveProperty("monthlyOpsQuota");
   });
 
   it("carries a numeric quota when the plan is capped", async () => {
@@ -42,7 +47,7 @@ describe("client.usage()", () => {
       ),
     });
     const usage = await client.usage();
-    expect(usage.ops.quota).toBe(1000);
-    expect(usage.limits.monthlyOpsQuota).toBe(1000);
+    expect(usage.operations.quota).toBe(1000);
+    expect(usage.limits.monthlyOperationsQuota).toBe(1000);
   });
 });

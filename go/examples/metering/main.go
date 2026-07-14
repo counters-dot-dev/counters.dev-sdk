@@ -92,7 +92,7 @@ func dailyRollup(ctx context.Context, usage *counters.CounterHandle, customerID 
 		// Unlike Value (the lifetime total), a 1d series isolates the billing period and leaves
 		// auditable daily buckets behind the figure.
 		series, err := usage.Series(ctx, counters.SeriesParams{
-			From: now.AddDate(-1, 0, 0), To: now, Bucket: "1d", Mode: "delta", Tz: "UTC",
+			From: now.AddDate(-1, 0, 0), To: now, Bucket: "1d", Mode: "delta", TimeZone: "UTC",
 		})
 		if err != nil {
 			reportCounterError("daily billing rollup", err)

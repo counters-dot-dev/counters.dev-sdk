@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.math.BigInteger;
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -76,7 +76,7 @@ class ConformanceTest {
     @Test
     void bucketVectors() throws IOException {
         Map<String, Object> v = loadVectors("buckets.json");
-        OffsetDateTime now = OffsetDateTime.now();
+        Instant now = Instant.now();
         for (Object b : (List<?>) v.get("valid")) {
             assertTrue(SeriesParams.BUCKETS.contains((String) b), "expected valid bucket: " + b);
             assertDoesNotThrow(() -> new SeriesParams(now, now, (String) b), "expected valid bucket: " + b);

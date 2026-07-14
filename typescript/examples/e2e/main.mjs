@@ -200,9 +200,9 @@ async function tour() {
   // Usage: org-wide quota state. Tolerant lower-bound assertions — this org wrote many counters above.
   const usage = await client.usage();
   invoked.add("CountersClient.usage");
-  assert(usage.ops.used >= 1, "usage reports at least the writes this run made");
+  assert(usage.operations.used >= 1, "usage reports at least the writes this run made");
   assert(usage.counters.used >= 1, "usage reports at least one live counter");
-  assert(typeof usage.ops.resetsAt === "string" && usage.ops.resetsAt.length > 0, "usage carries a resetsAt instant");
+  assert(usage.operations.resetsAt instanceof Date, "usage carries a native-Date resetsAt instant");
   assert(typeof usage.month === "string", "usage carries the UTC month");
 
   await client.close();
@@ -371,7 +371,7 @@ async function replayVectors() {
               from: minutes(p.fromMin),
               to: minutes(p.toMin),
               bucket: p.bucket,
-              tz: p.tz,
+              timeZone: p.tz,
               gapfill: p.gapfill,
             });
           }
@@ -439,9 +439,9 @@ async function replayVectors() {
       }
       if (expect.usage !== undefined) {
         const u = expect.usage;
-        if (u.opsUsedAtLeast !== undefined) assert(body.ops.used >= u.opsUsedAtLeast, `${where}: opsUsedAtLeast ${u.opsUsedAtLeast}, got ${body.ops.used}`);
+        if (u.opsUsedAtLeast !== undefined) assert(body.operations.used >= u.opsUsedAtLeast, `${where}: opsUsedAtLeast ${u.opsUsedAtLeast}, got ${body.operations.used}`);
         if (u.countersUsedAtLeast !== undefined) assert(body.counters.used >= u.countersUsedAtLeast, `${where}: countersUsedAtLeast ${u.countersUsedAtLeast}, got ${body.counters.used}`);
-        if (u.hasResetsAt !== undefined) assertEq(body.ops.resetsAt !== undefined && body.ops.resetsAt !== null, u.hasResetsAt, `${where}: hasResetsAt`);
+        if (u.hasResetsAt !== undefined) assertEq(body.operations.resetsAt !== undefined && body.operations.resetsAt !== null, u.hasResetsAt, `${where}: hasResetsAt`);
       }
       // Leaderboard/member expectations (member keys are literal — not namespaced).
       if (expect.memberValue !== undefined) assertEq(body.memberValue, expect.memberValue, `${where}: memberValue`);

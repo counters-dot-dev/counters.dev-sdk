@@ -22,6 +22,7 @@ import type {
   BatchResponse,
   Counter,
   CounterPage,
+  DerivedSeriesPoint,
   DerivedSeriesParams,
   DerivedSeriesResponse,
   DerivedValueResponse,
@@ -124,9 +125,9 @@ export class CountersClient {
       .then(parseCounterPage);
   }
 
-  /** Current quota state for the organization (month-to-date ops, counter headroom, plan limits). */
+  /** Current quota state for the organization (month-to-date operations, counter headroom, plan limits). */
   usage(): Promise<Usage> {
-    return this.http.request<Usage>("GET", "/usage");
+    return this.http.request<WireUsage>("GET", "/usage").then(parseUsage);
   }
 
   /**
@@ -221,7 +222,7 @@ export class CountersClient {
             to: toIso(params.to),
             bucket: params.bucket,
             mode: params.mode,
-            tz: params.tz,
+            tz: params.timeZone,
             // gapfill: omit-when-false. The spec default is already `false`, so an explicit
             // `gapfill=false` is identical to omission — send the parameter only when `true`, matching
             // the other SDKs (pinned by the conformance/series query-encoding vectors).
@@ -253,7 +254,7 @@ export class CountersClient {
       },
     };
     if (params.window !== undefined) {
-      return this.http.request<WindowLeaderboard>("GET", path, opts);
+      return this.http.request<WireWindowLeaderboard>("GET", path, opts).then(parseWindowLeaderboard);
     }
     return this.http.request<WireLeaderboard>("GET", path, opts).then(parseLeaderboard);
   }
@@ -332,48 +333,52 @@ export class CountersClient {
   /** @internal */
   getDerivedSeries(key: string, params: DerivedSeriesParams): Promise<DerivedSeriesResponse> {
     assertBucket(params.bucket);
-    return this.http.request<DerivedSeriesResponse>("GET", `/derived/${enc(key)}/series`, {
-      query: {
-        from: toIso(params.from),
-        to: toIso(params.to),
-        bucket: params.bucket,
-        tz: params.tz,
-      },
-    });
+    return this.http
+      .request<WireDerivedSeriesResponse>("GET", `/derived/${enc(key)}/series`, {
+        query: {
+          from: toIso(params.from),
+          to: toIso(params.to),
+          bucket: params.bucket,
+          tz: params.timeZone,
+        },
+      })
+      .then(parseDerivedSeries);
   }
 
   private fireSingle(key: string, delta: bigint): void {
     // Match the buffered path: a write after close() has no worker to observe it — surface the misuse.
     if (this.batcher.isClosed()) throw new CountersError("cannot enqueue on a closed client");
-    const op: Operation =
+    const operation: Operation =
       delta >= 0n
-        ? { counterKey: key, op: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
-        : { counterKey: key, op: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() };
+        ? { counterKey: key, operation: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
+        : { counterKey: key, operation: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() };
     // Fire-and-forget, like a background flush — so failures route to the same onError sink
     // (previously they were swallowed, which silently dropped counted writes).
-    void this.submitBatch([op]).catch((e) => this.onWriteError?.(normaliseWriteError(e)));
+    void this.submitBatch([operation]).catch((e) => this.onWriteError?.(normaliseWriteError(e)));
   }
 
   private submitBatch(ops: Operation[]): Promise<void> {
-    return this.http.request<BatchResponse>("POST", "/batch", { body: { operations: ops } }).then((res) => {
-      // The HTTP 200 only means the batch was accepted; each operation carries its own status. A
-      // per-op "error" (e.g. a counter/quota cap) would otherwise vanish silently — surface it so the
-      // buffered path routes it to onError and the immediate path can observe it.
-      const failed = (res.results ?? []).filter((r) => r.status === "error");
-      if (failed.length > 0) {
-        const first = failed[0]!;
-        const msg = `batch: ${failed.length}/${res.results.length} operation(s) failed (${first.counterKey}: ${first.error?.title ?? "error"})`;
-        // Per-op error mapping. A problem carrying a `status`
-        // surfaces as the api type — exactly as if the operation had failed standalone. A problem with
-        // no status (or no problem at all) is a response the SDK cannot faithfully represent as an api
-        // error: §2 bans fabricating a 0/undefined status, so reject it via the validation type.
-        const status = first.error?.status;
-        if (status !== undefined) {
-          throw new CountersApiError(msg, status, first.error);
+    return this.http
+      .request<BatchResponse>("POST", "/batch", { body: { operations: ops.map(toWireOperation) } })
+      .then((res) => {
+        // The HTTP 200 only means the batch was accepted; each operation carries its own status. A
+        // per-op "error" (e.g. a counter/quota cap) would otherwise vanish silently — surface it so the
+        // buffered path routes it to onError and the immediate path can observe it.
+        const failed = (res.results ?? []).filter((r) => r.status === "error");
+        if (failed.length > 0) {
+          const first = failed[0]!;
+          const msg = `batch: ${failed.length}/${res.results.length} operation(s) failed (${first.counterKey}: ${first.error?.title ?? "error"})`;
+          // Per-op error mapping. A problem carrying a `status`
+          // surfaces as the api type — exactly as if the operation had failed standalone. A problem with
+          // no status (or no problem at all) is a response the SDK cannot faithfully represent as an api
+          // error: §2 bans fabricating a 0/undefined status, so reject it via the validation type.
+          const status = first.error?.status;
+          if (status !== undefined) {
+            throw new CountersApiError(msg, status, first.error);
+          }
+          throw new CountersValidationError(`${msg}; per-op problem carries no status`);
         }
-        throw new CountersValidationError(`${msg}; per-op problem carries no status`);
-      }
-    });
+      });
   }
 }
 
@@ -601,7 +606,7 @@ export class DerivedHandle {
     return this.client.getDerivedValue(this.key);
   }
 
-  /** Evaluate the derived expression per bucket over [from, to). Always dense; per-bucket holes are `v: null`. */
+  /** Evaluate the derived expression per bucket over [from, to). Always dense; per-bucket holes have `value: null`. */
   series(params: DerivedSeriesParams): Promise<DerivedSeriesResponse> {
     return this.client.getDerivedSeries(this.key, params);
   }
@@ -626,16 +631,56 @@ type WireMemberSnapshot = Omit<MemberSnapshot, "updatedAt"> & { updatedAt: strin
 
 type WireSeriesPoint = { t: string; v: Value };
 
-type WireSeriesResponse = Omit<SeriesResponse, "points"> & { points: WireSeriesPoint[] };
+type WireDateRange = { from: string; to: string };
 
-type WireMemberSeriesResponse = Omit<MemberSeriesResponse, "points"> & {
+type WireSeriesResponse = Omit<SeriesResponse, "timeZone" | "range" | "points"> & {
+  tz?: string;
+  range: WireDateRange;
+  points: WireSeriesPoint[];
+};
+
+type WireMemberSeriesResponse = Omit<MemberSeriesResponse, "timeZone" | "range" | "points"> & {
+  tz?: string;
+  range: WireDateRange;
   points: WireSeriesPoint[];
 };
 
 type WireMemberSeriesEntry = Omit<MemberSeriesEntry, "points"> & { points: WireSeriesPoint[] };
 
-type WireMemberGroupSeriesResponse = Omit<MemberGroupSeriesResponse, "series"> & {
+type WireMemberGroupSeriesResponse = Omit<MemberGroupSeriesResponse, "timeZone" | "range" | "series"> & {
+  tz?: string;
+  range: WireDateRange;
   series: WireMemberSeriesEntry[];
+};
+
+type WireDerivedSeriesPoint = { t: string; v: DerivedSeriesPoint["value"] };
+
+type WireDerivedSeriesResponse = Omit<
+  DerivedSeriesResponse,
+  "timeZone" | "range" | "points"
+> & {
+  tz?: string;
+  range: WireDateRange;
+  points: WireDerivedSeriesPoint[];
+};
+
+type WireUsage = Omit<Usage, "operations" | "limits"> & {
+  ops: Omit<Usage["operations"], "resetsAt"> & { resetsAt: string };
+  limits: {
+    rateLimitRps: number;
+    maxCounters: number;
+    monthlyOpsQuota: number | null;
+  };
+};
+
+type WireWindowLeaderboard = Omit<WindowLeaderboard, "effectiveStart" | "effectiveEnd"> & {
+  effectiveStart: string;
+  effectiveEnd: string;
+};
+
+type WireOperation = Omit<Operation, "operation" | "occurredAt"> & {
+  op: Operation["operation"];
+  occurredAt?: string;
 };
 
 function parseCounter(counter: WireCounter): Counter {
@@ -669,23 +714,80 @@ function parseSeriesPoint(point: WireSeriesPoint): SeriesPoint {
   return { timestamp: new Date(point.t), value: point.v };
 }
 
+function parseDateRange(range: WireDateRange): { from: Date; to: Date } {
+  return { from: new Date(range.from), to: new Date(range.to) };
+}
+
+function publicTimeZone(tz: string | undefined): { timeZone?: string } {
+  return tz === undefined ? {} : { timeZone: tz };
+}
+
 function parseSeriesResult(
   response: WireSeriesResponse | WireMemberSeriesResponse | WireMemberGroupSeriesResponse,
 ): SeriesResponse | MemberSeriesResponse | MemberGroupSeriesResponse {
   if ("series" in response) {
+    const { tz, range, series, ...fields } = response;
     return {
-      ...response,
-      series: response.series.map((entry) => ({
+      ...fields,
+      ...publicTimeZone(tz),
+      range: parseDateRange(range),
+      series: series.map((entry) => ({
         ...entry,
         points: entry.points.map(parseSeriesPoint),
       })),
     };
   }
-  return { ...response, points: response.points.map(parseSeriesPoint) };
+  const { tz, range, points, ...fields } = response;
+  return {
+    ...fields,
+    ...publicTimeZone(tz),
+    range: parseDateRange(range),
+    points: points.map(parseSeriesPoint),
+  };
 }
 
-function toIso(t: string | Date): string {
-  return t instanceof Date ? t.toISOString() : t;
+function parseDerivedSeries(response: WireDerivedSeriesResponse): DerivedSeriesResponse {
+  const { tz, range, points, ...fields } = response;
+  return {
+    ...fields,
+    ...publicTimeZone(tz),
+    range: parseDateRange(range),
+    points: points.map((point) => ({ timestamp: new Date(point.t), value: point.v })),
+  };
+}
+
+function parseUsage(usage: WireUsage): Usage {
+  const { ops, limits, ...fields } = usage;
+  return {
+    ...fields,
+    operations: { ...ops, resetsAt: new Date(ops.resetsAt) },
+    limits: {
+      rateLimitRequestsPerSecond: limits.rateLimitRps,
+      maxCounters: limits.maxCounters,
+      monthlyOperationsQuota: limits.monthlyOpsQuota,
+    },
+  };
+}
+
+function parseWindowLeaderboard(leaderboard: WireWindowLeaderboard): WindowLeaderboard {
+  return {
+    ...leaderboard,
+    effectiveStart: new Date(leaderboard.effectiveStart),
+    effectiveEnd: new Date(leaderboard.effectiveEnd),
+  };
+}
+
+function toWireOperation(operation: Operation): WireOperation {
+  const { operation: op, occurredAt, ...fields } = operation;
+  return {
+    ...fields,
+    op,
+    ...(occurredAt === undefined ? {} : { occurredAt: toIso(occurredAt) }),
+  };
+}
+
+function toIso(t: Date): string {
+  return t.toISOString();
 }
 
 function applyBody(amount: bigint, opts?: ApplyOptions): Record<string, string> {

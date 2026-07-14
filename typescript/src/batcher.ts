@@ -66,8 +66,13 @@ export class Batcher {
       if (delta === 0n) continue; // add then equal subtract => net no-op
       ops.push(
         delta > 0n
-          ? { counterKey, op: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
-          : { counterKey, op: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() },
+          ? { counterKey, operation: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
+          : {
+              counterKey,
+              operation: "subtract",
+              amount: (-delta).toString(),
+              idempotencyKey: newIdempotencyKey(),
+            },
       );
     }
     this.buf.clear();

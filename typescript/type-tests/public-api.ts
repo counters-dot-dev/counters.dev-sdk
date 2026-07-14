@@ -6,9 +6,15 @@ import {
   CountersValidationError,
   PublishableCountersClient,
   type CountersClientOptions,
+  type DerivedSeriesPoint,
+  type Operation,
+  type OperationType,
   type PublishableCounterHandle,
   type PublishableMemberHandle,
+  type SeriesResponse,
   type SeriesPoint,
+  type Usage,
+  type WindowLeaderboard,
 } from "../src/index.js";
 
 declare const point: SeriesPoint;
@@ -18,6 +24,43 @@ point.value.toString();
 point.t;
 // @ts-expect-error `v` is a compact wire key, not part of the public point.
 point.v;
+
+declare const derivedPoint: DerivedSeriesPoint;
+derivedPoint.timestamp.toISOString();
+if (derivedPoint.value !== null) derivedPoint.value.toString();
+// @ts-expect-error `t` is a compact wire key, not part of the public derived point.
+derivedPoint.t;
+// @ts-expect-error `v` is a compact wire key, not part of the public derived point.
+derivedPoint.v;
+
+declare const seriesResponse: SeriesResponse;
+seriesResponse.range.from.toISOString();
+seriesResponse.range.to.toISOString();
+seriesResponse.timeZone?.toString();
+// @ts-expect-error `tz` is a compact wire key, not part of the public response.
+seriesResponse.tz;
+
+declare const operation: Operation;
+const operationType: OperationType = operation.operation;
+operation.occurredAt?.toISOString();
+// @ts-expect-error `op` is a compact wire key, not part of the public operation.
+operation.op;
+void operationType;
+
+declare const usage: Usage;
+usage.operations.resetsAt.toISOString();
+usage.limits.rateLimitRequestsPerSecond.toFixed();
+usage.limits.monthlyOperationsQuota?.toFixed();
+// @ts-expect-error `ops` is a compact wire key, not part of the public usage response.
+usage.ops;
+// @ts-expect-error wire abbreviation is not part of the public usage limits.
+usage.limits.rateLimitRps;
+// @ts-expect-error wire abbreviation is not part of the public usage limits.
+usage.limits.monthlyOpsQuota;
+
+declare const windowLeaderboard: WindowLeaderboard;
+windowLeaderboard.effectiveStart.toISOString();
+windowLeaderboard.effectiveEnd.toISOString();
 
 const writable = new CountersClient({
   apiKey: "ck_server",
@@ -36,6 +79,9 @@ writableCounter.add(1);
 writableCounter.subtract(1);
 void writableCounter.addNow(1);
 void writableCounter.subtractNow(1);
+void writableCounter.addNow(1, { occurredAt: new Date() });
+// @ts-expect-error event timestamps use native Date values.
+void writableCounter.addNow(1, { occurredAt: "2026-01-01T00:00:00Z" });
 void writableCounter.clear();
 void writableCounter.delete();
 void writable.list();
@@ -50,6 +96,16 @@ const typedReadOnlyCounter: PublishableCounterHandle = readOnlyCounter;
 readOnlyCounter.key.toString();
 void readOnlyCounter.value();
 void readOnlyCounter.series({ from: new Date(), to: new Date(), bucket: "1h" });
+void readOnlyCounter.series({
+  from: new Date(),
+  to: new Date(),
+  bucket: "1d",
+  timeZone: "Europe/London",
+});
+// @ts-expect-error series bounds use native Date values.
+void readOnlyCounter.series({ from: "2026-01-01T00:00:00Z", to: new Date(), bucket: "1h" });
+// @ts-expect-error `tz` is the wire key; public params use `timeZone`.
+void readOnlyCounter.series({ from: new Date(), to: new Date(), bucket: "1h", tz: "UTC" });
 void readOnlyCounter.series({ from: new Date(), to: new Date(), bucket: "1h", member: "alice" });
 void readOnlyCounter.series({ from: new Date(), to: new Date(), bucket: "1h", groupBy: "member" });
 void readOnlyCounter.leaderboard();
