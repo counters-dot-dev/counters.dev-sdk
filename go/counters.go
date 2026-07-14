@@ -205,6 +205,9 @@ func NewIdempotencyKey() string {
 
 // --- wire types (mirror openapi/openapi.yaml) ---
 
+// Counter is a counter's metadata and current value. Value is a signed arbitrary-precision
+// integer as a decimal string — parse with new(big.Int).SetString(v, 10), never a float.
+// Epoch is incremented by Clear; the value sums deltas within the current epoch.
 type Counter struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
@@ -215,22 +218,30 @@ type Counter struct {
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 }
 
+// ValueResponse is a counter's current value. Value is a signed arbitrary-precision integer
+// as a decimal string.
 type ValueResponse struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Epoch int64  `json:"epoch"`
 }
 
+// CounterPage is one page of counters. NextCursor is non-empty when more results exist;
+// pass it to the next List call.
 type CounterPage struct {
 	Data       []Counter `json:"data"`
 	NextCursor string    `json:"nextCursor,omitempty"`
 }
 
+// SeriesPoint is one time-series bucket: T is the bucket start (RFC 3339), V the delta in
+// that bucket as a decimal string.
 type SeriesPoint struct {
 	T string `json:"t"`
 	V string `json:"v"`
 }
 
+// SeriesResponse is a counter's time series (delta per bucket). Empty buckets are omitted
+// unless gapfill was requested; treat a missing bucket as zero.
 type SeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
@@ -243,15 +254,23 @@ type SeriesResponse struct {
 	Points []SeriesPoint `json:"points"`
 }
 
+// SeriesParams are the read parameters for a counter time series over [From, To).
 type SeriesParams struct {
-	From    time.Time
-	To      time.Time
-	Bucket  string
-	Mode    string
-	Tz      string
+	From time.Time
+	To   time.Time
+	// Bucket is the bucket size: one of Buckets ("1m", "5m", "1h", "1d", "1w", "1mo").
+	// Finer buckets may require a higher plan server-side.
+	Bucket string
+	// Mode is optional; "delta" (per-bucket change) is the only supported mode today.
+	Mode string
+	// Tz is an optional IANA timezone for calendar bucket boundaries (e.g. "Europe/London").
+	Tz string
+	// Gapfill emits zero-valued points for empty buckets instead of omitting them.
 	Gapfill bool
 }
 
+// Usage is the organization's current quota state (GET /usage). Poll it periodically, not
+// per-write. Quota pointers are nil on unlimited plans.
 type Usage struct {
 	Month string `json:"month"`
 	Ops   struct {
@@ -270,21 +289,27 @@ type Usage struct {
 	} `json:"limits"`
 }
 
+// LeaderboardParams are the read parameters for a leaderboard page. Zero values are omitted
+// so the server applies its defaults; Epoch selects a past season (nil = current epoch).
 type LeaderboardParams struct {
 	Limit  int
 	Offset int
-	Order  string
+	Order  string // "asc" or "desc"
 	Epoch  *int64
 }
 
+// WindowLeaderboardParams are the read parameters for a windowed leaderboard. Window is
+// required: one of Windows ("1h", "6h", "12h", "1d", "7d", "30d").
 type WindowLeaderboardParams struct {
 	Limit  int
 	Offset int
-	Order  string
+	Order  string // "asc" or "desc"
 	Epoch  *int64
 	Window string
 }
 
+// LeaderboardEntry is one ranked member. Value is an arbitrary-precision integer string;
+// Metadata is nil when the entry carries none.
 type LeaderboardEntry struct {
 	Rank      int     `json:"rank"`
 	Member    string  `json:"member"`
@@ -293,6 +318,8 @@ type LeaderboardEntry struct {
 	UpdatedAt string  `json:"updatedAt"`
 }
 
+// Leaderboard is a ranked page of a counter's members. Total (the group total) is non-nil
+// only on "sum" boards.
 type Leaderboard struct {
 	Key         string             `json:"key"`
 	Mode        string             `json:"mode"`
@@ -305,12 +332,15 @@ type Leaderboard struct {
 	Entries     []LeaderboardEntry `json:"entries"`
 }
 
+// WindowEntry is one ranked member in a trailing-window leaderboard.
 type WindowEntry struct {
 	Rank   int    `json:"rank"`
 	Member string `json:"member"`
 	Value  string `json:"value"`
 }
 
+// WindowLeaderboard ranks members by summed activity over a trailing window. EffectiveStart
+// and EffectiveEnd are the bounds actually summed (the start is floored to a rollup boundary).
 type WindowLeaderboard struct {
 	Key            string        `json:"key"`
 	Mode           string        `json:"mode"`
@@ -325,22 +355,31 @@ type WindowLeaderboard struct {
 	Entries        []WindowEntry `json:"entries"`
 }
 
+// MemberWriteOpts are the optional fields of an immediate member delta write. Metadata is an
+// opaque payload of at most 1024 UTF-8 bytes, stored and returned verbatim; OccurredAt stamps
+// the write with an event time for series bucketing (zero value = ingest time).
 type MemberWriteOpts struct {
 	Metadata   string
 	OccurredAt time.Time
 }
 
+// SubmitOpts are the optional fields of a member score submit. Mode ("sum", "latest", "min",
+// "max") is required on the first submit to an unconfigured board and immutable afterwards.
 type SubmitOpts struct {
 	Mode       string
 	Metadata   string
 	OccurredAt time.Time
 }
 
+// MemberGetParams are the read parameters for a member snapshot. Epoch selects a past season
+// (nil = current epoch).
 type MemberGetParams struct {
 	Epoch *int64
 	Order string
 }
 
+// MemberValue is a member's standing value after a write. MemberAccepted is false when a
+// min/max submit kept the standing best. Value is the board total, non-nil on "sum" boards.
 type MemberValue struct {
 	Key            string  `json:"key"`
 	Member         string  `json:"member"`
@@ -351,6 +390,8 @@ type MemberValue struct {
 	Value          *string `json:"value,omitempty"`
 }
 
+// MemberRemoved is the result of removing a member. Value is the board total after removal,
+// non-nil on "sum" boards.
 type MemberRemoved struct {
 	Key    string  `json:"key"`
 	Member string  `json:"member"`
@@ -358,6 +399,8 @@ type MemberRemoved struct {
 	Value  *string `json:"value,omitempty"`
 }
 
+// MemberSnapshot is a member's rank, percentile, and standing value within its board.
+// Percentile is a scale-2 decimal string such as "83.33" — never a float.
 type MemberSnapshot struct {
 	Key         string  `json:"key"`
 	Member      string  `json:"member"`
@@ -371,6 +414,7 @@ type MemberSnapshot struct {
 	UpdatedAt   string  `json:"updatedAt"`
 }
 
+// MemberSeriesResponse is one member's per-bucket delta series (series?member=).
 type MemberSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Member     string `json:"member"`
@@ -384,11 +428,13 @@ type MemberSeriesResponse struct {
 	Points []SeriesPoint `json:"points"`
 }
 
+// MemberSeriesEntry is one member's point list within a grouped member series.
 type MemberSeriesEntry struct {
 	Member string        `json:"member"`
 	Points []SeriesPoint `json:"points"`
 }
 
+// MemberGroupSeriesResponse is the dense per-member multi-series (series?groupBy=member).
 type MemberGroupSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
@@ -400,6 +446,8 @@ type MemberGroupSeriesResponse struct {
 	Series []MemberSeriesEntry `json:"series"`
 }
 
+// DerivedSeriesParams are the read parameters for a derived series over [From, To). Only
+// From/To/Bucket/Tz — a derived series has no gapfill, mode, or member dimension.
 type DerivedSeriesParams struct {
 	From   time.Time
 	To     time.Time
@@ -407,6 +455,10 @@ type DerivedSeriesParams struct {
 	Tz     string
 }
 
+// DerivedValueResponse is the evaluated value of a derived counter. Value is a signed decimal
+// string, or nil when the expression divided by zero (see Reason) — never coerced to "0" and
+// never parsed into a float. Inputs holds each referenced counter's current integer value;
+// a missing or deleted counter reads as "0".
 type DerivedValueResponse struct {
 	Key    string            `json:"key"`
 	Value  *string           `json:"value"`
@@ -415,11 +467,15 @@ type DerivedValueResponse struct {
 	Reason *string           `json:"reason,omitempty"`
 }
 
+// DerivedSeriesPoint is one derived-series bucket. V is a decimal string, or nil for a bucket
+// whose evaluation divided by zero (a hole preserved in place).
 type DerivedSeriesPoint struct {
 	T string  `json:"t"`
 	V *string `json:"v"`
 }
 
+// DerivedSeriesResponse is a derived counter evaluated per bucket over [from, to). The series
+// is always dense; Scale is the fixed number of decimal places (rounded HALF_UP).
 type DerivedSeriesResponse struct {
 	Key    string `json:"key"`
 	Bucket string `json:"bucket"`
@@ -477,6 +533,9 @@ type BatchOptions struct {
 	OnError func(error)
 }
 
+// Client is the entry point: obtain per-counter handles with Counter and Derived, page the
+// registry with List, and read quota state with Usage. A Client is safe for concurrent use.
+// Call Close before exit to flush buffered writes.
 type Client struct {
 	apiKey       string
 	baseURL      string
@@ -489,6 +548,7 @@ type Client struct {
 	sleepFn      func(time.Duration) // nil => time.Sleep; overridden in tests to record backoff
 }
 
+// NewClient builds a Client from opts. Only opts.APIKey is required.
 func NewClient(opts Options) (*Client, error) {
 	if opts.APIKey == "" {
 		return nil, errors.New("counters: APIKey is required")
@@ -565,10 +625,12 @@ func (h *CounterHandle) Subtract(amount any) error {
 	return h.client.enqueue(h.Key, new(big.Int).Neg(n))
 }
 
+// AddNow applies an increment immediately and returns the new counter state.
 func (h *CounterHandle) AddNow(ctx context.Context, amount any) (*Counter, error) {
 	return h.applyNow(ctx, "add", amount, time.Time{})
 }
 
+// SubtractNow applies a decrement immediately and returns the new counter state.
 func (h *CounterHandle) SubtractNow(ctx context.Context, amount any) (*Counter, error) {
 	return h.applyNow(ctx, "subtract", amount, time.Time{})
 }
@@ -602,6 +664,7 @@ func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occ
 	return &out, nil
 }
 
+// Clear resets the counter to zero by starting a new epoch; history is retained.
 func (h *CounterHandle) Clear(ctx context.Context) (*Counter, error) {
 	var out Counter
 	err := h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/clear", nil, NewIdempotencyKey(), nil, &out)
@@ -611,10 +674,12 @@ func (h *CounterHandle) Clear(ctx context.Context) (*Counter, error) {
 	return &out, nil
 }
 
+// Delete tombstones the counter.
 func (h *CounterHandle) Delete(ctx context.Context) error {
 	return h.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(h.Key), nil, NewIdempotencyKey(), nil, nil)
 }
 
+// Value reads the counter's current value.
 func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	var out ValueResponse
 	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key)+"/value", nil, "", nil, &out)
@@ -624,6 +689,7 @@ func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	return &out, nil
 }
 
+// Series reads the counter's time series (delta per bucket) over [p.From, p.To).
 func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
 	q, err := seriesQuery(p)
 	if err != nil {
@@ -637,6 +703,8 @@ func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResp
 	return &out, nil
 }
 
+// MemberSeries reads one member's time series (delta per bucket). Requires member series
+// enabled on the counter.
 func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p SeriesParams) (*MemberSeriesResponse, error) {
 	if err := validateMemberKey(member); err != nil {
 		return nil, err
@@ -654,6 +722,8 @@ func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p Serie
 	return &out, nil
 }
 
+// GroupSeries reads the dense per-member multi-series. Requires member series enabled on the
+// counter.
 func (h *CounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*MemberGroupSeriesResponse, error) {
 	q, err := seriesQuery(p)
 	if err != nil {
@@ -668,6 +738,7 @@ func (h *CounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*Membe
 	return &out, nil
 }
 
+// Leaderboard reads the counter's ranked member leaderboard (top-N).
 func (h *CounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*Leaderboard, error) {
 	var out Leaderboard
 	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key)+"/leaderboard", nil, "", leaderboardQuery(p), &out)
@@ -677,6 +748,7 @@ func (h *CounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*
 	return &out, nil
 }
 
+// WindowLeaderboard ranks members by summed activity over the trailing p.Window.
 func (h *CounterHandle) WindowLeaderboard(ctx context.Context, p WindowLeaderboardParams) (*WindowLeaderboard, error) {
 	if err := validateWindow(p.Window); err != nil {
 		return nil, err
@@ -706,6 +778,7 @@ type MemberHandle struct {
 	Member     string
 }
 
+// Get reads this member's rank, percentile, and standing value.
 func (m *MemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnapshot, error) {
 	q := url.Values{}
 	if p.Epoch != nil {
@@ -722,6 +795,8 @@ func (m *MemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnaps
 	return &out, nil
 }
 
+// Remove removes this member from the current board. On "sum" boards the member's value is
+// compensated into the group total.
 func (m *MemberHandle) Remove(ctx context.Context) (*MemberRemoved, error) {
 	var out MemberRemoved
 	err := m.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member), nil, NewIdempotencyKey(), nil, &out)
@@ -731,14 +806,21 @@ func (m *MemberHandle) Remove(ctx context.Context) (*MemberRemoved, error) {
 	return &out, nil
 }
 
+// Add accumulates a non-negative delta onto this member ("sum" board). Immediate — member
+// writes are never buffered. At most one MemberWriteOpts value may be supplied.
 func (m *MemberHandle) Add(ctx context.Context, amount any, opts ...MemberWriteOpts) (*MemberValue, error) {
 	return m.applyDelta(ctx, "add", amount, opts...)
 }
 
+// Subtract subtracts a non-negative delta from this member ("sum" board; the member may go
+// negative). Immediate — member writes are never buffered.
 func (m *MemberHandle) Subtract(ctx context.Context, amount any, opts ...MemberWriteOpts) (*MemberValue, error) {
 	return m.applyDelta(ctx, "subtract", amount, opts...)
 }
 
+// Submit submits a signed score to a score board ("latest" overwrites, "min"/"max" keep the
+// best). opts.Mode is required on the first submit to an unconfigured board. A worse-than-
+// standing submit still succeeds, returning the standing value with MemberAccepted false.
 func (m *MemberHandle) Submit(ctx context.Context, value any, opts SubmitOpts) (*MemberValue, error) {
 	n, err := ToValue(value)
 	if err != nil {
@@ -798,6 +880,8 @@ type DerivedHandle struct {
 	Key    string
 }
 
+// Value evaluates the derived expression now. The result's Value is nil (with a Reason) when
+// the expression divided by zero.
 func (d *DerivedHandle) Value(ctx context.Context) (*DerivedValueResponse, error) {
 	var out DerivedValueResponse
 	err := d.client.do(ctx, "GET", "/derived/"+url.PathEscape(d.Key)+"/value", nil, "", nil, &out)
@@ -807,6 +891,8 @@ func (d *DerivedHandle) Value(ctx context.Context) (*DerivedValueResponse, error
 	return &out, nil
 }
 
+// Series evaluates the derived expression per bucket over [p.From, p.To). The series is
+// always dense; a bucket that divided by zero has a nil V preserved in place.
 func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*DerivedSeriesResponse, error) {
 	if !IsValidBucket(p.Bucket) {
 		return nil, &ValidationError{"invalid bucket " + strconv.Quote(p.Bucket) + "; expected one of " + strings.Join(Buckets, ", ")}
@@ -829,6 +915,11 @@ func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*Der
 func seriesQuery(p SeriesParams) (url.Values, error) {
 	if !IsValidBucket(p.Bucket) {
 		return nil, &ValidationError{"invalid bucket " + strconv.Quote(p.Bucket) + "; expected one of " + strings.Join(Buckets, ", ")}
+	}
+	// Only delta-per-bucket exists today; reject other modes client-side (parity with the
+	// TS/Java SDKs) instead of letting the server 400.
+	if p.Mode != "" && p.Mode != "delta" {
+		return nil, &ValidationError{"invalid mode " + strconv.Quote(p.Mode) + `; only "delta" is supported`}
 	}
 	q := url.Values{}
 	q.Set("from", p.From.UTC().Format(time.RFC3339))
@@ -892,6 +983,8 @@ func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPa
 	return &out, nil
 }
 
+// Usage reads the organization's current quota state. Intended for periodic polling, not
+// per-write interrogation.
 func (c *Client) Usage(ctx context.Context) (*Usage, error) {
 	var out Usage
 	err := c.do(ctx, "GET", "/usage", nil, "", nil, &out)
