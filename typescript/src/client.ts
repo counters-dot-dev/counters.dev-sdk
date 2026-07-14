@@ -1,4 +1,5 @@
-import { Batcher } from "./batcher.js";
+import { Batcher, toWriteFailure } from "./batcher.js";
+import type { OperationFailure } from "./batcher.js";
 import {
   CountersApiError,
   CountersError,
@@ -6,13 +7,14 @@ import {
   CountersValidationError,
 } from "./errors.js";
 import { Http } from "./http.js";
-import { newIdempotencyKey } from "./idempotency.js";
+import { resolveIdempotencyKey } from "./idempotency.js";
 import {
   assertBucket,
   assertCounterKey,
   assertMemberKey,
   assertMetadata,
   assertWindow,
+  describeValue,
   toAmount,
   toValue,
 } from "./validation.js";
@@ -49,6 +51,8 @@ import type {
   Window,
   WindowLeaderboard,
   WindowLeaderboardParams,
+  WriteFailure,
+  WriteOptions,
 } from "./types.js";
 
 export interface CountersClientOptions {
@@ -70,7 +74,7 @@ export interface CountersClientOptions {
      * Sink for errors from fire-and-forget writes — background flushes and, when `enabled` is false,
      * immediate-mode writes. These run detached from any caller, so without this hook they are silent.
      */
-    onError?: (e: CountersError) => void;
+    onError?: (failure: WriteFailure) => void;
   };
 }
 
@@ -89,10 +93,39 @@ export class CountersClient {
   private readonly http: Http;
   private readonly batcher: Batcher;
   private readonly batchEnabled: boolean;
-  private readonly onWriteError?: (e: CountersError) => void;
+  private readonly onWriteError?: (failure: WriteFailure) => void;
 
   constructor(opts: CountersClientOptions) {
-    if (!opts.apiKey) throw new Error("CountersClient: apiKey is required");
+    if (opts == null || typeof opts !== "object" || typeof opts.apiKey !== "string" || !opts.apiKey) {
+      throw new CountersValidationError("CountersClient: apiKey is required");
+    }
+    if (opts.fetch !== undefined && typeof opts.fetch !== "function") {
+      throw new CountersValidationError("fetch must be a function");
+    }
+    const batch = opts.batch;
+    if (batch !== undefined) {
+      if (batch === null || typeof batch !== "object" || Array.isArray(batch)) {
+        throw new CountersValidationError("batch options must be an object");
+      }
+      if (batch.enabled !== undefined && typeof batch.enabled !== "boolean") {
+        throw new CountersValidationError("batch.enabled must be a boolean");
+      }
+      if (
+        batch.maxBatchSize !== undefined
+        && (!Number.isInteger(batch.maxBatchSize) || batch.maxBatchSize < 1)
+      ) {
+        throw new CountersValidationError("batch.maxBatchSize must be a positive integer");
+      }
+      if (
+        batch.intervalMs !== undefined
+        && (typeof batch.intervalMs !== "number" || !Number.isFinite(batch.intervalMs))
+      ) {
+        throw new CountersValidationError("batch.intervalMs must be a finite number");
+      }
+      if (batch.onError !== undefined && typeof batch.onError !== "function") {
+        throw new CountersValidationError("batch.onError must be a function");
+      }
+    }
     this.http = new Http({
       baseUrl: opts.baseUrl ?? DEFAULT_BASE_URL,
       apiKey: opts.apiKey,
@@ -101,12 +134,12 @@ export class CountersClient {
       backoffMs: opts.backoffMs,
       timeoutMs: opts.timeoutMs,
     });
-    this.batchEnabled = opts.batch?.enabled ?? true;
-    this.onWriteError = opts.batch?.onError;
+    this.batchEnabled = batch?.enabled ?? true;
+    this.onWriteError = batch?.onError;
     this.batcher = new Batcher((ops) => this.submitBatch(ops), {
-      maxBatchSize: opts.batch?.maxBatchSize ?? 100,
-      intervalMs: opts.batch?.intervalMs ?? 1000,
-      onError: opts.batch?.onError,
+      maxBatchSize: batch?.maxBatchSize ?? 100,
+      intervalMs: batch?.intervalMs ?? 1000,
+      onError: batch?.onError,
     });
   }
 
@@ -118,16 +151,20 @@ export class CountersClient {
 
   /** List counters in the organization. */
   list(opts: { cursor?: string; limit?: number } = {}): Promise<CounterPage> {
-    return this.http
-      .request<WireCounterPage>("GET", "/counters", {
+    if (opts == null || typeof opts !== "object") {
+      throw new CountersValidationError("list options must be an object");
+    }
+    return parseWireResponse(
+      this.http.request<WireCounterPage>("GET", "/counters", {
         query: { cursor: opts.cursor, limit: opts.limit },
-      })
-      .then(parseCounterPage);
+      }),
+      parseCounterPage,
+    );
   }
 
   /** Current quota state for the organization (month-to-date operations, counter headroom, plan limits). */
   usage(): Promise<Usage> {
-    return this.http.request<WireUsage>("GET", "/usage").then(parseUsage);
+    return parseWireResponse(this.http.request<WireUsage>("GET", "/usage"), parseUsage);
   }
 
   /**
@@ -159,37 +196,34 @@ export class CountersClient {
 
   /** @internal */
   addNow(key: string, amount: bigint, opts?: ApplyOptions): Promise<Counter> {
-    return this.http
+    return parseWireResponse(this.http
       .request<WireCounter>("POST", `/counters/${enc(key)}/add`, {
         body: applyBody(amount, opts),
-        idempotencyKey: newIdempotencyKey(),
-      })
-      .then(parseCounter);
+        idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey),
+      }), parseCounter);
   }
 
   /** @internal */
   subtractNow(key: string, amount: bigint, opts?: ApplyOptions): Promise<Counter> {
-    return this.http
+    return parseWireResponse(this.http
       .request<WireCounter>("POST", `/counters/${enc(key)}/subtract`, {
         body: applyBody(amount, opts),
-        idempotencyKey: newIdempotencyKey(),
-      })
-      .then(parseCounter);
+        idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey),
+      }), parseCounter);
   }
 
   /** @internal */
-  clearCounter(key: string): Promise<Counter> {
-    return this.http
+  clearCounter(key: string, opts?: WriteOptions): Promise<Counter> {
+    return parseWireResponse(this.http
       .request<WireCounter>("POST", `/counters/${enc(key)}/clear`, {
-        idempotencyKey: newIdempotencyKey(),
-      })
-      .then(parseCounter);
+        idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey),
+      }), parseCounter);
   }
 
   /** @internal */
-  deleteCounter(key: string): Promise<void> {
+  deleteCounter(key: string, opts?: WriteOptions): Promise<void> {
     return this.http.request<void>("DELETE", `/counters/${enc(key)}`, {
-      idempotencyKey: newIdempotencyKey(),
+      idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey),
     });
   }
 
@@ -203,6 +237,9 @@ export class CountersClient {
     key: string,
     params: SeriesParams & { member?: string; groupBy?: "member" },
   ): Promise<SeriesResponse | MemberSeriesResponse | MemberGroupSeriesResponse> {
+    if (params == null || typeof params !== "object") {
+      throw new CountersValidationError("series params are required");
+    }
     assertBucket(params.bucket);
     // `member` and `groupBy` are mutually exclusive (the server answers 400) — reject the
     // combination client-side before any network I/O (conformance/series member-and-groupby case).
@@ -212,8 +249,8 @@ export class CountersClient {
       );
     }
     if (params.member !== undefined) assertMemberKey(params.member);
-    return this.http
-      .request<WireSeriesResponse | WireMemberSeriesResponse | WireMemberGroupSeriesResponse>(
+    return parseWireResponse(
+      this.http.request<WireSeriesResponse | WireMemberSeriesResponse | WireMemberGroupSeriesResponse>(
         "GET",
         `/counters/${enc(key)}/series`,
         {
@@ -233,8 +270,9 @@ export class CountersClient {
             groupBy: params.groupBy,
           },
         },
-      )
-      .then(parseSeriesResult);
+      ),
+      parseSeriesResult,
+    );
   }
 
   /** @internal */
@@ -242,6 +280,9 @@ export class CountersClient {
     key: string,
     params: LeaderboardParams & { window?: Window },
   ): Promise<Leaderboard | WindowLeaderboard> {
+    if (params == null || typeof params !== "object") {
+      throw new CountersValidationError("leaderboard params must be an object");
+    }
     if (params.window !== undefined) assertWindow(params.window);
     const path = `/counters/${enc(key)}/leaderboard`;
     const opts = {
@@ -254,26 +295,30 @@ export class CountersClient {
       },
     };
     if (params.window !== undefined) {
-      return this.http.request<WireWindowLeaderboard>("GET", path, opts).then(parseWindowLeaderboard);
+      return parseWireResponse(
+        this.http.request<WireWindowLeaderboard>("GET", path, opts),
+        parseWindowLeaderboard,
+      );
     }
-    return this.http.request<WireLeaderboard>("GET", path, opts).then(parseLeaderboard);
+    return parseWireResponse(this.http.request<WireLeaderboard>("GET", path, opts), parseLeaderboard);
   }
 
   /** @internal */
   getMember(key: string, member: string, params?: MemberGetParams): Promise<MemberSnapshot> {
-    return this.http
-      .request<WireMemberSnapshot>("GET", `/counters/${enc(key)}/members/${enc(member)}`, {
+    return parseWireResponse(
+      this.http.request<WireMemberSnapshot>("GET", `/counters/${enc(key)}/members/${enc(member)}`, {
         query: { epoch: params?.epoch, order: params?.order },
-      })
-      .then(parseMemberSnapshot);
+      }),
+      parseMemberSnapshot,
+    );
   }
 
   /** @internal */
-  removeMember(key: string, member: string): Promise<MemberRemoved> {
+  removeMember(key: string, member: string, opts?: WriteOptions): Promise<MemberRemoved> {
     return this.http.request<MemberRemoved>(
       "DELETE",
       `/counters/${enc(key)}/members/${enc(member)}`,
-      { idempotencyKey: newIdempotencyKey() },
+      { idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey) },
     );
   }
 
@@ -307,7 +352,7 @@ export class CountersClient {
     return this.http.request<MemberValue>(
       "POST",
       `/counters/${enc(key)}/members/${enc(member)}/submit`,
-      { body: submitBody(value, opts), idempotencyKey: newIdempotencyKey() },
+      { body: submitBody(value, opts), idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey) },
     );
   }
 
@@ -321,7 +366,7 @@ export class CountersClient {
     return this.http.request<MemberValue>(
       "POST",
       `/counters/${enc(key)}/members/${enc(member)}/${op}`,
-      { body: memberAmountBody(amount, opts), idempotencyKey: newIdempotencyKey() },
+      { body: memberAmountBody(amount, opts), idempotencyKey: resolveIdempotencyKey(opts?.idempotencyKey) },
     );
   }
 
@@ -332,52 +377,130 @@ export class CountersClient {
 
   /** @internal */
   getDerivedSeries(key: string, params: DerivedSeriesParams): Promise<DerivedSeriesResponse> {
+    if (params == null || typeof params !== "object") {
+      throw new CountersValidationError("derived series params are required");
+    }
     assertBucket(params.bucket);
-    return this.http
-      .request<WireDerivedSeriesResponse>("GET", `/derived/${enc(key)}/series`, {
+    return parseWireResponse(
+      this.http.request<WireDerivedSeriesResponse>("GET", `/derived/${enc(key)}/series`, {
         query: {
           from: toIso(params.from),
           to: toIso(params.to),
           bucket: params.bucket,
           tz: params.timeZone,
         },
-      })
-      .then(parseDerivedSeries);
+      }),
+      parseDerivedSeries,
+    );
   }
 
   private fireSingle(key: string, delta: bigint): void {
     // Match the buffered path: a write after close() has no worker to observe it — surface the misuse.
-    if (this.batcher.isClosed()) throw new CountersError("cannot enqueue on a closed client");
+    if (this.batcher.isClosed()) {
+      throw new CountersValidationError("cannot enqueue on a closed client");
+    }
     const operation: Operation =
       delta >= 0n
-        ? { counterKey: key, operation: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
-        : { counterKey: key, operation: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() };
+        ? { counterKey: key, operation: "add", amount: delta.toString(), idempotencyKey: resolveIdempotencyKey(undefined) }
+        : { counterKey: key, operation: "subtract", amount: (-delta).toString(), idempotencyKey: resolveIdempotencyKey(undefined) };
     // Fire-and-forget, like a background flush — so failures route to the same onError sink
     // (previously they were swallowed, which silently dropped counted writes).
-    void this.submitBatch([operation]).catch((e) => this.onWriteError?.(normaliseWriteError(e)));
+    void this.submitBatch([operation])
+      .then((failures) => {
+        for (const failure of failures) this.onWriteError?.(toWriteFailure(failure));
+      })
+      .catch((error) =>
+        this.onWriteError?.(
+          toWriteFailure({ operation, error: normaliseWriteError(error) }),
+        ),
+      );
   }
 
-  private submitBatch(ops: Operation[]): Promise<void> {
+  private submitBatch(ops: Operation[]): Promise<readonly OperationFailure[]> {
     return this.http
       .request<BatchResponse>("POST", "/batch", { body: { operations: ops.map(toWireOperation) } })
       .then((res) => {
         // The HTTP 200 only means the batch was accepted; each operation carries its own status. A
         // per-op "error" (e.g. a counter/quota cap) would otherwise vanish silently — surface it so the
         // buffered path routes it to onError and the immediate path can observe it.
-        const failed = (res.results ?? []).filter((r) => r.status === "error");
-        if (failed.length > 0) {
-          const first = failed[0]!;
-          const msg = `batch: ${failed.length}/${res.results.length} operation(s) failed (${first.counterKey}: ${first.error?.title ?? "error"})`;
-          // Per-op error mapping. A problem carrying a `status`
-          // surfaces as the api type — exactly as if the operation had failed standalone. A problem with
-          // no status (or no problem at all) is a response the SDK cannot faithfully represent as an api
-          // error: §2 bans fabricating a 0/undefined status, so reject it via the validation type.
-          const status = first.error?.status;
-          if (status !== undefined) {
-            throw new CountersApiError(msg, status, first.error);
+        try {
+          if (res === null || typeof res !== "object" || !Array.isArray(res.results)) {
+            throw new CountersValidationError("batch response: results must be an array");
           }
-          throw new CountersValidationError(`${msg}; per-op problem carries no status`);
+          if (res.results.length !== ops.length) {
+            throw new CountersValidationError(
+              `batch response: expected ${ops.length} result(s), got ${res.results.length}`,
+            );
+          }
+          const opsByCounter = new Map(ops.map((operation) => [operation.counterKey, operation]));
+          if (opsByCounter.size !== ops.length) {
+            throw new CountersValidationError("batch request contains duplicate counter keys");
+          }
+          const seen = new Set<string>();
+          const failures: OperationFailure[] = [];
+          for (const [index, rawResult] of res.results.entries()) {
+            if (rawResult === null || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+              throw new CountersValidationError(`batch response: result ${index} must be an object`);
+            }
+            const result = rawResult as unknown as Record<string, unknown>;
+            const counterKey = result.counterKey;
+            if (typeof counterKey !== "string") {
+              throw new CountersValidationError(
+                `batch response: result ${index} counterKey must be a string`,
+              );
+            }
+            const operation = opsByCounter.get(counterKey);
+            if (operation === undefined) {
+              throw new CountersValidationError(
+                `batch response contains a result for unknown counter ${describeValue(counterKey)}`,
+              );
+            }
+            if (seen.has(counterKey)) {
+              throw new CountersValidationError(
+                `batch response contains duplicate results for counter ${describeValue(counterKey)}`,
+              );
+            }
+            seen.add(counterKey);
+            const resultStatus = result.status;
+            if (
+              resultStatus !== "applied"
+              && resultStatus !== "deduplicated"
+              && resultStatus !== "error"
+            ) {
+              throw new CountersValidationError(
+                `batch response: invalid status ${describeValue(resultStatus)} for counter ${describeValue(counterKey)}`,
+              );
+            }
+            if (resultStatus !== "error") continue;
+
+            const problem = result.error;
+            const problemRecord = problem !== null && typeof problem === "object" && !Array.isArray(problem)
+              ? problem as Record<string, unknown>
+              : undefined;
+            const title = typeof problemRecord?.title === "string" ? problemRecord.title : "error";
+            const msg = `batch operation failed (${counterKey}: ${title})`;
+            const status = problemRecord?.status;
+            const error = status === undefined
+              ? new CountersValidationError(`${msg}; per-op problem carries no status`)
+              : typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+                ? new CountersApiError(msg, status, problem as import("./types.js").Problem)
+                : new CountersValidationError(`${msg}; per-op problem carries an invalid status`);
+            failures.push({ operation, error });
+          }
+          if (seen.size !== ops.length) {
+            throw new CountersValidationError("batch response does not cover every submitted operation");
+          }
+          return failures;
+        } catch (error) {
+          if (error instanceof CountersError) throw error;
+          throw new CountersValidationError(
+            `invalid batch response shape: ${describeValue(error)}`,
+            error,
+          );
         }
+      })
+      .catch((error) => {
+        throw normaliseResponseError(error);
       });
   }
 }
@@ -512,13 +635,13 @@ export class CounterHandle {
   }
 
   /** Reset the counter to zero (starts a new epoch; history retained). */
-  clear(): Promise<Counter> {
-    return this.client.clearCounter(this.key);
+  clear(opts?: WriteOptions): Promise<Counter> {
+    return this.client.clearCounter(this.key, opts);
   }
 
   /** Delete (tombstone) the counter. */
-  delete(): Promise<void> {
-    return this.client.deleteCounter(this.key);
+  delete(opts?: WriteOptions): Promise<void> {
+    return this.client.deleteCounter(this.key, opts);
   }
 
   /** Current value. */
@@ -570,8 +693,8 @@ export class MemberHandle {
   }
 
   /** Remove this member from the current board (sum boards compensate the value into the group total). */
-  remove(): Promise<MemberRemoved> {
-    return this.client.removeMember(this.counterKey, this.member);
+  remove(opts?: WriteOptions): Promise<MemberRemoved> {
+    return this.client.removeMember(this.counterKey, this.member, opts);
   }
 
   /** Add a non-negative delta to this member (sum board). Immediate — never buffered. */
@@ -687,8 +810,8 @@ function parseCounter(counter: WireCounter): Counter {
   const { createdAt, updatedAt, ...fields } = counter;
   return {
     ...fields,
-    ...(createdAt == null ? {} : { createdAt: new Date(createdAt) }),
-    ...(updatedAt == null ? {} : { updatedAt: new Date(updatedAt) }),
+    ...(createdAt == null ? {} : { createdAt: parseDate(createdAt, "counter.createdAt") }),
+    ...(updatedAt == null ? {} : { updatedAt: parseDate(updatedAt, "counter.updatedAt") }),
   };
 }
 
@@ -701,21 +824,24 @@ function parseLeaderboard(leaderboard: WireLeaderboard): Leaderboard {
     ...leaderboard,
     entries: leaderboard.entries.map((entry) => ({
       ...entry,
-      updatedAt: new Date(entry.updatedAt),
+      updatedAt: parseDate(entry.updatedAt, "leaderboard entry.updatedAt"),
     })),
   };
 }
 
 function parseMemberSnapshot(snapshot: WireMemberSnapshot): MemberSnapshot {
-  return { ...snapshot, updatedAt: new Date(snapshot.updatedAt) };
+  return { ...snapshot, updatedAt: parseDate(snapshot.updatedAt, "member.updatedAt") };
 }
 
 function parseSeriesPoint(point: WireSeriesPoint): SeriesPoint {
-  return { timestamp: new Date(point.t), value: point.v };
+  return { timestamp: parseDate(point.t, "series point timestamp"), value: point.v };
 }
 
 function parseDateRange(range: WireDateRange): { from: Date; to: Date } {
-  return { from: new Date(range.from), to: new Date(range.to) };
+  return {
+    from: parseDate(range.from, "series range.from"),
+    to: parseDate(range.to, "series range.to"),
+  };
 }
 
 function publicTimeZone(tz: string | undefined): { timeZone?: string } {
@@ -752,7 +878,10 @@ function parseDerivedSeries(response: WireDerivedSeriesResponse): DerivedSeriesR
     ...fields,
     ...publicTimeZone(tz),
     range: parseDateRange(range),
-    points: points.map((point) => ({ timestamp: new Date(point.t), value: point.v })),
+    points: points.map((point) => ({
+      timestamp: parseDate(point.t, "derived series point timestamp"),
+      value: point.v,
+    })),
   };
 }
 
@@ -760,7 +889,7 @@ function parseUsage(usage: WireUsage): Usage {
   const { ops, limits, ...fields } = usage;
   return {
     ...fields,
-    operations: { ...ops, resetsAt: new Date(ops.resetsAt) },
+    operations: { ...ops, resetsAt: parseDate(ops.resetsAt, "usage.operations.resetsAt") },
     limits: {
       rateLimitRequestsPerSecond: limits.rateLimitRps,
       maxCounters: limits.maxCounters,
@@ -772,8 +901,8 @@ function parseUsage(usage: WireUsage): Usage {
 function parseWindowLeaderboard(leaderboard: WireWindowLeaderboard): WindowLeaderboard {
   return {
     ...leaderboard,
-    effectiveStart: new Date(leaderboard.effectiveStart),
-    effectiveEnd: new Date(leaderboard.effectiveEnd),
+    effectiveStart: parseDate(leaderboard.effectiveStart, "leaderboard.effectiveStart"),
+    effectiveEnd: parseDate(leaderboard.effectiveEnd, "leaderboard.effectiveEnd"),
   };
 }
 
@@ -787,7 +916,14 @@ function toWireOperation(operation: Operation): WireOperation {
 }
 
 function toIso(t: Date): string {
-  return t.toISOString();
+  if (!(t instanceof Date)) {
+    throw new CountersValidationError(`expected a Date, got ${describeValue(t)}`);
+  }
+  try {
+    return t.toISOString();
+  } catch (error) {
+    throw new CountersValidationError("date must be valid", error);
+  }
 }
 
 function applyBody(amount: bigint, opts?: ApplyOptions): Record<string, string> {
@@ -821,5 +957,35 @@ function submitBody(value: bigint, opts?: SubmitOptions): Record<string, string>
 function normaliseWriteError(error: unknown): CountersError {
   return error instanceof CountersError
     ? error
-    : new CountersTransportError(`unexpected batch submission failure: ${String(error)}`, error);
+    : new CountersTransportError(
+        `unexpected batch submission failure: ${describeValue(error)}`,
+        error,
+      );
+}
+
+function parseDate(value: unknown, field: string): Date {
+  if (typeof value !== "string") {
+    throw new CountersValidationError(`${field} must be an RFC 3339 string`);
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new CountersValidationError(`${field} is not a valid date-time: ${JSON.stringify(value)}`);
+  }
+  return parsed;
+}
+
+function normaliseResponseError(error: unknown): CountersError {
+  return error instanceof CountersError
+    ? error
+    : new CountersValidationError(`invalid response shape: ${describeValue(error)}`, error);
+}
+
+function parseWireResponse<T, R>(response: Promise<T>, parser: (value: T) => R): Promise<R> {
+  return response.then((value) => {
+    try {
+      return parser(value);
+    } catch (error) {
+      throw normaliseResponseError(error);
+    }
+  });
 }

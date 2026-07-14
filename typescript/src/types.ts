@@ -1,5 +1,7 @@
 // Types mirror openapi/openapi.yaml. Amounts and values are strings (arbitrary precision; never JS numbers).
 
+import type { CountersError } from "./errors.js";
+
 export type Amount = string; // non-negative integer, arbitrary precision
 export type Value = string; // signed integer, arbitrary precision
 /**
@@ -63,8 +65,17 @@ export interface Operation {
   occurredAt?: Date;
 }
 
-/** Options for immediate (non-buffered) writes. */
-export interface ApplyOptions {
+/** Options shared by confirmed writes. Omit the key to have the SDK generate one. */
+export interface WriteOptions {
+  /**
+   * Caller-supplied de-duplication key. Reuse only for the exact same operation and payload, and
+   * only within the server's deduplication window.
+   */
+  idempotencyKey?: string;
+}
+
+/** Options for immediate (non-buffered) counter delta writes. */
+export interface ApplyOptions extends WriteOptions {
   /** Event time for series bucketing; bounded server-side to the plan's retention window. */
   occurredAt?: Date;
 }
@@ -196,7 +207,7 @@ export interface WindowLeaderboard {
 // ── Members (…/members/{member}) ───────────────────────────────────────────────────────────────────
 
 /** Options for an immediate member delta write (`add`/`subtract`). */
-export interface MemberApplyOptions {
+export interface MemberApplyOptions extends WriteOptions {
   /** Opaque payload (≤ 1024 UTF-8 bytes); stored and returned verbatim, riding accepted values only. */
   metadata?: string;
   /** Event time for series bucketing (see {@link ApplyOptions.occurredAt}). */
@@ -207,6 +218,20 @@ export interface MemberApplyOptions {
 export interface SubmitOptions extends MemberApplyOptions {
   /** Board mode; required on the first submit to an unconfigured board, ignored (and immutable) after. */
   mode?: Mode;
+}
+
+/**
+ * One coalesced fire-and-forget write whose outcome failed or is unknown. `delta` is a signed,
+ * arbitrary-precision decimal string: positive for an add and negative for a subtract.
+ */
+export interface WriteFailure {
+  readonly counterKey: string;
+  readonly delta: Value;
+  /** Reserved for a member-attributed asynchronous write; current public buffers contain counter writes only. */
+  readonly member?: string;
+  /** The actual per-operation key sent in the failed/uncertain request. */
+  readonly idempotencyKey: string;
+  readonly error: CountersError;
 }
 
 /** Read parameters for a member snapshot. */

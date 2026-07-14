@@ -14,10 +14,13 @@ Leaderboard and member-snapshot update times arrive as native `java.time.Instant
 prints `LeaderboardEntry.updatedAt()` directly without parsing the wire timestamp.
 
 The error branches also reflect game-server priorities. API quota failures are logged without
-rolling back the raid, transport failures are dropped after the SDK's built-in retries, and
-client-side validation failures are treated as code/configuration bugs. Background failures from
-the buffered telemetry counter reach the same handler through `onBatchError`, whose parameter is the
-typed `CountersException` base rather than a raw `Throwable`.
+rolling back the raid, and client-side validation failures are treated as code/configuration bugs.
+For a member write that still ends in a transport failure after the SDK's built-in attempts, the app
+retries promptly with the exact same member, delta, and caller-generated idempotency key. The service
+de-duplicates that replay within its deduplication window; the example does not imply safety after
+that unspecified window. Background telemetry failures arrive as `WriteFailure` values through
+`onBatchError`, including the failed counter, signed coalesced delta, actual idempotency key, and one
+of the three typed `CountersException` subtypes.
 
 The app is compile-checked rather than run in CI. With a real API key, run it from this directory:
 

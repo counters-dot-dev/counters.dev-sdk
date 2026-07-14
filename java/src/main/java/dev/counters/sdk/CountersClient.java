@@ -3,6 +3,7 @@ package dev.counters.sdk;
 import java.math.BigInteger;
 import java.net.http.HttpClient;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,12 +35,11 @@ public final class CountersClient implements ReadOnlyCountersClient {
     private final Http http;
     private final Batcher batcher;
     private final boolean batchEnabled;
-    private final Consumer<CountersException> onWriteError;
+    private final Consumer<WriteFailure> onWriteError;
 
     private CountersClient(Builder b) {
-        if (b.apiKey == null || b.apiKey.isEmpty()) {
-            throw new IllegalArgumentException("CountersClient: apiKey is required");
-        }
+        Validation.assertApiKey(b.apiKey);
+        Validation.assertBaseUrl(b.baseUrl);
         this.http = new Http(b.baseUrl, b.apiKey, b.httpClient, b.maxRetries, b.backoffMillis,
                 b.requestTimeoutMillis);
         this.batchEnabled = b.batchEnabled;
@@ -106,40 +106,42 @@ public final class CountersClient implements ReadOnlyCountersClient {
         }
         // Immediate mode: fire a single-op batch without buffering (fire-and-forget, like the TS/Go SDKs).
         // Match the buffered path: a write after close() has no worker to observe it — surface the misuse.
-        if (batcher.isClosed()) throw new CountersException("cannot enqueue on a closed client");
+        if (batcher.isClosed()) throw new CountersValidationException("cannot enqueue on a closed client");
         Operation op = delta.signum() >= 0
                 ? new Operation(key, "add", delta.toString(), Idempotency.newKey(), null)
                 : new Operation(key, "subtract", delta.negate().toString(), Idempotency.newKey(), null);
         CompletableFuture.runAsync(() -> {
             try {
-                submitBatch(List.of(op));
-            } catch (RuntimeException e) {
-                // Fire-and-forget, like a background flush — so failures route to the same onError sink
-                // (previously they were swallowed, which silently dropped counted writes).
-                if (onWriteError != null) {
-                    onWriteError.accept(CountersException.normalizeBatchFailure(e));
-                }
+                List<WriteFailure> failures = submitBatch(List.of(op));
+                if (onWriteError != null) failures.forEach(onWriteError);
+            } catch (Throwable failure) {
+                // Fire-and-forget, like a background flush — so failures route to the same onError sink.
+                if (onWriteError != null) onWriteError.accept(
+                        WriteFailure.from(op, CountersException.normalizeBatchFailure(failure)));
             }
         });
     }
 
-    Counter applyNow(String key, String op, BigInteger amount, Instant occurredAt) {
+    Counter applyNow(String key, String op, BigInteger amount, Instant occurredAt, String idempotencyKey) {
         Map<String, String> body = new LinkedHashMap<>();
         body.put("amount", amount.toString());
         if (occurredAt != null) body.put("occurredAt", occurredAt.toString());
         Object res = http.request(
-                "POST", "/counters/" + Http.encodePathSegment(key) + "/" + op, body, Idempotency.newKey(), null);
+                "POST", "/counters/" + Http.encodePathSegment(key) + "/" + op, body,
+                Idempotency.keyOrNew(idempotencyKey), null);
         return toCounter(asMap(res));
     }
 
-    Counter clearCounter(String key) {
+    Counter clearCounter(String key, String idempotencyKey) {
         Object res = http.request(
-                "POST", "/counters/" + Http.encodePathSegment(key) + "/clear", null, Idempotency.newKey(), null);
+                "POST", "/counters/" + Http.encodePathSegment(key) + "/clear", null,
+                Idempotency.keyOrNew(idempotencyKey), null);
         return toCounter(asMap(res));
     }
 
-    void deleteCounter(String key) {
-        http.request("DELETE", "/counters/" + Http.encodePathSegment(key), null, Idempotency.newKey(), null);
+    void deleteCounter(String key, String idempotencyKey) {
+        http.request("DELETE", "/counters/" + Http.encodePathSegment(key), null,
+                Idempotency.keyOrNew(idempotencyKey), null);
     }
 
     ValueResponse getValue(String key) {
@@ -205,12 +207,12 @@ public final class CountersClient implements ReadOnlyCountersClient {
         return toMemberSnapshot(asMap(res));
     }
 
-    MemberRemoved removeMember(String key, String member) {
+    MemberRemoved removeMember(String key, String member, String idempotencyKey) {
         Object res = http.request(
                 "DELETE",
                 "/counters/" + Http.encodePathSegment(key) + "/members/" + Http.encodePathSegment(member),
                 null,
-                Idempotency.newKey(),
+                Idempotency.keyOrNew(idempotencyKey),
                 null);
         return toMemberRemoved(asMap(res));
     }
@@ -227,7 +229,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
                 "/counters/" + Http.encodePathSegment(key)
                         + "/members/" + Http.encodePathSegment(member) + "/" + op,
                 body,
-                Idempotency.newKey(),
+                Idempotency.keyOrNew(opts == null ? null : opts.idempotencyKey()),
                 null);
         return toMemberValue(asMap(res));
     }
@@ -245,7 +247,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
                 "/counters/" + Http.encodePathSegment(key)
                         + "/members/" + Http.encodePathSegment(member) + "/submit",
                 body,
-                Idempotency.newKey(),
+                Idempotency.keyOrNew(opts == null ? null : opts.idempotencyKey()),
                 null);
         return toMemberValue(asMap(res));
     }
@@ -256,6 +258,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
     }
 
     DerivedSeriesResponse getDerivedSeries(String key, DerivedSeriesParams params) {
+        if (params == null) throw new CountersValidationException("derived series params are required");
         Map<String, String> query = new LinkedHashMap<>();
         query.put("from", params.from().toString());
         query.put("to", params.to().toString());
@@ -266,43 +269,116 @@ public final class CountersClient implements ReadOnlyCountersClient {
         return toDerivedSeries(asMap(res));
     }
 
-    void submitBatch(List<Operation> ops) {
+    List<WriteFailure> submitBatch(List<Operation> ops) {
         List<Map<String, Object>> jsonOps = new ArrayList<>(ops.size());
         for (Operation op : ops) jsonOps.add(op.toJson());
         Object res = http.request("POST", "/batch", Map.of("operations", jsonOps), null, null);
-        checkBatchResults(res);
+        return checkBatchResults(res, ops);
     }
 
     /**
      * A 200 from /batch only means the batch was accepted; each op carries its own status. Surface a
      * per-op {@code "error"} (e.g. a counter/quota cap) instead of silently dropping the buffered write.
      *
-     * <p>a per-op problem carrying a {@code status} surfaces as a
+     * <p>A per-op problem carrying an integral {@code status} in the real HTTP range surfaces as a
      * {@link CountersApiException} with that status, exactly as if the operation had failed standalone. A
      * per-op problem with no status (or no problem object at all) has no failing HTTP status to carry —
      * never fabricate one (no status 0): the problem the SDK cannot faithfully represent is rejected
      * client-side as a {@link CountersValidationException}.
      */
-    private static void checkBatchResults(Object res) {
-        if (!(res instanceof Map<?, ?> m) || !(m.get("results") instanceof List<?> results)) return;
-        int failed = 0;
-        Map<?, ?> first = null;
-        for (Object r : results) {
-            if (r instanceof Map<?, ?> rm && "error".equals(rm.get("status"))) {
-                failed++;
-                if (first == null) first = rm;
+    static List<WriteFailure> checkBatchResults(Object res, List<Operation> ops) {
+        if (!(res instanceof Map<?, ?> m) || !(m.get("results") instanceof List<?> results)) {
+            throw new CountersValidationException("batch response does not contain a results array");
+        }
+
+        if (results.size() != ops.size()) {
+            throw new CountersValidationException(
+                    "batch response result count does not match submitted operation count: expected "
+                            + ops.size() + ", got " + results.size());
+        }
+
+        Map<String, Operation> operationsByKey = new LinkedHashMap<>();
+        for (Operation operation : ops) {
+            if (operationsByKey.put(operation.counterKey(), operation) != null) {
+                throw new CountersValidationException(
+                        "submitted batch contains duplicate counter " + operation.counterKey());
             }
         }
-        if (first == null) return;
-        Integer status = null;
-        String title = "error";
-        if (first.get("error") instanceof Map<?, ?> err) {
-            if (err.get("status") instanceof Number n) status = n.intValue();
-            if (err.get("title") instanceof String t) title = t;
+
+        List<Map<?, ?>> validatedResults = new ArrayList<>(results.size());
+        Map<String, Map<?, ?>> resultsByKey = new LinkedHashMap<>();
+        for (int i = 0; i < results.size(); i++) {
+            Object raw = results.get(i);
+            if (!(raw instanceof Map<?, ?> result)) {
+                throw new CountersValidationException("batch result " + i + " is not an object");
+            }
+
+            if (!(result.get("counterKey") instanceof String resultKey) || resultKey.isBlank()) {
+                throw new CountersValidationException(
+                        "batch result " + i + " does not contain a non-blank counterKey");
+            }
+            if (!operationsByKey.containsKey(resultKey)) {
+                throw new CountersValidationException(
+                        "batch response contains a result for unknown counter " + resultKey);
+            }
+            if (resultsByKey.put(resultKey, result) != null) {
+                throw new CountersValidationException(
+                        "batch response contains duplicate results for counter " + resultKey);
+            }
+
+            Object status = result.get("status");
+            if (!("applied".equals(status) || "deduplicated".equals(status) || "error".equals(status))) {
+                throw new CountersValidationException(
+                        "batch result " + i + " has an invalid status: " + status);
+            }
+            validatedResults.add(result);
         }
-        String msg = "batch: " + failed + " operation(s) failed (" + first.get("counterKey") + ": " + title + ")";
-        if (status != null) throw new CountersApiException(status, msg);
-        throw new CountersValidationException(msg + "; per-op problem carries no status");
+
+        for (String counterKey : operationsByKey.keySet()) {
+            if (!resultsByKey.containsKey(counterKey)) {
+                throw new CountersValidationException(
+                        "batch response does not contain a result for submitted counter " + counterKey);
+            }
+        }
+
+        List<WriteFailure> failures = new ArrayList<>();
+        for (Map<?, ?> result : validatedResults) {
+            if (!"error".equals(result.get("status"))) continue;
+
+            String resultKey = (String) result.get("counterKey");
+            Operation operation = operationsByKey.get(resultKey);
+
+            Integer status = null;
+            String title = "error";
+            if (result.get("error") instanceof Map<?, ?> error) {
+                status = validHttpStatus(error.get("status"));
+                if (error.get("title") instanceof String t) title = t;
+            }
+            String message = "batch operation failed (" + operation.counterKey() + ": " + title + ")";
+            CountersException error = status == null
+                    ? new CountersValidationException(message + "; per-op problem carries no valid HTTP status")
+                    : new CountersApiException(status, message);
+            failures.add(WriteFailure.from(operation, error));
+        }
+        return List.copyOf(failures);
+    }
+
+    private static Integer validHttpStatus(Object raw) {
+        long status;
+        if (raw instanceof BigInteger big) {
+            if (big.bitLength() > 63) return null;
+            status = big.longValue();
+        } else if (raw instanceof Byte || raw instanceof Short || raw instanceof Integer || raw instanceof Long) {
+            status = ((Number) raw).longValue();
+        } else if (raw instanceof Float || raw instanceof Double) {
+            double decimal = ((Number) raw).doubleValue();
+            if (!Double.isFinite(decimal) || decimal != Math.rint(decimal)) return null;
+            if (decimal < 100 || decimal > 599) return null;
+            status = (long) decimal;
+        } else {
+            return null;
+        }
+        return status >= 100 && status <= 599 ? (int) status : null;
     }
 
     // ---- JSON mapping (tolerant of missing optional fields) ----
@@ -310,7 +386,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(Object o) {
         if (o instanceof Map) return (Map<String, Object>) o;
-        throw new CountersException(
+        throw new CountersValidationException(
                 "unexpected response shape: " + (o == null ? "empty body" : o.getClass().getSimpleName()));
     }
 
@@ -326,7 +402,12 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
     private static Instant instant(Map<String, Object> m, String key) {
         Object v = m.get(key);
-        return v == null ? null : Instant.parse(v.toString());
+        if (v == null) return null;
+        try {
+            return Instant.parse(v.toString());
+        } catch (DateTimeParseException e) {
+            throw new CountersValidationException("response field " + key + " is not a valid timestamp", e);
+        }
     }
 
     private static long longVal(Map<String, Object> m, String key) {
@@ -342,6 +423,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
     }
 
     private static Map<String, String> seriesQuery(SeriesParams params) {
+        if (params == null) throw new CountersValidationException("series params are required");
         Map<String, String> query = new LinkedHashMap<>();
         query.put("from", params.from().toString());
         query.put("to", params.to().toString());
@@ -492,7 +574,10 @@ public final class CountersClient implements ReadOnlyCountersClient {
         Map<String, String> inputs = new LinkedHashMap<>();
         if (m.get("inputs") instanceof Map<?, ?> rawInputs) {
             for (Map.Entry<?, ?> e : rawInputs.entrySet()) {
-                inputs.put(String.valueOf(e.getKey()), e.getValue() == null ? null : String.valueOf(e.getValue()));
+                if (e.getValue() == null) {
+                    throw new CountersValidationException("derived response input value must not be null");
+                }
+                inputs.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
             }
         }
         return new DerivedValueResponse(str(m, "key"), str(m, "value"), longVal(m, "scale"),
@@ -521,7 +606,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
         private boolean batchEnabled = true;
         private int maxBatchSize = 100;
         private long batchIntervalMillis = 1000;
-        private Consumer<CountersException> onBatchError;
+        private Consumer<WriteFailure> onBatchError;
 
         private Builder() {}
 
@@ -545,13 +630,14 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
         /** Retries after the first attempt on connect errors and 429/5xx, default 3. */
         public Builder maxRetries(int maxRetries) {
-            if (maxRetries < 0) throw new IllegalArgumentException("maxRetries must be >= 0");
+            if (maxRetries < 0) throw new CountersValidationException("maxRetries must be >= 0");
             this.maxRetries = maxRetries;
             return this;
         }
 
         /** Base backoff in milliseconds, doubled per retry, default 200. */
         public Builder backoffMillis(long backoffMillis) {
+            if (backoffMillis < 0) throw new CountersValidationException("backoffMillis must be >= 0");
             this.backoffMillis = backoffMillis;
             return this;
         }
@@ -561,7 +647,9 @@ public final class CountersClient implements ReadOnlyCountersClient {
          * like a network error; exhausted retries throw {@link CountersTransportException}.
          */
         public Builder requestTimeoutMillis(long requestTimeoutMillis) {
-            if (requestTimeoutMillis <= 0) throw new IllegalArgumentException("requestTimeoutMillis must be > 0");
+            if (requestTimeoutMillis <= 0) {
+                throw new CountersValidationException("requestTimeoutMillis must be > 0");
+            }
             this.requestTimeoutMillis = requestTimeoutMillis;
             return this;
         }
@@ -574,7 +662,7 @@ public final class CountersClient implements ReadOnlyCountersClient {
 
         /** Buffered distinct-counter count that triggers an early flush, default 100. */
         public Builder maxBatchSize(int maxBatchSize) {
-            if (maxBatchSize < 1) throw new IllegalArgumentException("maxBatchSize must be >= 1");
+            if (maxBatchSize < 1) throw new CountersValidationException("maxBatchSize must be >= 1");
             this.maxBatchSize = maxBatchSize;
             return this;
         }
@@ -588,10 +676,11 @@ public final class CountersClient implements ReadOnlyCountersClient {
         /**
          * Sink for errors from fire-and-forget writes — background flushes and, when
          * {@link #batchEnabled(boolean) batching is disabled}, immediate-mode writes. These run
-         * off-thread, so without this hook they are silent. Every delivered error is a
-         * {@link CountersException} and can be matched against its API, transport, and validation subtypes.
+         * off-thread, so without this hook they are silent. Each {@link WriteFailure} carries the
+         * coalesced write's identity and an error matchable against the API, transport, and validation
+         * subtypes.
          */
-        public Builder onBatchError(Consumer<CountersException> onBatchError) {
+        public Builder onBatchError(Consumer<WriteFailure> onBatchError) {
             this.onBatchError = onBatchError;
             return this;
         }

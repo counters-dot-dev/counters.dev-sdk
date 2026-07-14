@@ -73,7 +73,13 @@ async function tour() {
     apiKey: KEY_A,
     baseUrl: BASE_URL,
     timeoutMs: 15_000,
-    batch: { intervalMs: 200, onError: (e) => console.error("batch flush failed:", e) },
+    batch: {
+      intervalMs: 200,
+      onError: (failure) => console.error(
+        `batch write failed: key=${failure.counterKey} delta=${failure.delta} idempotencyKey=${failure.idempotencyKey}`,
+        failure.error,
+      ),
+    },
   });
   invoked.add("CountersClient.constructor");
 

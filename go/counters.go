@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultBaseURL = "https://api.counters.dev/v1"
@@ -44,7 +45,8 @@ type Error interface {
 	isCountersError()
 }
 
-// ValidationError is returned for client-side validation failures (bad counter key or amount).
+// ValidationError is returned for client-side validation failures (bad counter key or amount), or
+// when a parsed response shape cannot be represented faithfully by the SDK.
 type ValidationError struct{ Msg string }
 
 func (e *ValidationError) Error() string    { return e.Msg }
@@ -90,8 +92,9 @@ func asSDKError(err error) Error {
 }
 
 // ErrClientClosed is returned by Add/Subtract when a write is attempted after Close(); the write is
-// rejected rather than silently stranded in a buffer whose worker has already stopped.
-var ErrClientClosed = errors.New("counters: client is closed")
+// rejected rather than silently stranded in a buffer whose worker has already stopped. It is a
+// ValidationError, and remains a sentinel so callers can use either errors.As or errors.Is.
+var ErrClientClosed = &ValidationError{Msg: "counters: client is closed"}
 
 // IsValidCounterKey reports whether key matches the server's allowed shape.
 func IsValidCounterKey(key string) bool { return counterKeyRe.MatchString(key) }
@@ -159,6 +162,9 @@ func validateWindow(window string) error {
 func ToAmount(v any) (*big.Int, error) {
 	switch x := v.(type) {
 	case *big.Int:
+		if x == nil {
+			return nil, &ValidationError{"amount must be non-nil"}
+		}
 		if x.Sign() < 0 {
 			return nil, &ValidationError{"amount must be non-negative"}
 		}
@@ -188,6 +194,9 @@ func ToAmount(v any) (*big.Int, error) {
 func ToValue(v any) (*big.Int, error) {
 	switch x := v.(type) {
 	case *big.Int:
+		if x == nil {
+			return nil, &ValidationError{"value must be non-nil"}
+		}
 		return new(big.Int).Set(x), nil
 	case int:
 		return big.NewInt(int64(x)), nil
@@ -207,14 +216,30 @@ func ToValue(v any) (*big.Int, error) {
 	}
 }
 
-// NewIdempotencyKey returns a random v4-style UUID string.
-func NewIdempotencyKey() string {
+var idempotencyReader io.Reader = rand.Reader
+
+func newIdempotencyKey() (string, error) {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := io.ReadFull(idempotencyReader, b[:]); err != nil {
+		return "", &TransportError{Cause: fmt.Errorf("could not generate idempotency key: %w", err)}
+	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
+
+// NewIdempotencyKey returns a random v4-style UUID string. Its frozen string-only signature cannot
+// return an entropy failure; in that exceptional case it panics with *TransportError rather than
+// returning a partial key. SDK write methods use the error-returning internal form and never panic.
+func NewIdempotencyKey() string {
+	key, err := newIdempotencyKey()
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+const idempotencyKeyMaxLength = 255
 
 // --- wire types (mirror openapi/openapi.yaml) ---
 
@@ -368,20 +393,31 @@ type WindowLeaderboard struct {
 	Entries        []WindowEntry `json:"entries"`
 }
 
+// WriteOptions are the optional fields shared by confirmed counter writes. An empty
+// IdempotencyKey asks the SDK to generate one. Supplying a key lets the same operation and payload
+// reuse it after a transport failure, within the server's deduplication window.
+type WriteOptions struct {
+	IdempotencyKey string
+}
+
 // MemberWriteOpts are the optional fields of an immediate member delta write. Metadata is an
 // opaque payload of at most 1024 UTF-8 bytes, stored and returned verbatim; OccurredAt stamps
-// the write with an event time for series bucketing (nil = ingest time).
+// the write with an event time for series bucketing (nil = ingest time). An empty IdempotencyKey
+// asks the SDK to generate one.
 type MemberWriteOpts struct {
-	Metadata   string
-	OccurredAt *time.Time
+	Metadata       string
+	OccurredAt     *time.Time
+	IdempotencyKey string
 }
 
 // SubmitOpts are the optional fields of a member score submit. Mode ("sum", "latest", "min",
-// "max") is required on the first submit to an unconfigured board and immutable afterwards.
+// "max") is required on the first submit to an unconfigured board and immutable afterwards. An
+// empty IdempotencyKey asks the SDK to generate one.
 type SubmitOpts struct {
-	Mode       string
-	Metadata   string
-	OccurredAt *time.Time
+	Mode           string
+	Metadata       string
+	OccurredAt     *time.Time
+	IdempotencyKey string
 }
 
 // MemberGetParams are the read parameters for a member snapshot. Epoch selects a past season
@@ -511,6 +547,18 @@ type Operation struct {
 	OccurredAt *time.Time `json:"occurredAt,omitempty"`
 }
 
+// WriteFailure describes one coalesced fire-and-forget write whose outcome failed or is unknown.
+// Delta is a signed arbitrary-precision decimal string: positive for add and negative for
+// subtract. Member is empty for counter writes. IdempotencyKey is the actual per-operation key
+// sent to the service, and Err is exactly one of APIError, TransportError, or ValidationError.
+type WriteFailure struct {
+	CounterKey     string
+	Delta          string
+	Member         string
+	IdempotencyKey string
+	Err            Error
+}
+
 // --- client ---
 
 // Options configures a Client. Only APIKey is required; every zero value means "use the default".
@@ -537,13 +585,13 @@ type BatchOptions struct {
 	Disabled bool
 	// MaxBatchSize is the buffered distinct-counter count that triggers an early flush (default 100).
 	MaxBatchSize int
-	// Interval is the background flush cadence (default 1s). <= 0 disables the timer; flush
-	// manually with Client.Flush or rely on MaxBatchSize.
+	// Interval is the background flush cadence. Zero uses the 1s default; set -1 to disable the
+	// timer and flush manually with Client.Flush or rely on MaxBatchSize.
 	Interval time.Duration
-	// OnError receives typed SDK errors from fire-and-forget writes — background flushes and, when
-	// Disabled is true, immediate-mode writes. Use errors.As to distinguish *APIError,
+	// OnError receives one identity-bearing event per coalesced fire-and-forget write that failed
+	// or whose outcome is unknown. Inspect failure.Err with errors.As to distinguish *APIError,
 	// *TransportError, and *ValidationError. Without this hook asynchronous failures are silent.
-	OnError func(Error)
+	OnError func(WriteFailure)
 }
 
 // Client is the entry point: obtain per-counter handles with Counter and Derived, page the
@@ -557,25 +605,38 @@ type Client struct {
 	backoff      time.Duration
 	batchEnabled bool
 	batcher      *batcher
-	onWriteError func(Error)         // BatchOptions.OnError; also the sink for immediate-mode write failures
+	onWriteError func(WriteFailure)  // BatchOptions.OnError; also the sink for immediate-mode write failures
 	sleepFn      func(time.Duration) // nil => time.Sleep; overridden in tests to record backoff
 }
 
 // NewClient builds a Client from opts. Only opts.APIKey is required.
 func NewClient(opts Options) (*Client, error) {
 	if opts.APIKey == "" {
-		return nil, errors.New("counters: APIKey is required")
+		return nil, &ValidationError{Msg: "counters: APIKey is required"}
+	}
+	if !isValidHeaderValue(opts.APIKey) {
+		return nil, &ValidationError{Msg: "counters: APIKey contains characters that are not valid in an HTTP header"}
+	}
+	baseURL := orString(opts.BaseURL, defaultBaseURL)
+	parsedBaseURL, err := url.Parse(baseURL)
+	if err != nil || (parsedBaseURL.Scheme != "http" && parsedBaseURL.Scheme != "https") || parsedBaseURL.Host == "" || parsedBaseURL.RawQuery != "" || parsedBaseURL.Fragment != "" {
+		return nil, &ValidationError{Msg: "counters: BaseURL must be an absolute http(s) URL without a query or fragment: " + strconv.Quote(baseURL)}
 	}
 	maxRetries := opts.MaxRetries
 	switch {
 	case maxRetries == 0:
 		maxRetries = 3 // zero value => default
-	case maxRetries < 0:
+	case maxRetries == -1:
 		maxRetries = 0 // -1 => retries disabled
+	case maxRetries < -1:
+		return nil, &ValidationError{Msg: "counters: MaxRetries must be -1 or non-negative"}
+	}
+	if opts.Backoff < 0 {
+		return nil, &ValidationError{Msg: "counters: Backoff must be non-negative"}
 	}
 	c := &Client{
 		apiKey:     opts.APIKey,
-		baseURL:    orString(opts.BaseURL, defaultBaseURL),
+		baseURL:    baseURL,
 		httpClient: orHTTP(opts.HTTPClient),
 		maxRetries: maxRetries,
 		backoff:    orDur(opts.Backoff, 200*time.Millisecond),
@@ -583,16 +644,28 @@ func NewClient(opts Options) (*Client, error) {
 	enabled := true
 	maxSize := 100
 	interval := time.Second
-	var onErr func(Error)
+	var onErr func(WriteFailure)
 	if opts.Batch != nil {
 		enabled = !opts.Batch.Disabled
+		if opts.Batch.MaxBatchSize < 0 {
+			return nil, &ValidationError{Msg: "counters: Batch.MaxBatchSize must be non-negative"}
+		}
 		maxSize = orInt(opts.Batch.MaxBatchSize, 100)
-		interval = orDur(opts.Batch.Interval, time.Second)
+		switch {
+		case opts.Batch.Interval == 0:
+			interval = time.Second
+		case opts.Batch.Interval == -1:
+			interval = 0
+		case opts.Batch.Interval < -1:
+			return nil, &ValidationError{Msg: "counters: Batch.Interval must be -1 or non-negative"}
+		default:
+			interval = opts.Batch.Interval
+		}
 		onErr = opts.Batch.OnError
 	}
 	c.batchEnabled = enabled
 	c.onWriteError = onErr
-	c.batcher = newBatcher(func(ops []Operation) error {
+	c.batcher = newBatcher(func(ops []Operation) ([]WriteFailure, error) {
 		return c.submitBatch(context.Background(), ops)
 	}, maxSize, interval, onErr)
 	return c, nil
@@ -692,29 +765,35 @@ func (h *CounterHandle) Subtract(amount any) error {
 	return h.client.enqueue(h.Key, new(big.Int).Neg(n))
 }
 
-// AddNow applies an increment immediately and returns the new counter state.
-func (h *CounterHandle) AddNow(ctx context.Context, amount any) (*Counter, error) {
-	return h.applyNow(ctx, "add", amount, time.Time{})
+// AddNow applies an increment immediately and returns the new counter state. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) AddNow(ctx context.Context, amount any, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "add", amount, time.Time{}, opts...)
 }
 
-// SubtractNow applies a decrement immediately and returns the new counter state.
-func (h *CounterHandle) SubtractNow(ctx context.Context, amount any) (*Counter, error) {
-	return h.applyNow(ctx, "subtract", amount, time.Time{})
+// SubtractNow applies a decrement immediately and returns the new counter state. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) SubtractNow(ctx context.Context, amount any, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "subtract", amount, time.Time{}, opts...)
 }
 
 // AddNowAt applies an increment stamped with an event time (series bucket lands at occurredAt;
 // bounded server-side to the plan's retention window). For offline spools flushing late.
-func (h *CounterHandle) AddNowAt(ctx context.Context, amount any, occurredAt time.Time) (*Counter, error) {
-	return h.applyNow(ctx, "add", amount, occurredAt)
+func (h *CounterHandle) AddNowAt(ctx context.Context, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "add", amount, occurredAt, opts...)
 }
 
 // SubtractNowAt is AddNowAt for decrements.
-func (h *CounterHandle) SubtractNowAt(ctx context.Context, amount any, occurredAt time.Time) (*Counter, error) {
-	return h.applyNow(ctx, "subtract", amount, occurredAt)
+func (h *CounterHandle) SubtractNowAt(ctx context.Context, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "subtract", amount, occurredAt, opts...)
 }
 
-func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occurredAt time.Time) (*Counter, error) {
+func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
 	n, err := ToAmount(amount)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey, err := writeIdempotencyKey(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -724,26 +803,35 @@ func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occ
 	}
 	var out Counter
 	err = h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/"+op,
-		body, NewIdempotencyKey(), nil, &out)
+		body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// Clear resets the counter to zero by starting a new epoch; history is retained.
-func (h *CounterHandle) Clear(ctx context.Context) (*Counter, error) {
+// Clear resets the counter to zero by starting a new epoch; history is retained. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) Clear(ctx context.Context, opts ...WriteOptions) (*Counter, error) {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return nil, err
+	}
 	var out Counter
-	err := h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/clear", nil, NewIdempotencyKey(), nil, &out)
+	err = h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/clear", nil, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// Delete tombstones the counter.
-func (h *CounterHandle) Delete(ctx context.Context) error {
-	return h.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(h.Key), nil, NewIdempotencyKey(), nil, nil)
+// Delete tombstones the counter. At most one WriteOptions value may be supplied.
+func (h *CounterHandle) Delete(ctx context.Context, opts ...WriteOptions) error {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return err
+	}
+	return h.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(h.Key), nil, idempotencyKey, nil, nil)
 }
 
 // Value reads the counter's current value.
@@ -863,10 +951,14 @@ func (m *MemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnaps
 }
 
 // Remove removes this member from the current board. On "sum" boards the member's value is
-// compensated into the group total.
-func (m *MemberHandle) Remove(ctx context.Context) (*MemberRemoved, error) {
+// compensated into the group total. At most one WriteOptions value may be supplied.
+func (m *MemberHandle) Remove(ctx context.Context, opts ...WriteOptions) (*MemberRemoved, error) {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberRemoved
-	err := m.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member), nil, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member), nil, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -906,8 +998,12 @@ func (m *MemberHandle) Submit(ctx context.Context, value any, opts SubmitOpts) (
 	if opts.OccurredAt != nil {
 		body["occurredAt"] = opts.OccurredAt.UTC().Format(time.RFC3339)
 	}
+	idempotencyKey, err := resolveIdempotencyKey(opts.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberValue
-	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/submit", body, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/submit", body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -933,8 +1029,12 @@ func (m *MemberHandle) applyDelta(ctx context.Context, op string, amount any, op
 	if o.OccurredAt != nil {
 		body["occurredAt"] = o.OccurredAt.UTC().Format(time.RFC3339)
 	}
+	idempotencyKey, err := resolveIdempotencyKey(o.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberValue
-	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/"+op, body, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/"+op, body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -1095,6 +1195,31 @@ func singleMemberWriteOpts(opts []MemberWriteOpts) (MemberWriteOpts, error) {
 	return opts[0], nil
 }
 
+func writeIdempotencyKey(opts []WriteOptions) (string, error) {
+	if len(opts) > 1 {
+		return "", &ValidationError{Msg: "at most one WriteOptions value may be supplied"}
+	}
+	if len(opts) == 0 {
+		return newIdempotencyKey()
+	}
+	return resolveIdempotencyKey(opts[0].IdempotencyKey)
+}
+
+func resolveIdempotencyKey(key string) (string, error) {
+	// Go cannot distinguish an omitted string field from one explicitly set to "". Both request a
+	// generated key; any non-empty caller-supplied value is validated before a request is made.
+	if key == "" {
+		return newIdempotencyKey()
+	}
+	if !utf8.ValidString(key) || utf8.RuneCountInString(key) > idempotencyKeyMaxLength {
+		return "", &ValidationError{Msg: fmt.Sprintf("idempotency key must be valid UTF-8 and at most %d characters", idempotencyKeyMaxLength)}
+	}
+	if !isValidHeaderValue(key) {
+		return "", &ValidationError{Msg: "idempotency key contains characters that are not valid in an HTTP header"}
+	}
+	return key, nil
+}
+
 // List returns a page of counters.
 func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPage, error) {
 	q := url.Values{}
@@ -1136,7 +1261,11 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	if c.batcher.isClosed() {
 		return ErrClientClosed
 	}
-	op := Operation{CounterKey: key, IdempotencyKey: NewIdempotencyKey()}
+	idempotencyKey, err := newIdempotencyKey()
+	if err != nil {
+		return err
+	}
+	op := Operation{CounterKey: key, IdempotencyKey: idempotencyKey}
 	if delta.Sign() >= 0 {
 		op.Operation, op.Amount = "add", delta.String()
 	} else {
@@ -1145,8 +1274,12 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	// Fire-and-forget, like a background flush — so failures route to the same OnError sink
 	// (previously they were dropped, which silently lost counted writes).
 	go func() {
-		if err := c.submitBatch(context.Background(), []Operation{op}); err != nil && c.onWriteError != nil {
-			c.onWriteError(asSDKError(err))
+		failures, err := c.submitBatch(context.Background(), []Operation{op})
+		if err == nil || c.onWriteError == nil {
+			return
+		}
+		for _, failure := range failures {
+			c.onWriteError(failure)
 		}
 	}()
 	return nil
@@ -1157,48 +1290,122 @@ type batchResult struct {
 	Status     string `json:"status"`
 	Error      *struct {
 		Title  string `json:"title"`
-		Status int    `json:"status"`
+		Status *int   `json:"status"`
 	} `json:"error"`
 }
 
 type batchResponse struct {
-	Results []batchResult `json:"results"`
+	Results *[]batchResult `json:"results"`
 }
 
-func (c *Client) submitBatch(ctx context.Context, ops []Operation) error {
+func (c *Client) submitBatch(ctx context.Context, ops []Operation) ([]WriteFailure, error) {
 	// A 200 only means the batch was accepted; each op carries its own status. Surface a per-op
 	// "error" (e.g. a counter/quota cap) instead of silently dropping the buffered write.
-	var resp batchResponse
-	if err := c.do(ctx, "POST", "/batch", map[string]any{"operations": ops}, "", nil, &resp); err != nil {
-		return err
+	var raw json.RawMessage
+	if err := c.do(ctx, "POST", "/batch", map[string]any{"operations": ops}, "", nil, &raw); err != nil {
+		sdkErr := asSDKError(err)
+		failures := make([]WriteFailure, 0, len(ops))
+		for _, op := range ops {
+			failures = append(failures, writeFailure(op, sdkErr))
+		}
+		return failures, sdkErr
 	}
+	var resp batchResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return invalidBatchResponse(ops, "cannot decode response shape: %v", err)
+	}
+	if resp.Results == nil {
+		return invalidBatchResponse(ops, "results must be present")
+	}
+	results := *resp.Results
+	if len(results) != len(ops) {
+		return invalidBatchResponse(ops, "got %d results for %d submitted operations", len(results), len(ops))
+	}
+
+	opsByCounter := make(map[string]Operation, len(ops))
+	for _, op := range ops {
+		opsByCounter[op.CounterKey] = op
+	}
+	seen := make(map[string]struct{}, len(results))
 	failed := 0
-	var first *batchResult
-	for i := range resp.Results {
-		if resp.Results[i].Status == "error" {
+	for i, result := range results {
+		if _, ok := opsByCounter[result.CounterKey]; !ok {
+			return invalidBatchResponse(ops, "result %d has unknown counter %q", i, result.CounterKey)
+		}
+		if _, duplicate := seen[result.CounterKey]; duplicate {
+			return invalidBatchResponse(ops, "result %d duplicates counter %q", i, result.CounterKey)
+		}
+		seen[result.CounterKey] = struct{}{}
+		switch result.Status {
+		case "applied", "deduplicated":
+		case "error":
 			failed++
-			if first == nil {
-				first = &resp.Results[i]
-			}
+		default:
+			return invalidBatchResponse(ops,
+				"result %d for counter %q has invalid status %q", i, result.CounterKey, result.Status)
 		}
 	}
-	if first == nil {
-		return nil
+	for _, op := range ops {
+		if _, ok := seen[op.CounterKey]; !ok {
+			return invalidBatchResponse(ops, "results omit submitted counter %q", op.CounterKey)
+		}
 	}
-	// a per-op problem carrying a status surfaces as an
-	// *APIError with that status, exactly as if the operation had failed standalone. A per-op
-	// problem with no status (or no problem object at all) has no failing HTTP status to carry —
-	// never fabricate one (no Status 0): the problem the SDK cannot faithfully represent is
-	// rejected client-side as a *ValidationError.
-	title := "error"
-	if first.Error != nil {
-		title = first.Error.Title
+
+	if failed == 0 {
+		return nil, nil
 	}
-	msg := fmt.Sprintf("batch: %d operation(s) failed (%s: %s)", failed, first.CounterKey, title)
-	if first.Error != nil && first.Error.Status != 0 {
-		return &APIError{Status: first.Error.Status, Title: msg}
+	failures := make([]WriteFailure, 0, failed)
+	var firstErr Error
+	for i := range results {
+		result := &results[i]
+		if result.Status == "error" {
+			op := opsByCounter[result.CounterKey]
+			title := "error"
+			if result.Error != nil {
+				title = result.Error.Title
+			}
+			msg := fmt.Sprintf("batch: %d operation(s) failed (%s: %s)", failed, result.CounterKey, title)
+			var resultErr Error
+			if result.Error == nil || result.Error.Status == nil {
+				// A status-less problem cannot be represented as an APIError without fabricating a
+				// status. The conformance contract classifies this malformed response as validation.
+				resultErr = &ValidationError{Msg: msg + "; per-op problem carries no status"}
+			} else if status := *result.Error.Status; status < 100 || status > 599 {
+				// A Problem status must be a real HTTP status code. In particular, do not turn a
+				// malformed explicit status into an APIError whose Status could never come from HTTP.
+				resultErr = &ValidationError{Msg: fmt.Sprintf("%s; per-op problem carries invalid HTTP status %d", msg, status)}
+			} else {
+				resultErr = &APIError{Status: *result.Error.Status, Title: msg}
+			}
+			if firstErr == nil {
+				firstErr = resultErr
+			}
+			failures = append(failures, writeFailure(op, resultErr))
+		}
 	}
-	return &ValidationError{Msg: msg + "; per-op problem carries no status"}
+	return failures, firstErr
+}
+
+func invalidBatchResponse(ops []Operation, format string, args ...any) ([]WriteFailure, error) {
+	err := &ValidationError{Msg: "invalid batch response: " + fmt.Sprintf(format, args...)}
+	failures := make([]WriteFailure, 0, len(ops))
+	for _, op := range ops {
+		failures = append(failures, writeFailure(op, err))
+	}
+	return failures, err
+}
+
+func writeFailure(op Operation, err Error) WriteFailure {
+	delta := op.Amount
+	if op.Operation == "subtract" && delta != "" && delta != "0" {
+		delta = "-" + delta
+	}
+	return WriteFailure{
+		CounterKey:     op.CounterKey,
+		Delta:          delta,
+		IdempotencyKey: op.IdempotencyKey,
+		Err:            err,
+	}
 }
 
 var retryableStatus = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
@@ -1214,6 +1421,9 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, idempotencyKey string, query url.Values, out any) error {
+	if ctx == nil {
+		return &ValidationError{Msg: "counters: context must not be nil"}
+	}
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -1222,7 +1432,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 	if body != nil {
 		var err error
 		if reqBody, err = json.Marshal(body); err != nil {
-			return err
+			return &ValidationError{Msg: fmt.Sprintf("counters: could not encode request body: %v", err)}
 		}
 	}
 
@@ -1231,6 +1441,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		sleepFn = time.Sleep
 	}
 	var lastErr error
+	var lastResponseErr *APIError
 	var retryAfter time.Duration // 0 => use exponential backoff
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -1243,7 +1454,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		retryAfter = 0
 		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(reqBody))
 		if err != nil {
-			return err
+			return &ValidationError{Msg: fmt.Sprintf("counters: could not construct request: %v", err)}
 		}
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		if body != nil {
@@ -1255,10 +1466,41 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if resp != nil {
+				status := resp.StatusCode
+				if resp.Body != nil {
+					resp.Body.Close()
+				}
+				if status < 100 || status > 599 {
+					lastErr = fmt.Errorf("transport returned invalid HTTP status %d: %w", status, err)
+					continue
+				}
+				// net/http may return both a response and an error when redirect policy rejects a
+				// response. A response was obtained, so this is never a transport failure.
+				apiErr := &APIError{Status: status, Title: err.Error()}
+				lastResponseErr = apiErr
+				if retryableStatus[status] && attempt < c.maxRetries {
+					retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+					lastErr = apiErr
+					continue
+				}
+				return apiErr
+			}
 			lastErr = err // network — retry
 			continue
 		}
+		if resp == nil {
+			lastErr = errors.New("transport returned no response")
+			continue
+		}
 		status := resp.StatusCode
+		if status < 100 || status > 599 {
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+			lastErr = fmt.Errorf("transport returned invalid HTTP status %d", status)
+			continue
+		}
 		if status >= 200 && status < 300 {
 			if out != nil && status != 204 {
 				err := json.NewDecoder(resp.Body).Decode(out)
@@ -1277,7 +1519,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			lastErr = &APIError{Status: status}
+			lastResponseErr = &APIError{Status: status}
+			lastErr = lastResponseErr
 			continue
 		}
 		var p struct {
@@ -1286,6 +1529,11 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		json.NewDecoder(resp.Body).Decode(&p)
 		resp.Body.Close()
 		return &APIError{Status: status, Title: p.Title}
+	}
+	if lastResponseErr != nil {
+		// At least one HTTP response arrived. Later transport failures cannot turn the terminal
+		// outcome into TransportError, whose contract requires that no response was ever obtained.
+		return lastResponseErr
 	}
 	// B2: retries exhausted with no HTTP response -> transport error (never a status-0 APIError).
 	return &TransportError{Cause: fmt.Errorf("request failed after %d attempts: %w", c.maxRetries+1, lastErr)}
@@ -1314,4 +1562,14 @@ func orHTTP(v *http.Client) *http.Client {
 		return &http.Client{Timeout: 30 * time.Second}
 	}
 	return v
+}
+
+func isValidHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }

@@ -5,12 +5,12 @@ import type { AmountInput, ValueInput } from "./types.js";
 export const COUNTER_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 
 export function isValidCounterKey(key: string): boolean {
-  return COUNTER_KEY_RE.test(key);
+  return typeof key === "string" && COUNTER_KEY_RE.test(key);
 }
 
 export function assertCounterKey(key: string): void {
   if (!isValidCounterKey(key)) {
-    throw new CountersValidationError(`invalid counter key: ${JSON.stringify(key)}`);
+    throw new CountersValidationError(`invalid counter key: ${describeValue(key)}`);
   }
 }
 
@@ -22,12 +22,12 @@ export function assertCounterKey(key: string): void {
 export const MEMBER_KEY_RE = /^[A-Za-z0-9._:@|-]{1,256}$/;
 
 export function isValidMemberKey(member: string): boolean {
-  return MEMBER_KEY_RE.test(member);
+  return typeof member === "string" && MEMBER_KEY_RE.test(member);
 }
 
 export function assertMemberKey(member: string): void {
   if (!isValidMemberKey(member)) {
-    throw new CountersValidationError(`invalid member key: ${JSON.stringify(member)}`);
+    throw new CountersValidationError(`invalid member key: ${describeValue(member)}`);
   }
 }
 
@@ -39,11 +39,14 @@ export function assertMemberKey(member: string): void {
 export const METADATA_MAX_BYTES = 1024;
 
 export function metadataByteLength(metadata: string): number {
+  if (typeof metadata !== "string") {
+    throw new CountersValidationError(`metadata must be a string, got ${describeValue(metadata)}`);
+  }
   return new TextEncoder().encode(metadata).length;
 }
 
 export function isValidMetadata(metadata: string): boolean {
-  return metadataByteLength(metadata) <= METADATA_MAX_BYTES;
+  return typeof metadata === "string" && metadataByteLength(metadata) <= METADATA_MAX_BYTES;
 }
 
 export function assertMetadata(metadata: string): void {
@@ -69,7 +72,7 @@ export function isValidWindow(window: string): boolean {
 export function assertWindow(window: string): void {
   if (!isValidWindow(window)) {
     throw new CountersValidationError(
-      `invalid window ${JSON.stringify(window)}; expected one of ${WINDOWS.join(", ")}`,
+      `invalid window ${describeValue(window)}; expected one of ${WINDOWS.join(", ")}`,
     );
   }
 }
@@ -89,7 +92,7 @@ export function isValidBucket(bucket: string): boolean {
 export function assertBucket(bucket: string): void {
   if (!isValidBucket(bucket)) {
     throw new CountersValidationError(
-      `invalid bucket ${JSON.stringify(bucket)}; expected one of ${BUCKETS.join(", ")}`,
+      `invalid bucket ${describeValue(bucket)}; expected one of ${BUCKETS.join(", ")}`,
     );
   }
 }
@@ -109,13 +112,15 @@ export function toAmount(input: AmountInput): bigint {
       );
     }
     v = BigInt(input);
-  } else {
+  } else if (typeof input === "string") {
     if (!/^[0-9]+$/.test(input)) {
       throw new CountersValidationError(
-        `amount string must be a non-negative integer: ${JSON.stringify(input)}`,
+        `amount string must be a non-negative integer: ${describeValue(input)}`,
       );
     }
     v = BigInt(input);
+  } else {
+    throw new CountersValidationError(`unsupported amount type: ${describeValue(input)}`);
   }
   if (v < 0n) {
     throw new CountersValidationError(`amount must be non-negative: ${v.toString()}`);
@@ -138,10 +143,30 @@ export function toValue(input: ValueInput): bigint {
     }
     return BigInt(input);
   }
-  if (!/^-?[0-9]+$/.test(input)) {
+  if (typeof input !== "string" || !/^-?[0-9]+$/.test(input)) {
     throw new CountersValidationError(
-      `value string must be a signed integer: ${JSON.stringify(input)}`,
+      `value string must be a signed integer: ${describeValue(input)}`,
     );
   }
   return BigInt(input);
+}
+
+/** Format hostile runtime values without allowing JSON/string coercion to leak a raw error. */
+export function describeValue(value: unknown): string {
+  try {
+    if (value instanceof Error && typeof value.message === "string") {
+      return value.message || value.name;
+    }
+    if (typeof value === "symbol") return value.toString();
+    if (typeof value === "bigint") return `${value.toString()}n`;
+    const json = JSON.stringify(value);
+    if (json !== undefined) return json;
+  } catch {
+    // Fall through to a coercion that also tolerates cyclic objects.
+  }
+  try {
+    return String(value);
+  } catch {
+    return "<unprintable>";
+  }
 }

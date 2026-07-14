@@ -60,50 +60,104 @@ final class Http {
             if (qs.length() > 0) url.append('?').append(qs);
         }
 
-        String payload = body == null ? null : Json.write(body);
-        HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(url.toString()))
-                .timeout(requestTimeout)
-                .header("Authorization", "Bearer " + apiKey);
-        if (payload != null) rb.header("Content-Type", "application/json");
-        if (idempotencyKey != null) rb.header("Idempotency-Key", idempotencyKey);
-        rb.method(method, payload == null
-                ? HttpRequest.BodyPublishers.noBody()
-                : HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
-        HttpRequest request = rb.build();
+        HttpRequest request;
+        try {
+            String payload = body == null ? null : Json.write(body);
+            HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(url.toString()))
+                    .timeout(requestTimeout)
+                    .header("Authorization", "Bearer " + apiKey);
+            if (payload != null) rb.header("Content-Type", "application/json");
+            if (idempotencyKey != null) rb.header("Idempotency-Key", idempotencyKey);
+            rb.method(method, payload == null
+                    ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+            request = rb.build();
+        } catch (CountersException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new CountersValidationException("invalid HTTP request configuration", e);
+        }
 
-        Exception lastErr = null;
+        CountersApiException lastApiError = null;
+        Exception lastTransportError = null;
         long retryAfterMillis = -1; // -1 => use exponential backoff
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            if (attempt > 0) sleeper.accept(retryAfterMillis >= 0 ? retryAfterMillis : backoffMillis * (1L << (attempt - 1)));
+            if (attempt > 0) {
+                try {
+                    sleeper.accept(retryAfterMillis >= 0
+                            ? retryAfterMillis
+                            : backoffMillis * (1L << (attempt - 1)));
+                } catch (RuntimeException e) {
+                    if (lastApiError != null) throw lastApiError;
+                    if (e instanceof CountersTransportException transport) throw transport;
+                    throw new CountersTransportException("retry backoff failed before a response", e);
+                }
+            }
             retryAfterMillis = -1;
 
             HttpResponse<String> res;
             try {
                 res = client.send(request, HttpResponse.BodyHandlers.ofString());
             } catch (IOException e) {
-                lastErr = e; // connect / network error — retry
+                lastTransportError = e; // connect / network error — retry
                 continue;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new CountersException("request interrupted", e);
+                if (lastApiError != null) throw lastApiError;
+                throw new CountersTransportException("request interrupted before a response", e);
+            } catch (RuntimeException e) {
+                if (lastApiError != null) throw lastApiError;
+                throw new CountersTransportException("transport failed before a response", e);
             }
 
-            int status = res.statusCode();
+            if (res == null) {
+                if (lastApiError != null) throw lastApiError;
+                throw new CountersTransportException(
+                        "transport returned no response", new NullPointerException("HttpClient.send returned null"));
+            }
+
+            int status;
+            try {
+                status = res.statusCode();
+            } catch (RuntimeException e) {
+                if (lastApiError != null) throw lastApiError;
+                throw new CountersTransportException(
+                        "transport returned an unusable response before a valid HTTP status", e);
+            }
+            if (status < 100 || status > 599) {
+                if (lastApiError != null) throw lastApiError;
+                throw new CountersTransportException(
+                        "transport returned an invalid HTTP status: " + status,
+                        new IllegalStateException("HTTP status is outside 100..599: " + status));
+            }
             if (status >= 200 && status < 300) {
-                String b = res.body();
-                if (status == 204 || b == null || b.isEmpty()) return null;
-                return Json.parse(b);
+                if (status == 204) return null;
+                String b;
+                try {
+                    b = res.body();
+                } catch (RuntimeException e) {
+                    throw new CountersApiException(status, "response body is unavailable", e);
+                }
+                if (b == null || b.isEmpty()) return null;
+                try {
+                    return Json.parse(b);
+                } catch (RuntimeException e) {
+                    throw new CountersApiException(status, "response body is not valid JSON", e);
+                }
             }
             if (RETRYABLE_STATUS.contains(status) && attempt < maxRetries) {
-                retryAfterMillis = parseRetryAfter(res.headers().firstValue("retry-after").orElse(null));
-                lastErr = new CountersApiException(status, "HTTP " + status);
+                retryAfterMillis = retryAfterMillis(res);
+                lastApiError = apiError(res, status);
                 continue;
             }
-            throw new CountersApiException(status, problemTitle(res.body(), status));
+            throw apiError(res, status);
         }
-        // B2: retries exhausted with no HTTP response -> transport error (never a status-0 API error).
+        // If any attempt received an HTTP error, preserve that real response classification. Otherwise
+        // every attempt failed before a response and this is transport.
+        if (lastApiError != null) throw lastApiError;
         throw new CountersTransportException(
-                "request failed after " + (maxRetries + 1) + " attempts: " + lastErr, lastErr);
+                "request failed after " + (maxRetries + 1) + " attempts: " + lastTransportError,
+                lastTransportError);
     }
 
     /** Percent-encode a path segment (valid counter keys are already URL-safe; this is defence in depth). */
@@ -128,13 +182,32 @@ final class Http {
         return "HTTP " + status;
     }
 
+    private static CountersApiException apiError(HttpResponse<String> response, int status) {
+        try {
+            return new CountersApiException(status, problemTitle(response.body(), status));
+        } catch (RuntimeException e) {
+            return new CountersApiException(status, "response body is unavailable", e);
+        }
+    }
+
+    private static long retryAfterMillis(HttpResponse<String> response) {
+        try {
+            var headers = response.headers();
+            if (headers == null) return -1;
+            return parseRetryAfter(headers.firstValue("retry-after").orElse(null));
+        } catch (RuntimeException e) {
+            // Retry-After is an optional hint. A hostile custom response must not hide the valid status.
+            return -1;
+        }
+    }
+
     private static void sleep(long millis) {
         if (millis <= 0) return;
         try {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new CountersException("retry backoff interrupted", e);
+            throw new CountersTransportException("retry backoff interrupted before the next response", e);
         }
     }
 

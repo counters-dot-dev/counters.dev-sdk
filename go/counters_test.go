@@ -697,9 +697,29 @@ func TestBatchOnErrorPublicShapeIsTyped(t *testing.T) {
 	if !ok {
 		t.Fatal("BatchOptions.OnError is missing")
 	}
-	want := reflect.TypeOf((func(Error))(nil))
+	want := reflect.TypeOf((func(WriteFailure))(nil))
 	if field.Type != want {
 		t.Fatalf("BatchOptions.OnError type=%v, want %v", field.Type, want)
+	}
+	failureType := reflect.TypeOf(WriteFailure{})
+	wantFields := []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"CounterKey", reflect.TypeOf("")},
+		{"Delta", reflect.TypeOf("")},
+		{"Member", reflect.TypeOf("")},
+		{"IdempotencyKey", reflect.TypeOf("")},
+		{"Err", reflect.TypeOf((*Error)(nil)).Elem()},
+	}
+	if failureType.NumField() != len(wantFields) {
+		t.Fatalf("WriteFailure has %d fields, want exactly %d", failureType.NumField(), len(wantFields))
+	}
+	for i, wantField := range wantFields {
+		got := failureType.Field(i)
+		if got.Name != wantField.name || got.Type != wantField.typ {
+			t.Errorf("WriteFailure field %d=%s %v, want %s %v", i, got.Name, got.Type, wantField.name, wantField.typ)
+		}
 	}
 }
 
@@ -806,7 +826,9 @@ func TestBufferedCoalesceOverHTTP(t *testing.T) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		bodies = append(bodies, b)
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+			map[string]any{"counterKey": "registrations", "status": "applied", "value": "6"},
+		}})
 	}))
 	defer srv.Close()
 
@@ -1871,7 +1893,7 @@ func TestEnqueueAfterCloseIsRejected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"results":[]}`))
+		_, _ = w.Write([]byte(`{"results":[{"counterKey":"c","status":"applied","value":"1"}]}`))
 	}))
 	defer srv.Close()
 
@@ -2034,7 +2056,7 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 			closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			base := closed.URL
 			closed.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: base + "/v1", MaxRetries: 0, Backoff: 0})
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: base + "/v1", MaxRetries: -1, Backoff: 0})
 			h, _ := cl.Counter("c")
 			_, err := h.AddNow(context.Background(), 1)
 			var transportErr *TransportError
@@ -2089,8 +2111,12 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 			}))
 			defer srv.Close()
 			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
-			h, _ := cl.Counter("a")
-			if err := h.Add(1); err != nil {
+			signups, _ := cl.Counter("signups")
+			capped, _ := cl.Counter("capped")
+			if err := signups.Add(1); err != nil {
+				t.Fatal(err)
+			}
+			if err := capped.Add(1); err != nil {
 				t.Fatal(err)
 			}
 			err := cl.Flush()
@@ -2128,28 +2154,27 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 	}
 }
 
-func TestImmediateModeRoutesErrorsToOnError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(403)
-		_, _ = io.WriteString(w, `{"title":"quota exceeded","status":403}`)
-	}))
-	defer srv.Close()
-
-	errCh := make(chan Error, 1)
+func TestImmediateModeRoutesWriteIdentityToOnError(t *testing.T) {
+	failureCh := make(chan WriteFailure, 1)
 	c, _ := NewClient(Options{
-		APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1,
-		Batch: &BatchOptions{Disabled: true, OnError: func(err Error) { errCh <- err }},
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(403, `{"title":"quota exceeded","status":403}`), nil
+		})},
+		Batch: &BatchOptions{Disabled: true, OnError: func(failure WriteFailure) { failureCh <- failure }},
 	})
 	h, _ := c.Counter("c")
 	if err := h.Add(1); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case err := <-errCh:
+	case failure := <-failureCh:
+		if failure.CounterKey != "c" || failure.Delta != "1" || failure.Member != "" || failure.IdempotencyKey == "" {
+			t.Fatalf("OnError identity = %+v, want counter c, delta 1, no member, and an idempotency key", failure)
+		}
 		var apiErr *APIError
-		if !errors.As(err, &apiErr) || apiErr.Status != 403 {
-			t.Fatalf("OnError got %v, want *APIError with status 403", err)
+		if !errors.As(failure.Err, &apiErr) || apiErr.Status != 403 {
+			t.Fatalf("OnError got %v, want *APIError with status 403", failure.Err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("immediate-mode write failure never reached OnError")
@@ -2159,7 +2184,7 @@ func TestImmediateModeRoutesErrorsToOnError(t *testing.T) {
 func TestImmediateModeRejectsWritesAfterClose(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"results":[]}`)
+		_, _ = io.WriteString(w, `{"results":[{"counterKey":"c","status":"applied","value":"1"}]}`)
 	}))
 	defer srv.Close()
 
@@ -2193,4 +2218,611 @@ func TestMaxRetriesMinusOneDisablesRetries(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want 1 (retries disabled)", attempts)
 	}
+}
+
+func TestBatchIntervalZeroUsesDefaultAndMinusOneDisablesTimer(t *testing.T) {
+	withDefault, err := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withDefault.batcher.ticker == nil {
+		t.Fatal("BatchOptions.Interval=0 disabled the timer; zero must select the 1s default")
+	}
+	if err := withDefault.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	withoutTimer, err := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutTimer.batcher.ticker != nil {
+		t.Fatal("BatchOptions.Interval=-1 started a timer; -1 must disable timed flushing")
+	}
+	if err := withoutTimer.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatchOnErrorReportsOnlyFailedWriteIdentities(t *testing.T) {
+	var failures []WriteFailure
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[`+
+				`{"counterKey":"accepted","status":"applied","value":"2"},`+
+				`{"counterKey":"rejected","status":"error","error":{"title":"quota exceeded","status":403}}]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, _ := c.Counter("accepted")
+	rejected, _ := c.Counter("rejected")
+	if err := accepted.Add(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejected.Subtract(3); err != nil {
+		t.Fatal(err)
+	}
+	c.batcher.flushSafe()
+
+	if len(failures) != 1 {
+		t.Fatalf("OnError calls=%d, want only the one failed result: %+v", len(failures), failures)
+	}
+	failure := failures[0]
+	if failure.CounterKey != "rejected" || failure.Delta != "-3" || failure.Member != "" || failure.IdempotencyKey == "" {
+		t.Fatalf("failure identity=%+v, want rejected/-3/no-member/non-empty-idempotency-key", failure)
+	}
+	var apiErr *APIError
+	if !errors.As(failure.Err, &apiErr) || apiErr.Status != 403 {
+		t.Fatalf("failure.Err=%v, want *APIError status 403", failure.Err)
+	}
+}
+
+func TestBatchOnErrorReportsEveryUnknownWriteOnOuterFailure(t *testing.T) {
+	var failures []WriteFailure
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("network unavailable")
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := c.Counter("a")
+	b, _ := c.Counter("b")
+	_ = a.Add(4)
+	_ = b.Subtract(7)
+	c.batcher.flushSafe()
+
+	if len(failures) != 2 {
+		t.Fatalf("OnError calls=%d, want one for each unknown write: %+v", len(failures), failures)
+	}
+	got := map[string]string{}
+	for _, failure := range failures {
+		got[failure.CounterKey] = failure.Delta
+		if failure.IdempotencyKey == "" {
+			t.Errorf("failure for %s omitted its idempotency key", failure.CounterKey)
+		}
+		var transportErr *TransportError
+		if !errors.As(failure.Err, &transportErr) {
+			t.Errorf("failure for %s has %T, want *TransportError", failure.CounterKey, failure.Err)
+		}
+	}
+	if got["a"] != "4" || got["b"] != "-7" {
+		t.Fatalf("reported deltas=%v, want a=4 and b=-7", got)
+	}
+}
+
+func TestBatchResultsCorrelateByUniqueCounterKey(t *testing.T) {
+	client, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[`+
+				`{"counterKey":"beta","status":"deduplicated"},`+
+				`{"counterKey":"alpha","status":"applied"}]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := []Operation{
+		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
+		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
+	}
+	failures, err := client.submitBatch(context.Background(), ops)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("valid out-of-order results returned failures=%+v err=%v", failures, err)
+	}
+}
+
+func TestBatchPerOperationProblemStatusMustBeHTTPCode(t *testing.T) {
+	ops := []Operation{{
+		CounterKey: "alpha", Operation: "add", Amount: "2",
+		IdempotencyKey: "idem-alpha",
+	}}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"negative", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":-1}}]}`},
+		{"zero", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":0}}]}`},
+		{"below-http-range", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":99}}]}`},
+		{"above-http-range", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":600}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(Options{
+				APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return jsonLoopbackResponse(200, tc.body), nil
+				})},
+				Batch: &BatchOptions{Interval: -1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failures, err := client.submitBatch(context.Background(), ops)
+			assertExactlyOneTaxonomyKind(t, err, "validation")
+			if len(failures) != 1 {
+				t.Fatalf("failures=%d, want 1: %+v", len(failures), failures)
+			}
+			assertExactlyOneTaxonomyKind(t, failures[0].Err, "validation")
+			if failures[0].CounterKey != "alpha" || failures[0].Delta != "2" ||
+				failures[0].Member != "" || failures[0].IdempotencyKey != "idem-alpha" {
+				t.Fatalf("failure identity=%+v, want alpha/2/no-member/idem-alpha", failures[0])
+			}
+		})
+	}
+}
+
+func TestMalformedBatchResultsFanOutValidationIdentity(t *testing.T) {
+	ops := []Operation{
+		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
+		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing-results", `{}`},
+		{"null-results", `{"results":null}`},
+		{"empty-results", `{"results":[]}`},
+		{"short-results", `{"results":[{"counterKey":"alpha","status":"applied"}]}`},
+		{"duplicate-key-omits-submitted-key", `{"results":[` +
+			`{"counterKey":"alpha","status":"applied"},` +
+			`{"counterKey":"alpha","status":"deduplicated"}]}`},
+		{"unknown-key", `{"results":[` +
+			`{"counterKey":"alpha","status":"applied"},` +
+			`{"counterKey":"ghost","status":"applied"}]}`},
+		{"unknown-status", `{"results":[` +
+			`{"counterKey":"alpha","status":"queued"},` +
+			`{"counterKey":"beta","status":"applied"}]}`},
+		{"missing-status", `{"results":[` +
+			`{"counterKey":"alpha"},` +
+			`{"counterKey":"beta","status":"applied"}]}`},
+		{"wrong-results-shape", `{"results":{}}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(Options{
+				APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return jsonLoopbackResponse(200, tc.body), nil
+				})},
+				Batch: &BatchOptions{Interval: -1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failures, err := client.submitBatch(context.Background(), ops)
+			assertExactlyOneTaxonomyKind(t, err, "validation")
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("error=%T, want *ValidationError", err)
+			}
+			if len(failures) != len(ops) {
+				t.Fatalf("failures=%d, want one for every submitted operation (%d): %+v", len(failures), len(ops), failures)
+			}
+			wantDeltas := []string{"2", "-3"}
+			for i, failure := range failures {
+				if failure.CounterKey != ops[i].CounterKey || failure.Delta != wantDeltas[i] ||
+					failure.Member != "" || failure.IdempotencyKey != ops[i].IdempotencyKey {
+					t.Errorf("failure[%d]=%+v, want identity %s/%s/no-member/%s",
+						i, failure, ops[i].CounterKey, wantDeltas[i], ops[i].IdempotencyKey)
+				}
+				if failure.Err != validationErr {
+					t.Errorf("failure[%d].Err=%v, want the shared validation error %v", i, failure.Err, validationErr)
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedBatchResponseOnErrorFansOutIdentities(t *testing.T) {
+	var failures []WriteFailure
+	client, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha, _ := client.Counter("alpha")
+	beta, _ := client.Counter("beta")
+	if err := alpha.Add(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := beta.Subtract(3); err != nil {
+		t.Fatal(err)
+	}
+	client.batcher.flushSafe()
+
+	if len(failures) != 2 {
+		t.Fatalf("OnError calls=%d, want one per submitted operation: %+v", len(failures), failures)
+	}
+	got := make(map[string]string, len(failures))
+	for _, failure := range failures {
+		got[failure.CounterKey] = failure.Delta
+		if failure.Member != "" || failure.IdempotencyKey == "" {
+			t.Errorf("failure omitted reconciliation identity: %+v", failure)
+		}
+		assertExactlyOneTaxonomyKind(t, failure.Err, "validation")
+	}
+	if got["alpha"] != "2" || got["beta"] != "-3" {
+		t.Fatalf("OnError identities=%v, want alpha=2 and beta=-3", got)
+	}
+}
+
+func TestCallerCanReuseIdempotencyKeyAfterTransportFailure(t *testing.T) {
+	var keys []string
+	attempt := 0
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			attempt++
+			if attempt == 1 {
+				return nil, errors.New("connection reset after send")
+			}
+			return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := c.Counter("c")
+	opts := WriteOptions{IdempotencyKey: "retry-safe-1"}
+	if _, err := h.AddNow(context.Background(), 5, opts); err == nil {
+		t.Fatal("first write unexpectedly succeeded")
+	} else {
+		var transportErr *TransportError
+		if !errors.As(err, &transportErr) {
+			t.Fatalf("first write error=%T, want *TransportError", err)
+		}
+	}
+	result, err := h.AddNow(context.Background(), 5, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value != "5" {
+		t.Fatalf("retry result=%+v", result)
+	}
+	if !slices.Equal(keys, []string{"retry-safe-1", "retry-safe-1"}) {
+		t.Fatalf("idempotency keys=%v, want the caller key reused exactly", keys)
+	}
+}
+
+func TestEveryConfirmedWriteAcceptsCallerIdempotencyKey(t *testing.T) {
+	var keys []string
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			switch {
+			case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/members/"):
+				return jsonLoopbackResponse(200, `{"key":"c","member":"alice","removed":true,"epoch":0,"value":"0"}`), nil
+			case r.Method == http.MethodDelete:
+				return jsonLoopbackResponse(204, ""), nil
+			case strings.Contains(r.URL.Path, "/members/"):
+				return jsonLoopbackResponse(200, `{"key":"c","member":"alice","memberValue":"1","memberAccepted":true,"mode":"sum","epoch":0,"value":"1"}`), nil
+			default:
+				return jsonLoopbackResponse(200, `{"key":"c","value":"1","epoch":0}`), nil
+			}
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := c.Counter("c")
+	m, _ := h.Member("alice")
+	at := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: "counter-add"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SubtractNow(context.Background(), 1, WriteOptions{IdempotencyKey: "counter-subtract"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.AddNowAt(context.Background(), 1, at, WriteOptions{IdempotencyKey: "counter-add-at"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SubtractNowAt(context.Background(), 1, at, WriteOptions{IdempotencyKey: "counter-subtract-at"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Clear(context.Background(), WriteOptions{IdempotencyKey: "counter-clear"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Delete(context.Background(), WriteOptions{IdempotencyKey: "counter-delete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Add(context.Background(), 1, MemberWriteOpts{IdempotencyKey: "member-add"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Subtract(context.Background(), 1, MemberWriteOpts{IdempotencyKey: "member-subtract"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Submit(context.Background(), 1, SubmitOpts{Mode: "max", IdempotencyKey: "member-submit"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Remove(context.Background(), WriteOptions{IdempotencyKey: "member-remove"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"counter-add", "counter-subtract", "counter-add-at", "counter-subtract-at", "counter-clear", "counter-delete",
+		"member-add", "member-subtract", "member-submit", "member-remove",
+	}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("idempotency keys=%v, want %v", keys, want)
+	}
+}
+
+func TestEveryProducibleErrorCategoryHasExactlyOneTaxonomyKind(t *testing.T) {
+	assert := func(name string, err error, want string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			assertExactlyOneTaxonomyKind(t, err, want)
+		})
+	}
+
+	_, err := NewClient(Options{})
+	assert("construction/missing-api-key", err, "validation")
+	_, err = NewPublishableClient(PublishableOptions{})
+	assert("construction/publishable-missing-api-key", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", BaseURL: "://not-a-url"})
+	assert("construction/invalid-base-url", err, "validation")
+	_, err = NewClient(Options{APIKey: "bad\nkey"})
+	assert("construction/invalid-auth-header", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", MaxRetries: -2})
+	assert("construction/invalid-max-retries", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Backoff: -1})
+	assert("construction/invalid-backoff", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Batch: &BatchOptions{MaxBatchSize: -1}})
+	assert("construction/invalid-batch-size", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -2}})
+	assert("construction/invalid-batch-interval", err, "validation")
+
+	local, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("validation unexpectedly issued a request")
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = local.Counter("has space")
+	assert("input/counter-key", err, "validation")
+	_, err = local.Derived("has space")
+	assert("input/derived-key", err, "validation")
+	h, _ := local.Counter("c")
+	_, err = h.Member("has space")
+	assert("input/member-key", err, "validation")
+	_, err = ToAmount(-1)
+	assert("input/amount", err, "validation")
+	var nilBigInt *big.Int
+	_, err = ToAmount(nilBigInt)
+	assert("input/typed-nil-amount", err, "validation")
+	_, err = ToValue("1.5")
+	assert("input/value", err, "validation")
+	_, err = ToValue(nilBigInt)
+	assert("input/typed-nil-value", err, "validation")
+	m, _ := h.Member("alice")
+	_, err = m.Add(context.Background(), 1, MemberWriteOpts{Metadata: strings.Repeat("x", metadataMaxBytes+1)})
+	assert("input/metadata", err, "validation")
+	_, err = h.Series(context.Background(), SeriesParams{Bucket: "2m"})
+	assert("input/series-bucket", err, "validation")
+	_, err = h.Series(context.Background(), SeriesParams{Bucket: "1h", Mode: "sum"})
+	assert("input/series-mode", err, "validation")
+	_, err = (&DerivedHandle{client: local, Key: "d"}).Series(context.Background(), DerivedSeriesParams{Bucket: "2m"})
+	assert("input/derived-series-bucket", err, "validation")
+	_, err = h.WindowLeaderboard(context.Background(), WindowLeaderboardParams{Window: "2h"})
+	assert("input/window", err, "validation")
+	_, err = m.Add(context.Background(), 1, MemberWriteOpts{}, MemberWriteOpts{})
+	assert("input/multiple-member-options", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{}, WriteOptions{})
+	assert("input/multiple-write-options", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: strings.Repeat("k", idempotencyKeyMaxLength+1)})
+	assert("input/overlong-idempotency-key", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: "bad\nkey"})
+	assert("input/invalid-idempotency-header", err, "validation")
+	originalReader := idempotencyReader
+	idempotencyReader = errorReader{err: errors.New("entropy unavailable")}
+	_, err = h.AddNow(context.Background(), 1)
+	idempotencyReader = originalReader
+	assert("local/idempotency-generation", err, "transport")
+	_, err = h.Value(nil)
+	assert("input/nil-context", err, "validation")
+	err = local.do(context.Background(), "POST", "/test", make(chan int), "", nil, nil)
+	assert("request/body-encoding", err, "validation")
+
+	badRequestClient, _ := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	badRequestClient.baseURL = "http://[::1"
+	badRequestHandle, _ := badRequestClient.Counter("c")
+	_, err = badRequestHandle.Value(context.Background())
+	assert("request/construction", err, "validation")
+
+	closed, _ := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	closedHandle, _ := closed.Counter("c")
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = closedHandle.Add(1)
+	if !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("closed error %v no longer matches ErrClientClosed", err)
+	}
+	assert("lifecycle/client-closed", err, "validation")
+
+	requestError := func(response *http.Response, transportErr error) error {
+		client, clientErr := NewClient(Options{
+			APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return response, transportErr
+			})},
+			Batch: &BatchOptions{Interval: -1},
+		})
+		if clientErr != nil {
+			t.Fatal(clientErr)
+		}
+		handle, _ := client.Counter("c")
+		_, callErr := handle.Value(context.Background())
+		return callErr
+	}
+	assert("response/http-error", requestError(jsonLoopbackResponse(404, `{"title":"missing"}`), nil), "api")
+	assert("response/unparseable-2xx", requestError(jsonLoopbackResponse(200, "{bad"), nil), "api")
+	bodyReadError := jsonLoopbackResponse(200, "")
+	bodyReadError.Body = io.NopCloser(errorReader{err: errors.New("body read failed")})
+	assert("response/body-read-error", requestError(bodyReadError, nil), "api")
+	assert("transport/no-response", requestError(nil, errors.New("network down")), "transport")
+	assert("transport/round-tripper-nil-response-and-error", requestError(nil, nil), "transport")
+	assert("transport/round-tripper-invalid-nil-body", requestError(&http.Response{
+		StatusCode: 200, ContentLength: 1,
+	}, nil), "transport")
+	assert("transport/round-tripper-invalid-status", requestError(&http.Response{
+		StatusCode: 0, Body: io.NopCloser(strings.NewReader(`{}`)),
+	}, nil), "transport")
+	redirectResponse := jsonLoopbackResponse(302, "")
+	redirectResponse.Header.Set("Location", "https://unit.test/redirected")
+	redirectClient, _ := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return redirectResponse, nil
+			}),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("redirect rejected")
+			},
+		},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	redirectHandle, _ := redirectClient.Counter("c")
+	_, err = redirectHandle.Value(context.Background())
+	assert("response/redirect-policy-error", err, "api")
+
+	attempts := 0
+	mixed, _ := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: 1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return jsonLoopbackResponse(503, `{"title":"unavailable"}`), nil
+			}
+			return nil, errors.New("network then failed")
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	mixed.sleepFn = func(time.Duration) {}
+	mixedHandle, _ := mixed.Counter("c")
+	_, err = mixedHandle.Value(context.Background())
+	assert("response/http-then-no-response", err, "api")
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"response/batch-problem-with-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota","status":403}}]}`, "api"},
+		{"response/batch-problem-without-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota"}}]}`, "validation"},
+		{"response/batch-problem-invalid-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota","status":600}}]}`, "validation"},
+	} {
+		batchClient, batchErr := NewClient(Options{
+			APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonLoopbackResponse(200, tc.body), nil
+			})},
+			Batch: &BatchOptions{Interval: -1},
+		})
+		if batchErr != nil {
+			t.Fatal(batchErr)
+		}
+		batchHandle, _ := batchClient.Counter("c")
+		_ = batchHandle.Add(1)
+		assert(tc.name, batchClient.Flush(), tc.want)
+	}
+}
+
+func assertExactlyOneTaxonomyKind(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var root Error
+	if !errors.As(err, &root) {
+		t.Fatalf("%T is not caught by counters.Error: %v", err, err)
+	}
+	matched := make([]string, 0, 3)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		matched = append(matched, "api")
+	}
+	var transportErr *TransportError
+	if errors.As(err, &transportErr) {
+		matched = append(matched, "transport")
+	}
+	var validationErr *ValidationError
+	if errors.As(err, &validationErr) {
+		matched = append(matched, "validation")
+	}
+	if len(matched) != 1 || matched[0] != want {
+		t.Fatalf("%T matched taxonomy kinds %v, want exactly [%s]: %v", err, matched, want, err)
+	}
+}
+
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestNewIdempotencyKeyFailsClosedWithTypedTransportPanic(t *testing.T) {
+	originalReader := idempotencyReader
+	idempotencyReader = errorReader{err: errors.New("entropy unavailable")}
+	defer func() { idempotencyReader = originalReader }()
+	defer func() {
+		recovered := recover()
+		err, ok := recovered.(error)
+		if !ok {
+			t.Fatalf("panic=%T %v, want an error", recovered, recovered)
+		}
+		assertExactlyOneTaxonomyKind(t, err, "transport")
+	}()
+
+	NewIdempotencyKey()
+	t.Fatal("NewIdempotencyKey returned a partial key instead of failing closed")
 }

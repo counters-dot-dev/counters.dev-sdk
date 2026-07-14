@@ -5,7 +5,9 @@ confirms a like before returning the exact new value to React, while
 [`app/api/posts/[id]/views/route.ts`](./app/api/posts/%5Bid%5D/views/route.ts) reads hourly view deltas
 and reshapes them for a sparkline. The comments contrast visible state, which needs a confirmed write,
 with high-volume view telemetry, which a long-lived collector can buffer, flush, and report through
-`batch.onError`.
+`batch.onError`. Each failure event includes the counter key, signed decimal delta, and actual
+idempotency key, so the application can persist enough identity for reconciliation instead of only
+learning that an anonymous write was lost.
 
 [`app/public-views.ts`](./app/public-views.ts) is intentionally a client module. Its `pk_` token is
 read-only and counter-scoped, so it may be embedded through a `NEXT_PUBLIC_*` variable and is passed

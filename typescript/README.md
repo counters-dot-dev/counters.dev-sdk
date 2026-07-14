@@ -5,7 +5,7 @@ Official TypeScript SDK for [counters.dev](https://counters.dev), the
 
 - Pure TypeScript, **ESM**, **zero runtime dependencies** (uses the platform `fetch` and `crypto`).
 - Buffered writes are coalesced per counter and flushed in the background; every write carries an
-  `Idempotency-Key`, so retries are safe.
+  `Idempotency-Key`, which makes exact replay safe within the server's deduplication window.
 - Amounts and values are **arbitrary precision**: `bigint` internally, **strings on the wire**. The
   SDK never represents a counter value as a JS `number`. Decimal (derived) values stay strings too.
 - Every timestamp on the typed machine-SDK surface is a native JavaScript `Date`, including series
@@ -62,7 +62,11 @@ npm install @counters.dev/sdk
 ## Quickstart
 
 ```ts
-import { CountersClient } from "@counters.dev/sdk";
+import {
+  CountersClient,
+  CountersTransportError,
+  newIdempotencyKey,
+} from "@counters.dev/sdk";
 
 const client = new CountersClient({ apiKey: process.env.COUNTERS_API_KEY! });
 const registrations = client.counter("registrations");
@@ -84,11 +88,34 @@ Two kinds of write, deliberately:
 - **Buffered** — `add`/`subtract`. Coalesced per counter client-side and flushed as one batch
   (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
   coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
-  give `batch.onError` a sink or they are silent. Its argument is `CountersError`, so the same three
-  `instanceof` checks below apply. Call `close()` before exit.
+  give `batch.onError` a sink or they are silent. Its `WriteFailure` argument identifies the
+  coalesced write with `counterKey`, signed decimal `delta`, optional `member`, and the actual
+  `idempotencyKey`; classify `failure.error` with the three `instanceof` checks below. Set
+  `intervalMs: 0` to disable the timer and flush manually. Call `close()` before exit.
 - **Immediate** — `addNow`/`subtractNow` (pass a `Date` as `occurredAt` to stamp an event time for
-  late-arriving data). One request now, returning the new state. Every write carries a fresh
-  idempotency key, so retries never double-count.
+  late-arriving data). One request now, returning the new state. The SDK generates a fresh
+  idempotency key unless you supply one for a caller-managed retry.
+
+For a retry after `CountersTransportError`, generate the key before the first call and reuse it with
+the **same operation and payload**:
+
+```ts
+const idempotencyKey = newIdempotencyKey();
+try {
+  await registrations.addNow(5, { idempotencyKey });
+} catch (error) {
+  if (error instanceof CountersTransportError) {
+    await registrations.addNow(5, { idempotencyKey });
+  } else {
+    throw error;
+  }
+}
+```
+
+The server replays the original result only within its deduplication window. That window's duration
+is not specified, so this is not an indefinite guarantee. Reusing the key for a different operation
+is rejected with HTTP 409. The contract does not specify what happens when the operation is the same
+but its payload changes; do not rely on that case.
 
 The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
 this SDK against a live server — it is the fastest way to see the whole surface in use.
@@ -186,16 +213,17 @@ Every failure from this SDK is one of three classes, and the distinction tells y
 
 | Class | Meaning | Typical handling |
 |---|---|---|
-| `CountersValidationError` | Rejected client-side (bad key, negative amount, over-cap metadata, bad `bucket`/`window`, `member`+`groupBy`) — **no request was made** | A bug in your code; fix the input |
+| `CountersValidationError` | Rejected client-side (bad construction/configuration, bad key/amount/options, or a write after close), or a parsed response shape the SDK cannot faithfully represent | A bug in input/configuration, or an incompatible response |
 | `CountersApiError` | The server answered with an HTTP error; `status` is always the real status and `problem` is the parsed RFC 9457 body | Branch on `status` (403 quota, 404 missing, 409 conflict…) |
 | `CountersTransportError` | **No response was ever obtained** — network failure or timeout, retries exhausted; never carries a status | Infrastructure problem; back off and retry later |
 
-All three extend `CountersError`, so `catch (e) { if (e instanceof CountersError) … }` catches
-anything originating in this SDK.
+All three extend the abstract `CountersError` root and carry a literal `kind` (`api`, `transport`, or
+`validation`), so `instanceof CountersError` catches anything originating in this SDK.
 
 Retries are built in: network errors and HTTP 429/5xx retry with exponential backoff (default 3
-retries), honouring `Retry-After`; `timeoutMs` bounds each attempt (default 30s). Idempotency keys
-make retried writes safe.
+retries), honouring `Retry-After`; `timeoutMs` bounds each attempt (default 30s). Built-in retries
+reuse the same idempotency key and payload. Caller-managed retries are safe only under the bounded,
+exact-replay rules above.
 
 ## Odds and ends
 

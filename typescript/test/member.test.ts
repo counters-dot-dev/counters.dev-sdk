@@ -35,10 +35,13 @@ function capture(responder: (url: URL, init: RequestInit) => Response) {
 describe("MemberHandle — HTTP wiring", () => {
   it("add POSTs to …/members/{member}/add with an idempotency key", async () => {
     const { client, seen } = capture(() => jsonResponse(200, memberValueBody));
-    const r = await client.counter("lb").member("alice").add(10);
+    const r = await client
+      .counter("lb")
+      .member("alice")
+      .add(10, { idempotencyKey: "member-add-1" });
     expect(seen.method).toBe("POST");
     expect(seen.path).toBe("/v1/counters/lb/members/alice/add");
-    expect(seen.idem).toMatch(/^[0-9a-f-]{36}$/);
+    expect(seen.idem).toBe("member-add-1");
     expect(JSON.parse(seen.body!)).toEqual({ amount: "10" });
     expect(r.memberValue).toBe("10");
     expect(r.memberAccepted).toBe(true);
@@ -63,10 +66,12 @@ describe("MemberHandle — HTTP wiring", () => {
         mode: "max",
         metadata: "room1:400",
         occurredAt: new Date("2026-01-01T00:00:00Z"),
+        idempotencyKey: "submit-1",
       });
     expect(seen.method).toBe("POST");
     // The `|` in the member key is percent-encoded in the path.
     expect(seen.path).toBe("/v1/counters/raid/members/alice%7Cbob/submit");
+    expect(seen.idem).toBe("submit-1");
     expect(JSON.parse(seen.body!)).toEqual({
       value: "1417",
       mode: "max",
@@ -112,10 +117,10 @@ describe("MemberHandle — HTTP wiring", () => {
     const { client, seen } = capture(() =>
       jsonResponse(200, { key: "rm", member: "alice", epoch: 0, value: "15" }),
     );
-    const r = await client.counter("rm").member("alice").remove();
+    const r = await client.counter("rm").member("alice").remove({ idempotencyKey: "remove-1" });
     expect(seen.method).toBe("DELETE");
     expect(seen.path).toBe("/v1/counters/rm/members/alice");
-    expect(seen.idem).toMatch(/^[0-9a-f-]{36}$/);
+    expect(seen.idem).toBe("remove-1");
     expect(r.value).toBe("15");
   });
 });

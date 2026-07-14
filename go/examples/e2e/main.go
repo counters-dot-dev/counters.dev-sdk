@@ -154,7 +154,10 @@ func tour() {
 		HTTPClient: &http.Client{Timeout: 15 * time.Second},
 		Batch: &counters.BatchOptions{
 			Interval: 200 * time.Millisecond,
-			OnError:  func(e counters.Error) { fmt.Fprintln(os.Stderr, "batch flush failed:", e) },
+			OnError: func(failure counters.WriteFailure) {
+				fmt.Fprintf(os.Stderr, "batch flush failed: counter=%s delta=%s idempotencyKey=%s: %v\n",
+					failure.CounterKey, failure.Delta, failure.IdempotencyKey, failure.Err)
+			},
 		},
 	})
 	check(err, "NewClient")
@@ -163,8 +166,10 @@ func tour() {
 	// A typed handle per counter. Keys are validated client-side.
 	signups := mustCounter(client, ns+"signups")
 
-	// Confirmed writes: apply immediately, return the new state.
-	first, err := signups.AddNow(ctx, 5)
+	// Confirmed writes: apply immediately, return the new state. Supplying the idempotency key
+	// before the attempt lets a caller reuse it after a transport failure.
+	firstWriteKey := counters.NewIdempotencyKey()
+	first, err := signups.AddNow(ctx, 5, counters.WriteOptions{IdempotencyKey: firstWriteKey})
 	invoked["CounterHandle.AddNow"] = true
 	check(err, "addNow(5)")
 	assertEq(first.Value, "5", "addNow(5) on a fresh counter")

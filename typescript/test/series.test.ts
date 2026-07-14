@@ -64,7 +64,13 @@ describe("series conformance (conformance/series)", () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1h", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, {
+        counterKey: "c",
+        bucket: "1h",
+        mode: "delta",
+        range: { from: params.from.toISOString(), to: params.to.toISOString() },
+        points: [],
+      });
     });
     const client = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     await client.counter("c").series(params as AnySeriesParams);

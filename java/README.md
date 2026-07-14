@@ -85,11 +85,31 @@ Two kinds of write, deliberately:
 - **Buffered** — `add`/`subtract`. Coalesced per counter client-side and flushed as one batch
   (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
   coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
-  give `onBatchError` a sink or they are silent. The flush thread is a daemon — it never keeps the
-  JVM alive, which also means you must `close()` (try-with-resources) before exit.
+  give `onBatchError` a sink or they are silent. Its `WriteFailure` identifies the counter, signed
+  coalesced delta, nullable member, actual idempotency key, and typed error, so the write can be
+  reconciled. The flush thread is a daemon — it never keeps the JVM alive, which also means you must `close()`
+  (try-with-resources) before exit.
 - **Immediate** — `addNow`/`subtractNow` (pass an `Instant occurredAt` to stamp an event
-  time for late-arriving data). One request now, returning the new state. Every write carries a
-  fresh idempotency key, so retries never double-count.
+  time for late-arriving data). One request now, returning the new state. The SDK generates a fresh
+  idempotency key unless you supply one.
+
+For a caller-managed retry, generate the key once and reuse it with the exact same operation and
+payload:
+
+```java
+String key = Idempotency.newKey();
+try {
+    registrations.addNow(5, null, key);
+} catch (CountersTransportException firstAttempt) {
+    registrations.addNow(5, null, key);
+}
+```
+
+The service de-duplicates that retry within its deduplication window. Reusing the key for a different
+operation is rejected with `409`; retrying after the unspecified window is not guaranteed to
+de-duplicate. The contract does not specify same-operation reuse with a changed payload, so do not
+rely on it. `clear(String)`, `delete(String)`, and `MemberHandle.remove(String)` accept keys too;
+member add/subtract/submit use the `idempotencyKey` component of their option records.
 
 The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
 this SDK against a live server — it is the fastest way to see the whole surface in use.
@@ -143,7 +163,8 @@ WindowLeaderboard recent = board.windowLeaderboard(new WindowLeaderboardParams("
 ```
 
 Member writes carry optional `metadata` (≤ 1024 **UTF-8 bytes** — byte-counted, validated
-client-side) and `occurredAt` via `MemberWriteOptions` / `SubmitOptions`.
+client-side), `occurredAt`, and a caller-supplied `idempotencyKey` via
+`MemberWriteOptions` / `SubmitOptions`.
 
 ## Derived counters
 
@@ -173,18 +194,19 @@ what to do:
 
 | Exception | Meaning | Typical handling |
 |---|---|---|
-| `CountersValidationException` | Rejected client-side (bad key, negative amount, over-cap metadata, bad bucket/window/mode) — **no request was made** | A bug in your code; fix the input |
-| `CountersApiException` | The server answered with an HTTP error; `status()` is always the real status, `title()` the RFC 9457 problem title | Branch on `status()` (403 quota, 404 missing, 409 conflict…) |
+| `CountersValidationException` | Rejected client-side (bad key, negative amount, invalid configuration, write after close), or a parsed response cannot be represented faithfully | Fix the input/configuration; report an invalid response payload |
+| `CountersApiException` | The server answered with an HTTP error, or a 2xx body was not valid JSON; `status()` is always the real response status | Branch on `status()` (403 quota, 404 missing, 409 conflict…); report malformed success bodies |
 | `CountersTransportException` | **No response was ever obtained** — network failure or timeout, retries exhausted; carries no status | Infrastructure problem; back off and retry later |
 
-All three extend `CountersException` (itself a `RuntimeException`), so one
+All three are the only permitted subclasses of the abstract `CountersException` root (itself a
+`RuntimeException`), so one
 `catch (CountersException e)` catches anything originating in this SDK.
-`onBatchError` likewise receives a `CountersException`, so asynchronous failures use the same typed
-branches instead of exposing a raw `Throwable`.
+`onBatchError` receives a `WriteFailure`; its `error()` is one of those same three subtypes.
 
 Retries are built in: connect errors and HTTP 429/5xx retry with exponential backoff
 (`maxRetries`, default 3), honouring `Retry-After`; `requestTimeoutMillis` bounds each attempt
-(default 30s). Idempotency keys make retried writes safe.
+(default 30s). One key is reused throughout those built-in attempts. Caller-managed retries are safe
+only with the same key and exact operation/payload, within the service's deduplication window.
 
 ## Builder reference
 
@@ -201,7 +223,7 @@ Retries are built in: connect errors and HTTP 429/5xx retry with exponential bac
 | `batchEnabled` | true | Buffer + coalesce `add`/`subtract`; when false each write fires immediately |
 | `maxBatchSize` | 100 | Distinct-counter count that triggers an early flush |
 | `batchIntervalMillis` | 1000 | Background flush cadence; `<= 0` disables the timer |
-| `onBatchError` | — | Sink for errors from fire-and-forget writes (background flushes and immediate mode) |
+| `onBatchError` | — | Sink receiving one `WriteFailure` per failed/unknown coalesced fire-and-forget write |
 
 For a scoped publishable (`pk_`) token, use the separate transport-only builder. Its result exposes
 only the operations that publishable tokens can perform:

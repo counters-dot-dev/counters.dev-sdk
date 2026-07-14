@@ -75,11 +75,29 @@ Two kinds of write, deliberately:
 - **Buffered** — `Add`/`Subtract`. Coalesced per counter client-side and flushed as one batch
   (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
   coalescing a thousand `Add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
-  give `BatchOptions.OnError` a `func(counters.Error)` sink or they are silent. Call `Close` before
-  exit.
+  give `BatchOptions.OnError` a `func(counters.WriteFailure)` sink or they are silent. Each failure
+  identifies the coalesced counter key, signed decimal delta, optional member, actual idempotency
+  key, and typed error so it can be reconciled. Call `Close` before exit.
 - **Immediate** — `AddNow`/`SubtractNow` (and `AddNowAt`/`SubtractNowAt` to stamp an event time for
-  late-arriving data). One request now, returning the new state. Every write carries a fresh
-  idempotency key, so retries never double-count.
+  late-arriving data). One request now, returning the new state. The SDK generates an idempotency
+  key unless you supply one with `WriteOptions`.
+
+`BatchOptions.Interval` follows Go's zero-value convention: `0` keeps the one-second default and
+`-1` disables timed flushing. The latter leaves `Flush`, `Close`, and `MaxBatchSize` as the only
+flush triggers. This means adding only an `OnError` callback does not accidentally stop the timer.
+
+```go
+client, err := counters.NewClient(counters.Options{
+    APIKey: os.Getenv("COUNTERS_API_KEY"),
+    Batch: &counters.BatchOptions{
+        OnError: func(failure counters.WriteFailure) {
+            log.Printf("reconcile counter=%s delta=%s member=%s idempotency_key=%s: %v",
+                failure.CounterKey, failure.Delta, failure.Member,
+                failure.IdempotencyKey, failure.Err)
+        },
+    },
+})
+```
 
 The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
 this SDK against a live server — it is the fastest way to see the whole surface in use.
@@ -204,7 +222,7 @@ Every failure from this SDK is one of three types, and the distinction tells you
 
 | Type | Meaning | Typical handling |
 |---|---|---|
-| `*counters.ValidationError` | Rejected client-side (bad key, negative amount, oversized metadata, bad bucket/window) — **no request was made** | A bug in your code; fix the input |
+| `*counters.ValidationError` | Rejected client-side (missing/invalid configuration, bad key or amount, oversized metadata, bad bucket/window, write after close), or a parsed response shape the SDK cannot faithfully represent | Fix the input/lifecycle, or report an incompatible response |
 | `*counters.APIError` | The server answered with an HTTP error; `Status` is always the real status | Branch on `Status` (403 quota, 404 missing, 409 conflict…) |
 | `*counters.TransportError` | **No response was ever obtained** — network failure or timeout, retries exhausted; carries no status | Infrastructure problem; back off and retry later |
 
@@ -219,8 +237,30 @@ if errors.As(err, &anySDK) { /* any failure originating in this SDK */ }
 ```
 
 Retries are built in: connect errors and HTTP 429/5xx retry with exponential backoff (default 3
-retries; `MaxRetries: -1` disables), honouring `Retry-After`. Idempotency keys make retried writes
-safe. Writes after `Close` return `ErrClientClosed` (`errors.Is`).
+retries; `MaxRetries: -1` disables), honouring `Retry-After`. One automatic retry sequence reuses
+the same idempotency key. To retry a confirmed write yourself after a transport failure, choose the
+key before the first attempt and repeat the exact operation and payload:
+
+```go
+key := counters.NewIdempotencyKey()
+opts := counters.WriteOptions{IdempotencyKey: key}
+_, err := signups.AddNow(ctx, 5, opts)
+var transportErr *counters.TransportError
+if errors.As(err, &transportErr) {
+    _, err = signups.AddNow(ctx, 5, opts)
+}
+```
+
+The server replays the original result instead of double-applying the operation when the same key
+is reused for the same operation and payload **within its deduplication window**. The window's
+duration is not part of the public contract, so this is not an unbounded retry guarantee; using the
+key for a different operation returns `409 Conflict`. Same-operation reuse with a changed payload is
+not specified, so do not rely on it. `MemberWriteOpts` and `SubmitOpts` also accept
+`IdempotencyKey`, while confirmed clear, delete, and member removal accept `WriteOptions`. Empty
+keys ask the SDK to generate one; supplied keys may contain at most 255 characters.
+
+Writes after `Close` return `ErrClientClosed`. It is a `*counters.ValidationError`, and remains
+matchable with `errors.Is` as well as `errors.As`.
 
 ## Odds and ends
 

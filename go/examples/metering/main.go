@@ -27,7 +27,9 @@ func main() {
 			// Add returns after enqueueing: millions of requests cannot each pay for an API
 			// round trip. Server confirmation happens on the background flush; without this
 			// sink, a quota rejection would silently lose billable usage.
-			OnError: func(err counters.Error) { reportCounterError("asynchronous usage write", err) },
+			OnError: func(failure counters.WriteFailure) {
+				reportWriteFailure("asynchronous usage write", failure)
+			},
 		},
 	})
 	if err != nil {
@@ -68,6 +70,18 @@ func metered(client *counters.Client) http.Handler {
 		}
 		// A real sidecar would forward to the SaaS API here; returning is an empty 200 in this sketch.
 	})
+}
+
+func reportWriteFailure(operation string, failure counters.WriteFailure) {
+	member := failure.Member
+	if member == "" {
+		member = "-"
+	}
+	// These are the durable reconciliation coordinates: the exact coalesced delta and the
+	// idempotency key actually sent, rather than only the fact that some customer's write failed.
+	log.Printf("%s needs reconciliation: counter=%s delta=%s member=%s idempotency_key=%s",
+		operation, failure.CounterKey, failure.Delta, member, failure.IdempotencyKey)
+	reportCounterError(operation, failure.Err)
 }
 
 func reportCounterError(operation string, err error) {

@@ -65,7 +65,12 @@ windowLeaderboard.effectiveEnd.toISOString();
 const writable = new CountersClient({
   apiKey: "ck_server",
   batch: {
-    onError(error) {
+    onError(failure) {
+      failure.counterKey.toUpperCase();
+      BigInt(failure.delta);
+      failure.member?.toUpperCase();
+      failure.idempotencyKey.toUpperCase();
+      const error = failure.error;
       const sdkError: CountersError = error;
       if (error instanceof CountersApiError) error.status.toFixed();
       if (error instanceof CountersTransportError) void error.cause;
@@ -80,10 +85,11 @@ writableCounter.subtract(1);
 void writableCounter.addNow(1);
 void writableCounter.subtractNow(1);
 void writableCounter.addNow(1, { occurredAt: new Date() });
+void writableCounter.addNow(1, { idempotencyKey: "write-1" });
 // @ts-expect-error event timestamps use native Date values.
 void writableCounter.addNow(1, { occurredAt: "2026-01-01T00:00:00Z" });
-void writableCounter.clear();
-void writableCounter.delete();
+void writableCounter.clear({ idempotencyKey: "clear-1" });
+void writableCounter.delete({ idempotencyKey: "delete-1" });
 void writable.list();
 void writable.usage();
 void writable.derived("conversion").value();

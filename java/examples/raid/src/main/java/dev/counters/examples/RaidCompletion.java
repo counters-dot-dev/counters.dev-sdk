@@ -6,11 +6,14 @@ import dev.counters.sdk.CountersClient;
 import dev.counters.sdk.CountersException;
 import dev.counters.sdk.CountersTransportException;
 import dev.counters.sdk.CountersValidationException;
+import dev.counters.sdk.Idempotency;
 import dev.counters.sdk.Leaderboard;
 import dev.counters.sdk.LeaderboardEntry;
 import dev.counters.sdk.LeaderboardParams;
 import dev.counters.sdk.MemberGetParams;
 import dev.counters.sdk.MemberSnapshot;
+import dev.counters.sdk.MemberWriteOptions;
+import dev.counters.sdk.WriteFailure;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -31,7 +34,7 @@ public final class RaidCompletion {
         try (CountersClient client = CountersClient.builder()
                 .apiKey(System.getenv("COUNTERS_API_KEY"))
                 .maxRetries(3)
-                .onBatchError(error -> handleFailure("raids-completed telemetry", error))
+                .onBatchError(RaidCompletion::handleBufferedFailure)
                 .build()) {
             completeRaid(client, party);
         } catch (CountersException error) {
@@ -49,12 +52,7 @@ public final class RaidCompletion {
         // Do not create one counter per player and sort them in the game server. Members make this
         // one sum board: counters.dev maintains each standing value, ties, ranks, and the total.
         for (Contribution contribution : party) {
-            try {
-                // Member writes are confirmed, so the results read below include this raid's damage.
-                damageBoard.member(contribution.playerId()).add(contribution.damage());
-            } catch (CountersException error) {
-                handleFailure("damage for " + contribution.playerId(), error);
-            }
+            recordDamage(damageBoard, contribution);
         }
 
         try {
@@ -69,6 +67,34 @@ public final class RaidCompletion {
             // The raid is already complete; the UI can fall back to its local damage summary.
             handleFailure("post-raid leaderboard", error);
         }
+    }
+
+    private static void recordDamage(CounterHandle damageBoard, Contribution contribution) {
+        String idempotencyKey = Idempotency.newKey();
+        MemberWriteOptions options = new MemberWriteOptions(null, null, idempotencyKey);
+        try {
+            // Member writes are confirmed, so the results read below include this raid's damage.
+            damageBoard.member(contribution.playerId()).add(contribution.damage(), options);
+        } catch (CountersTransportException firstAttempt) {
+            // Retry promptly, within the service's deduplication window, using the exact same member,
+            // delta, and key. A fresh key here could double-count an applied-but-unacknowledged write.
+            try {
+                damageBoard.member(contribution.playerId()).add(contribution.damage(), options);
+            } catch (CountersException retryError) {
+                handleFailure("damage for " + contribution.playerId()
+                        + " (idempotency " + idempotencyKey + ")", retryError);
+            }
+        } catch (CountersException error) {
+            handleFailure("damage for " + contribution.playerId(), error);
+        }
+    }
+
+    private static void handleBufferedFailure(WriteFailure failure) {
+        handleFailure(
+                "buffered counter " + failure.counterKey()
+                        + " delta " + failure.delta()
+                        + " (idempotency " + failure.idempotencyKey() + ")",
+                failure.error());
     }
 
     private static void renderResults(Leaderboard top, List<MemberSnapshot> party) {

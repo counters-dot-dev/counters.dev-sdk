@@ -54,7 +54,7 @@ final class Json {
             }
             sb.append(']');
         } else {
-            throw new CountersException("cannot serialize " + v.getClass().getName() + " to JSON");
+            throw new CountersValidationException("cannot serialize " + v.getClass().getName() + " to JSON");
         }
     }
 
@@ -86,10 +86,16 @@ final class Json {
      * {@code Long} or {@code BigInteger} (integers) / {@code Double} (decimals) / {@code Boolean} / null.
      */
     static Object parse(String text) {
-        Parser p = new Parser(text);
-        Object v = p.parseValue();
-        p.skipWs(); // tolerant: trailing content is ignored
-        return v;
+        try {
+            Parser p = new Parser(text);
+            Object v = p.parseValue();
+            p.skipWs(); // tolerant: trailing content is ignored
+            return v;
+        } catch (CountersValidationException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new CountersValidationException("invalid JSON", e);
+        }
     }
 
     private static final class Parser {
@@ -243,8 +249,8 @@ final class Json {
             return c >= '0' && c <= '9';
         }
 
-        private CountersException err(String msg) {
-            return new CountersException("invalid JSON at offset " + i + ": " + msg);
+        private CountersValidationException err(String msg) {
+            return new CountersValidationException("invalid JSON at offset " + i + ": " + msg);
         }
     }
 }

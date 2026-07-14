@@ -40,7 +40,12 @@ public final class MemberHandle implements ReadOnlyMemberHandle {
 
     /** Remove this member from the current board. */
     public MemberRemoved remove() {
-        return client.removeMember(counterKey, member);
+        return remove(null);
+    }
+
+    /** Remove this member using a caller-supplied idempotency key. */
+    public MemberRemoved remove(String idempotencyKey) {
+        return client.removeMember(counterKey, member, idempotencyKey);
     }
 
     /** Add a non-negative delta to this member (sum board). */

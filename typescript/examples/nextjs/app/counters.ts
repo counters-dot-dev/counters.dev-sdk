@@ -9,5 +9,13 @@ if (!apiKey || apiKey.startsWith("pk_")) {
 // promise to catch. Confirmed calls such as addNow() reject their own promise instead.
 export const counters = new CountersClient({
   apiKey,
-  batch: { onError: (error) => console.error("Unconfirmed counter write failed", error) },
+  batch: {
+    onError: (failure) =>
+      console.error("Unconfirmed counter write failed", {
+        counterKey: failure.counterKey,
+        delta: failure.delta,
+        idempotencyKey: failure.idempotencyKey,
+        error: failure.error,
+      }),
+  },
 });

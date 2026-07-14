@@ -45,11 +45,14 @@ class PublicApiShapeTest {
                 new String[] {"from", "to", "bucket", "timeZone"},
                 new Class<?>[] {Instant.class, Instant.class, String.class, String.class});
         assertRecordShape(MemberWriteOptions.class,
-                new String[] {"metadata", "occurredAt"},
-                new Class<?>[] {String.class, Instant.class});
+                new String[] {"metadata", "occurredAt", "idempotencyKey"},
+                new Class<?>[] {String.class, Instant.class, String.class});
         assertRecordShape(SubmitOptions.class,
-                new String[] {"mode", "metadata", "occurredAt"},
-                new Class<?>[] {String.class, String.class, Instant.class});
+                new String[] {"mode", "metadata", "occurredAt", "idempotencyKey"},
+                new Class<?>[] {String.class, String.class, Instant.class, String.class});
+        assertRecordShape(WriteFailure.class,
+                new String[] {"counterKey", "delta", "member", "idempotencyKey", "error"},
+                new Class<?>[] {String.class, String.class, String.class, String.class, CountersException.class});
         assertRecordShape(Operation.class,
                 new String[] {"counterKey", "operation", "amount", "idempotencyKey", "occurredAt"},
                 new Class<?>[] {String.class, String.class, String.class, String.class, Instant.class});
@@ -197,9 +200,9 @@ class PublicApiShapeTest {
     }
 
     @Test
-    void batchErrorCallbackUsesTheSdkExceptionBaseType() throws Exception {
+    void batchErrorCallbackCarriesTheFailedWriteIdentity() throws Exception {
         Method method = CountersClient.Builder.class.getMethod("onBatchError", Consumer.class);
-        assertEquals("java.util.function.Consumer<dev.counters.sdk.CountersException>",
+        assertEquals("java.util.function.Consumer<dev.counters.sdk.WriteFailure>",
                 method.getGenericParameterTypes()[0].getTypeName());
     }
 

@@ -64,7 +64,12 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply an increment immediately, stamped with an event time (series bucket lands at {@code occurredAt}). */
     public Counter addNow(long amount, Instant occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(long amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply an increment immediately and return the new counter state. */
@@ -74,7 +79,12 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply an increment immediately, stamped with an event time. */
     public Counter addNow(String amount, Instant occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(String amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply an increment immediately and return the new counter state. */
@@ -84,7 +94,12 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply an increment immediately, stamped with an event time. */
     public Counter addNow(BigInteger amount, Instant occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(BigInteger amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -94,7 +109,12 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply a decrement immediately, stamped with an event time. */
     public Counter subtractNow(long amount, Instant occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(long amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -104,7 +124,12 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply a decrement immediately, stamped with an event time. */
     public Counter subtractNow(String amount, Instant occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(String amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -114,19 +139,34 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
 
     /** Apply a decrement immediately, stamped with an event time. */
     public Counter subtractNow(BigInteger amount, Instant occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(BigInteger amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     // ---- lifecycle & reads ----
 
     /** Reset the counter to zero (starts a new epoch; history retained). */
     public Counter clear() {
-        return client.clearCounter(key);
+        return clear(null);
+    }
+
+    /** Reset the counter using a caller-supplied idempotency key. */
+    public Counter clear(String idempotencyKey) {
+        return client.clearCounter(key, idempotencyKey);
     }
 
     /** Delete (tombstone) the counter. */
     public void delete() {
-        client.deleteCounter(key);
+        delete(null);
+    }
+
+    /** Delete (tombstone) the counter using a caller-supplied idempotency key. */
+    public void delete(String idempotencyKey) {
+        client.deleteCounter(key, idempotencyKey);
     }
 
     /** Current value. */

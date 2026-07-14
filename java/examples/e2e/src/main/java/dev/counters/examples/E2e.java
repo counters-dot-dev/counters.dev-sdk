@@ -146,7 +146,9 @@ public final class E2e {
                 .batchEnabled(true)
                 .maxBatchSize(100)
                 .batchIntervalMillis(200)
-                .onBatchError(e -> System.err.println("batch flush failed: " + e))
+                .onBatchError(failure -> System.err.printf(
+                        "batch write failed: counter=%s delta=%s idempotencyKey=%s error=%s%n",
+                        failure.counterKey(), failure.delta(), failure.idempotencyKey(), failure.error()))
                 .build()) {
             INVOKED.add("CountersClient.builder().build()");
 

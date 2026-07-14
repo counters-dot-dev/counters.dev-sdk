@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CountersClient, PublishableCountersClient } from "../src/client.js";
-import { CountersApiError, CountersError, CountersValidationError } from "../src/errors.js";
+import {
+  CountersApiError,
+  CountersError,
+  CountersTransportError,
+  CountersValidationError,
+} from "../src/errors.js";
 import type { Operation } from "../src/types.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
 describe("CountersClient", () => {
   it("rejects construction without an apiKey", () => {
-    expect(() => new CountersClient({ apiKey: "" })).toThrow();
+    expect(() => new CountersClient({ apiKey: "" })).toThrow(CountersValidationError);
   });
 
   it("validates counter keys at counter()", () => {
@@ -77,7 +82,9 @@ describe("CountersClient", () => {
     const seen: { path: string; body: any }[] = [];
     const f = mockFetch((url, init) => {
       seen.push({ path: url.pathname, body: JSON.parse((init.body as string) ?? "null") });
-      return jsonResponse(200, { results: [] });
+      return jsonResponse(200, {
+        results: [{ counterKey: "registrations", status: "applied", value: "6" }],
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { intervalMs: 0 } });
     const reg = c.counter("registrations");
@@ -101,7 +108,9 @@ describe("CountersClient", () => {
       baseUrl: "https://x/v1",
       fetch: mockFetch((_url, init) => {
         body = JSON.parse(init.body as string) as typeof body;
-        return jsonResponse(200, { results: [] });
+        return jsonResponse(200, {
+          results: [{ counterKey: "registrations", status: "applied", value: "1" }],
+        });
       }),
       batch: { intervalMs: 0 },
     });
@@ -154,6 +163,44 @@ describe("CountersClient", () => {
     expect(r.value).toBe("1");
     expect(r.createdAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
     expect(r.updatedAt?.toISOString()).toBe("2026-01-01T00:00:01.000Z");
+  });
+
+  it("lets a caller reuse the exact idempotency key after a transport failure", async () => {
+    const keys: string[] = [];
+    let attempts = 0;
+    const f = mockFetch((_url, init) => {
+      keys.push((init.headers as Record<string, string>)["idempotency-key"]!);
+      if (attempts++ === 0) throw new TypeError("connection reset");
+      return jsonResponse(200, { key: "c", value: "5", epoch: 0 });
+    });
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: f,
+      maxRetries: 0,
+    });
+    const options = { idempotencyKey: "raid-write-1" };
+    await expect(c.counter("c").addNow(5, options)).rejects.toBeInstanceOf(
+      CountersTransportError,
+    );
+    await expect(c.counter("c").addNow(5, options)).resolves.toMatchObject({ value: "5" });
+    expect(keys).toEqual(["raid-write-1", "raid-write-1"]);
+  });
+
+  it("rejects an invalid caller idempotency key before making a request", () => {
+    const fetchFn = vi.fn(() => jsonResponse(200, {}));
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: fetchFn as unknown as typeof fetch,
+    });
+    expect(() => c.counter("c").addNow(1, { idempotencyKey: "" })).toThrow(
+      CountersValidationError,
+    );
+    expect(() => c.counter("c").clear({ idempotencyKey: "x".repeat(256) })).toThrow(
+      CountersValidationError,
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("subtractNow parses counter timestamps into Dates", async () => {
@@ -253,7 +300,9 @@ describe("CountersClient", () => {
     const seen: string[] = [];
     const f = mockFetch((url) => {
       seen.push(url.pathname);
-      return jsonResponse(200, { results: [] });
+      return jsonResponse(200, {
+        results: [{ counterKey: "c", status: "applied", value: "1" }],
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { enabled: false } });
     c.counter("c").add(1);
@@ -262,27 +311,96 @@ describe("CountersClient", () => {
   });
 
   it("immediate mode routes write failures to batch.onError instead of swallowing them", async () => {
-    const errors: unknown[] = [];
+    const failures: import("../src/types.js").WriteFailure[] = [];
     const f = mockFetch(() => jsonResponse(403, { title: "quota exceeded", status: 403 }));
     const c = new CountersClient({
       apiKey: "k",
       fetch: f,
       baseUrl: "https://x/v1",
       maxRetries: 0,
-      batch: { enabled: false, onError: (e) => errors.push(e) },
+      batch: { enabled: false, onError: (failure) => failures.push(failure) },
     });
     c.counter("c").add(1);
     await new Promise((r) => setTimeout(r, 0));
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toBeInstanceOf(CountersApiError);
-    expect((errors[0] as CountersApiError).status).toBe(403);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ counterKey: "c", delta: "1" });
+    expect(failures[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(failures[0]!.error).toBeInstanceOf(CountersApiError);
+    expect((failures[0]!.error as CountersApiError).status).toBe(403);
+  });
+
+  it("reports only the failed operation from a partially rejected background batch", async () => {
+    const failures: import("../src/types.js").WriteFailure[] = [];
+    const f = mockFetch(() =>
+      jsonResponse(200, {
+        results: [
+          { counterKey: "ok", status: "applied", value: "1" },
+          { counterKey: "lost", status: "error", error: { title: "quota", status: 403 } },
+        ],
+      }),
+    );
+    const c = new CountersClient({
+      apiKey: "k",
+      fetch: f,
+      baseUrl: "https://x/v1",
+      batch: { maxBatchSize: 2, intervalMs: 0, onError: (failure) => failures.push(failure) },
+    });
+    c.counter("ok").add(1);
+    c.counter("lost").subtract(7);
+    await vi.waitFor(() => expect(failures).toHaveLength(1));
+    expect(failures[0]).toMatchObject({
+      counterKey: "lost",
+      delta: "-7",
+      idempotencyKey: expect.any(String),
+      error: expect.any(CountersApiError),
+    });
+  });
+
+  it.each([
+    ["missing results", {}],
+    ["missing operation", { results: [{ counterKey: "a", status: "applied" }] }],
+    ["duplicate key", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "a", status: "deduplicated" },
+    ] }],
+    ["unknown key", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "other", status: "applied" },
+    ] }],
+    ["unknown status", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "b", status: "maybe" },
+    ] }],
+  ])("reports every uncertain write when a batch response has %s", async (_name, body) => {
+    const failures: import("../src/types.js").WriteFailure[] = [];
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() => jsonResponse(200, body)),
+      batch: {
+        maxBatchSize: 2,
+        intervalMs: 0,
+        onError: (failure) => failures.push(failure),
+      },
+    });
+    c.counter("a").add(2);
+    c.counter("b").subtract(3);
+    await vi.waitFor(() => expect(failures).toHaveLength(2));
+    expect(failures.map(({ counterKey, delta }) => ({ counterKey, delta }))).toEqual([
+      { counterKey: "a", delta: "2" },
+      { counterKey: "b", delta: "-3" },
+    ]);
+    for (const failure of failures) {
+      expect(failure.idempotencyKey).not.toBe("");
+      expect(failure.error).toBeInstanceOf(CountersValidationError);
+    }
   });
 
   it("immediate mode rejects writes after close, like the buffered path", async () => {
     const f = mockFetch(() => jsonResponse(200, { results: [] }));
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { enabled: false } });
     await c.close();
-    expect(() => c.counter("c").add(1)).toThrow(CountersError);
+    expect(() => c.counter("c").add(1)).toThrow(CountersValidationError);
   });
 
   it("surfaces a per-operation batch error instead of silently dropping it", async () => {

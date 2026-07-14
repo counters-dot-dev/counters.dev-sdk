@@ -6,23 +6,28 @@ import (
 	"time"
 )
 
-type submitFn func(ops []Operation) error
+type submitFn func(ops []Operation) ([]WriteFailure, error)
+
+type bufferedWrite struct {
+	delta          *big.Int
+	idempotencyKey string
+}
 
 // batcher coalesces add/subtract per counter into one net operation per flush.
 type batcher struct {
 	submit  submitFn
 	maxSize int
-	onError func(Error)
+	onError func(WriteFailure)
 
 	mu     sync.Mutex
-	buf    map[string]*big.Int
+	buf    map[string]*bufferedWrite
 	ticker *time.Ticker
 	done   chan struct{}
 	closed bool
 }
 
-func newBatcher(submit submitFn, maxSize int, interval time.Duration, onError func(Error)) *batcher {
-	b := &batcher{submit: submit, maxSize: maxSize, onError: onError, buf: map[string]*big.Int{}}
+func newBatcher(submit submitFn, maxSize int, interval time.Duration, onError func(WriteFailure)) *batcher {
+	b := &batcher{submit: submit, maxSize: maxSize, onError: onError, buf: map[string]*bufferedWrite{}}
 	if interval > 0 {
 		ticker := time.NewTicker(interval)
 		b.ticker = ticker
@@ -51,10 +56,15 @@ func (b *batcher) enqueue(key string, delta *big.Int) error {
 	}
 	cur, ok := b.buf[key]
 	if !ok {
-		cur = new(big.Int)
+		idempotencyKey, err := newIdempotencyKey()
+		if err != nil {
+			b.mu.Unlock()
+			return err
+		}
+		cur = &bufferedWrite{delta: new(big.Int), idempotencyKey: idempotencyKey}
 		b.buf[key] = cur
 	}
-	cur.Add(cur, delta)
+	cur.delta.Add(cur.delta, delta)
 	size := len(b.buf)
 	b.mu.Unlock()
 	if size >= b.maxSize {
@@ -77,29 +87,39 @@ func (b *batcher) pending() int {
 
 // Flush drains the buffer into one batch and submits it.
 func (b *batcher) Flush() error {
+	_, err := b.flush()
+	return err
+}
+
+func (b *batcher) flush() ([]WriteFailure, error) {
 	b.mu.Lock()
 	ops := make([]Operation, 0, len(b.buf))
-	for key, delta := range b.buf {
+	for key, buffered := range b.buf {
+		delta := buffered.delta
 		if delta.Sign() == 0 {
 			continue // add then equal subtract -> net no-op
 		}
 		if delta.Sign() > 0 {
-			ops = append(ops, Operation{CounterKey: key, Operation: "add", Amount: delta.String(), IdempotencyKey: NewIdempotencyKey()})
+			ops = append(ops, Operation{CounterKey: key, Operation: "add", Amount: delta.String(), IdempotencyKey: buffered.idempotencyKey})
 		} else {
-			ops = append(ops, Operation{CounterKey: key, Operation: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: NewIdempotencyKey()})
+			ops = append(ops, Operation{CounterKey: key, Operation: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: buffered.idempotencyKey})
 		}
 	}
-	b.buf = map[string]*big.Int{}
+	b.buf = map[string]*bufferedWrite{}
 	b.mu.Unlock()
 	if len(ops) == 0 {
-		return nil
+		return nil, nil
 	}
 	return b.submit(ops)
 }
 
 func (b *batcher) flushSafe() {
-	if err := b.Flush(); err != nil && b.onError != nil {
-		b.onError(asSDKError(err))
+	failures, err := b.flush()
+	if err == nil || b.onError == nil {
+		return
+	}
+	for _, failure := range failures {
+		b.onError(failure)
 	}
 }
 

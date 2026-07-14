@@ -1,13 +1,21 @@
-import { CountersError, CountersTransportError } from "./errors.js";
+import { CountersError, CountersTransportError, CountersValidationError } from "./errors.js";
 import { newIdempotencyKey } from "./idempotency.js";
-import type { Operation } from "./types.js";
+import { describeValue } from "./validation.js";
+import type { Operation, WriteFailure } from "./types.js";
 
-export type SubmitFn = (ops: Operation[]) => Promise<void>;
+export interface OperationFailure {
+  readonly operation: Operation;
+  readonly error: CountersError;
+}
+
+export type SubmitFn = (
+  ops: Operation[],
+) => Promise<void | readonly OperationFailure[]>;
 
 export interface BatcherOptions {
   maxBatchSize: number;
   intervalMs: number;
-  onError?: (err: CountersError) => void;
+  onError?: (failure: WriteFailure) => void;
 }
 
 /**
@@ -16,7 +24,7 @@ export interface BatcherOptions {
  * and it collapses thousands of increments into one request.
  */
 export class Batcher {
-  private readonly buf = new Map<string, bigint>();
+  private readonly buf = new Map<string, { delta: bigint; idempotencyKey: string }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
 
@@ -28,8 +36,16 @@ export class Batcher {
   enqueue(counterKey: string, delta: bigint): void {
     // A write after close() would silently strand in the buffer (its worker is gone) or re-arm the
     // interval timer on an already-closed client — surface the misuse instead.
-    if (this.closed) throw new CountersError("cannot enqueue on a closed client");
-    this.buf.set(counterKey, (this.buf.get(counterKey) ?? 0n) + delta);
+    if (this.closed) throw new CountersValidationError("cannot enqueue on a closed client");
+    const buffered = this.buf.get(counterKey);
+    if (buffered === undefined) {
+      // Generate before accepting the write into the buffer. If the platform RNG is unavailable,
+      // the caller receives a typed transport failure synchronously instead of a detached timer
+      // throwing later with no identity-bearing callback possible (no key was ever sent).
+      this.buf.set(counterKey, { delta, idempotencyKey: newIdempotencyKey() });
+    } else {
+      buffered.delta += delta;
+    }
     if (this.opts.intervalMs > 0 && this.timer === null) this.startTimer();
     if (this.buf.size >= this.opts.maxBatchSize) this.flushSafe();
   }
@@ -47,7 +63,8 @@ export class Batcher {
   async flush(): Promise<void> {
     const ops = this.drain();
     if (ops.length === 0) return;
-    await this.submit(ops);
+    const failures = await this.submitFailures(ops);
+    if (failures.length > 0) throw failures[0]!.error;
   }
 
   /** Stop the timer and flush everything (looping in case items arrived mid-flush). */
@@ -62,16 +79,17 @@ export class Batcher {
 
   private drain(): Operation[] {
     const ops: Operation[] = [];
-    for (const [counterKey, delta] of this.buf) {
+    for (const [counterKey, buffered] of this.buf) {
+      const { delta, idempotencyKey } = buffered;
       if (delta === 0n) continue; // add then equal subtract => net no-op
       ops.push(
         delta > 0n
-          ? { counterKey, operation: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
+          ? { counterKey, operation: "add", amount: delta.toString(), idempotencyKey }
           : {
               counterKey,
               operation: "subtract",
               amount: (-delta).toString(),
-              idempotencyKey: newIdempotencyKey(),
+              idempotencyKey,
             },
       );
     }
@@ -85,12 +103,41 @@ export class Batcher {
   }
 
   private flushSafe(): void {
-    this.flush().catch((err) => this.opts.onError?.(normaliseBatchError(err)));
+    const ops = this.drain();
+    if (ops.length === 0) return;
+    void this.submitFailures(ops).then((failures) => {
+      for (const failure of failures) this.opts.onError?.(toWriteFailure(failure));
+    });
+  }
+
+  private async submitFailures(ops: Operation[]): Promise<OperationFailure[]> {
+    try {
+      return [...((await this.submit(ops)) ?? [])];
+    } catch (error) {
+      const normalised = normaliseBatchError(error);
+      return ops.map((operation) => ({ operation, error: normalised }));
+    }
   }
 }
 
 function normaliseBatchError(error: unknown): CountersError {
   return error instanceof CountersError
     ? error
-    : new CountersTransportError(`unexpected batch submission failure: ${String(error)}`, error);
+    : new CountersTransportError(
+        `unexpected batch submission failure: ${describeValue(error)}`,
+        error,
+      );
+}
+
+/** Convert an internal wire operation + typed error into the frozen public callback payload. */
+export function toWriteFailure(failure: OperationFailure): WriteFailure {
+  const { operation, error } = failure;
+  const amount = operation.amount ?? "0";
+  const delta = operation.operation === "subtract" && amount !== "0" ? `-${amount}` : amount;
+  return {
+    counterKey: operation.counterKey,
+    delta,
+    idempotencyKey: operation.idempotencyKey ?? "",
+    error,
+  };
 }
