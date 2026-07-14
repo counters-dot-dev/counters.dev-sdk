@@ -76,6 +76,19 @@ func (e *TransportError) Error() string {
 func (e *TransportError) Unwrap() error    { return e.Cause }
 func (e *TransportError) isCountersError() {}
 
+func asSDKError(err error) Error {
+	if err == nil {
+		return nil
+	}
+	var sdkErr Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr
+	}
+	// Asynchronous writes have no caller to receive an implementation-level failure. Keep the
+	// callback's public contract inside the SDK taxonomy: no HTTP response means transport failure.
+	return &TransportError{Cause: err}
+}
+
 // ErrClientClosed is returned by Add/Subtract when a write is attempted after Close(); the write is
 // rejected rather than silently stranded in a buffer whose worker has already stopped.
 var ErrClientClosed = errors.New("counters: client is closed")
@@ -233,11 +246,11 @@ type CounterPage struct {
 	NextCursor string    `json:"nextCursor,omitempty"`
 }
 
-// SeriesPoint is one time-series bucket: T is the bucket start (RFC 3339), V the delta in
-// that bucket as a decimal string.
+// SeriesPoint is one time-series bucket. Timestamp is the bucket start and Value is the delta in
+// that bucket as an arbitrary-precision decimal string.
 type SeriesPoint struct {
-	T string `json:"t"`
-	V string `json:"v"`
+	Timestamp time.Time `json:"t"`
+	Value     string    `json:"v"`
 }
 
 // SeriesResponse is a counter's time series (delta per bucket). Empty buckets are omitted
@@ -527,10 +540,10 @@ type BatchOptions struct {
 	// Interval is the background flush cadence (default 1s). <= 0 disables the timer; flush
 	// manually with Client.Flush or rely on MaxBatchSize.
 	Interval time.Duration
-	// OnError receives errors from fire-and-forget writes — background flushes and, when Disabled
-	// is true, immediate-mode writes. These run detached from any caller, so without this hook
-	// they are silent.
-	OnError func(error)
+	// OnError receives typed SDK errors from fire-and-forget writes — background flushes and, when
+	// Disabled is true, immediate-mode writes. Use errors.As to distinguish *APIError,
+	// *TransportError, and *ValidationError. Without this hook asynchronous failures are silent.
+	OnError func(Error)
 }
 
 // Client is the entry point: obtain per-counter handles with Counter and Derived, page the
@@ -544,7 +557,7 @@ type Client struct {
 	backoff      time.Duration
 	batchEnabled bool
 	batcher      *batcher
-	onWriteError func(error)         // BatchOptions.OnError; also the sink for immediate-mode write failures
+	onWriteError func(Error)         // BatchOptions.OnError; also the sink for immediate-mode write failures
 	sleepFn      func(time.Duration) // nil => time.Sleep; overridden in tests to record backoff
 }
 
@@ -570,7 +583,7 @@ func NewClient(opts Options) (*Client, error) {
 	enabled := true
 	maxSize := 100
 	interval := time.Second
-	var onErr func(error)
+	var onErr func(Error)
 	if opts.Batch != nil {
 		enabled = !opts.Batch.Disabled
 		maxSize = orInt(opts.Batch.MaxBatchSize, 100)
@@ -584,6 +597,60 @@ func NewClient(opts Options) (*Client, error) {
 	}, maxSize, interval, onErr)
 	return c, nil
 }
+
+// PublishableOptions configures a PublishableClient. It intentionally has no batch settings:
+// publishable tokens expose only scoped reads. Only APIKey is required.
+type PublishableOptions struct {
+	// APIKey is the publishable token, sent as "Authorization: Bearer <key>". Required.
+	APIKey string
+	// BaseURL overrides the production endpoint (default https://api.counters.dev/v1).
+	BaseURL string
+	// HTTPClient overrides the transport (default: net/http client with a 30s overall timeout).
+	HTTPClient *http.Client
+	// MaxRetries is the number of retries after the first attempt on connect errors and
+	// HTTP 429/5xx (default 3). Set -1 to disable retries entirely.
+	MaxRetries int
+	// Backoff is the base delay between retries, doubled per attempt (default 200ms). A server
+	// Retry-After header, when present, takes precedence.
+	Backoff time.Duration
+}
+
+// PublishableClient is the read-only entry point for a counter-scoped publishable token. Its
+// deliberately narrow method set makes writes, organization-wide reads, and derived reads
+// unavailable at compile time.
+type PublishableClient struct {
+	client *Client
+}
+
+// NewPublishableClient builds a read-only client from opts.
+func NewPublishableClient(opts PublishableOptions) (*PublishableClient, error) {
+	client, err := NewClient(Options{
+		APIKey:     opts.APIKey,
+		BaseURL:    opts.BaseURL,
+		HTTPClient: opts.HTTPClient,
+		MaxRetries: opts.MaxRetries,
+		Backoff:    opts.Backoff,
+		// No publishable method can enqueue a write. Disable the worker as well so Close is a
+		// lifecycle operation only and never has buffered work to submit.
+		Batch: &BatchOptions{Disabled: true, Interval: -1},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableClient{client: client}, nil
+}
+
+// Counter returns a read-only handle to one scoped counter, validating the key.
+func (c *PublishableClient) Counter(key string) (*PublishableCounterHandle, error) {
+	handle, err := c.client.Counter(key)
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableCounterHandle{handle: handle, Key: handle.Key}, nil
+}
+
+// Close releases the publishable client's lifecycle resources. It never submits a write.
+func (c *PublishableClient) Close() error { return c.client.Close() }
 
 // CounterHandle is a typed handle to a single counter.
 type CounterHandle struct {
@@ -874,6 +941,68 @@ func (m *MemberHandle) applyDelta(ctx context.Context, op string, amount any, op
 	return &out, nil
 }
 
+// PublishableCounterHandle is a read-only handle to one counter in a publishable token's scope.
+// It intentionally exposes no mutation methods.
+type PublishableCounterHandle struct {
+	handle *CounterHandle
+	// Key is the scoped counter key represented by this handle.
+	Key string
+}
+
+// Value reads the counter's current value.
+func (h *PublishableCounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
+	return h.handle.Value(ctx)
+}
+
+// Series reads the counter's time series over [p.From, p.To).
+func (h *PublishableCounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
+	return h.handle.Series(ctx, p)
+}
+
+// MemberSeries reads one member's time series.
+func (h *PublishableCounterHandle) MemberSeries(ctx context.Context, member string, p SeriesParams) (*MemberSeriesResponse, error) {
+	return h.handle.MemberSeries(ctx, member, p)
+}
+
+// GroupSeries reads the dense per-member multi-series.
+func (h *PublishableCounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*MemberGroupSeriesResponse, error) {
+	return h.handle.GroupSeries(ctx, p)
+}
+
+// Leaderboard reads the counter's ranked member leaderboard.
+func (h *PublishableCounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*Leaderboard, error) {
+	return h.handle.Leaderboard(ctx, p)
+}
+
+// WindowLeaderboard ranks members by activity over the trailing p.Window.
+func (h *PublishableCounterHandle) WindowLeaderboard(ctx context.Context, p WindowLeaderboardParams) (*WindowLeaderboard, error) {
+	return h.handle.WindowLeaderboard(ctx, p)
+}
+
+// Member returns a read-only handle to one member, validating the member key.
+func (h *PublishableCounterHandle) Member(member string) (*PublishableMemberHandle, error) {
+	handle, err := h.handle.Member(member)
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableMemberHandle{handle: handle, CounterKey: handle.CounterKey, Member: handle.Member}, nil
+}
+
+// PublishableMemberHandle is a read-only handle to one leaderboard member in a publishable token's
+// counter scope.
+type PublishableMemberHandle struct {
+	handle *MemberHandle
+	// CounterKey is the scoped counter containing this member.
+	CounterKey string
+	// Member is the member key represented by this handle.
+	Member string
+}
+
+// Get reads this member's rank, percentile, and standing value.
+func (m *PublishableMemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnapshot, error) {
+	return m.handle.Get(ctx, p)
+}
+
 // DerivedHandle is a typed handle to a server-defined derived counter.
 type DerivedHandle struct {
 	client *Client
@@ -1017,7 +1146,7 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	// (previously they were dropped, which silently lost counted writes).
 	go func() {
 		if err := c.submitBatch(context.Background(), []Operation{op}); err != nil && c.onWriteError != nil {
-			c.onWriteError(err)
+			c.onWriteError(asSDKError(err))
 		}
 	}()
 	return nil

@@ -12,7 +12,7 @@ type submitFn func(ops []Operation) error
 type batcher struct {
 	submit  submitFn
 	maxSize int
-	onError func(error)
+	onError func(Error)
 
 	mu     sync.Mutex
 	buf    map[string]*big.Int
@@ -21,7 +21,7 @@ type batcher struct {
 	closed bool
 }
 
-func newBatcher(submit submitFn, maxSize int, interval time.Duration, onError func(error)) *batcher {
+func newBatcher(submit submitFn, maxSize int, interval time.Duration, onError func(Error)) *batcher {
 	b := &batcher{submit: submit, maxSize: maxSize, onError: onError, buf: map[string]*big.Int{}}
 	if interval > 0 {
 		ticker := time.NewTicker(interval)
@@ -99,7 +99,7 @@ func (b *batcher) Flush() error {
 
 func (b *batcher) flushSafe() {
 	if err := b.Flush(); err != nil && b.onError != nil {
-		b.onError(err)
+		b.onError(asSDKError(err))
 	}
 }
 

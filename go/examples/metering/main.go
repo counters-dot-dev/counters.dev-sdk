@@ -27,7 +27,7 @@ func main() {
 			// Add returns after enqueueing: millions of requests cannot each pay for an API
 			// round trip. Server confirmation happens on the background flush; without this
 			// sink, a quota rejection would silently lose billable usage.
-			OnError: func(err error) { reportCounterError("asynchronous usage write", err) },
+			OnError: func(err counters.Error) { reportCounterError("asynchronous usage write", err) },
 		},
 	})
 	if err != nil {
@@ -101,9 +101,9 @@ func dailyRollup(ctx context.Context, usage *counters.CounterHandle, customerID 
 			// land directly in big.Int, without a lossy float round-trip.
 			total := new(big.Int)
 			for _, point := range series.Points {
-				value, ok := new(big.Int).SetString(point.V, 10)
+				value, ok := new(big.Int).SetString(point.Value, 10)
 				if !ok {
-					log.Printf("daily billing rollup returned invalid counter value %q", point.V)
+					log.Printf("daily billing rollup returned invalid counter value %q", point.Value)
 					return
 				}
 				total.Add(total, value)

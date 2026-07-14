@@ -75,7 +75,8 @@ Two kinds of write, deliberately:
 - **Buffered** — `Add`/`Subtract`. Coalesced per counter client-side and flushed as one batch
   (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
   coalescing a thousand `Add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
-  give `BatchOptions.OnError` a sink or they are silent. Call `Close` before exit.
+  give `BatchOptions.OnError` a `func(counters.Error)` sink or they are silent. Call `Close` before
+  exit.
 - **Immediate** — `AddNow`/`SubtractNow` (and `AddNowAt`/`SubtractNowAt` to stamp an event time for
   late-arriving data). One request now, returning the new state. Every write carries a fresh
   idempotency key, so retries never double-count.
@@ -93,7 +94,13 @@ boundaries.
 
 ```go
 series, err := signups.Series(ctx, counters.SeriesParams{From: from, To: to, Bucket: "1h"})
+for _, point := range series.Points {
+    fmt.Println(point.Timestamp, point.Value)
+}
 ```
+
+`SeriesPoint.Timestamp` is a `time.Time` decoded from the compact wire field `t`;
+`SeriesPoint.Value` is the bucket delta's arbitrary-precision decimal string decoded from `v`.
 
 On a board you can slice by member: `MemberSeries(ctx, "alice", params)` for one member's series,
 `GroupSeries(ctx, params)` for the dense per-member multi-series (both require member series
@@ -157,6 +164,31 @@ if cur.Value == nil {
 }
 ```
 
+## Publishable tokens
+
+A `pk_` token is counter-scoped and read-only. Construct a `PublishableClient` so writes and
+organization-wide reads are absent from the Go method set and therefore fail at compile time:
+
+```go
+publicClient, err := counters.NewPublishableClient(counters.PublishableOptions{
+    APIKey: os.Getenv("COUNTERS_PUBLISHABLE_TOKEN"),
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer publicClient.Close()
+
+publicSignups, err := publicClient.Counter("signups")
+if err != nil {
+    log.Fatal(err)
+}
+value, err := publicSignups.Value(ctx)
+```
+
+The publishable counter handle exposes value, series, leaderboard, and member reads. It has no
+`Add`, `Subtract`, `Clear`, or `Delete`; the publishable client has no `List`, `Usage`, or `Derived`.
+Use `NewClient` with a full organization API key for those operations.
+
 ## Errors: exactly three kinds
 
 Every failure from this SDK is one of three types, and the distinction tells you what to do:
@@ -185,9 +217,6 @@ safe. Writes after `Close` return `ErrClientClosed` (`errors.Is`).
 
 - **Usage**: `client.Usage(ctx)` returns month-to-date ops, quota, reset instant, and counter
   headroom. Poll it periodically, not per write.
-- **Publishable tokens**: a read-only `pk_` token can be used as the `APIKey` for embedding public
-  reads (values, series, leaderboards) of the counters it is scoped to; writes — and reads outside
-  its scope — fail with a 403 `APIError`.
 - **Validation helpers**: `IsValidCounterKey`, `IsValidMemberKey`, `IsValidMetadata`, `Buckets`,
   `Windows` are exported so you can pre-check user-supplied names.
 

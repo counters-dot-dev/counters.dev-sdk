@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -362,6 +363,154 @@ func TestRequiredTimestampsRoundTripAsTime(t *testing.T) {
 				t.Errorf("round-tripped timestamp=%s, want %q", roundTripped, wireTimestamp)
 			}
 		})
+	}
+}
+
+func TestSeriesPointPublicShapeAndWireMapping(t *testing.T) {
+	wantTimestamp := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	point := SeriesPoint{Timestamp: wantTimestamp, Value: "100000000000000000000000000000000"}
+
+	wire, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantWire = `{"t":"2026-07-01T12:30:00Z","v":"100000000000000000000000000000000"}`
+	if string(wire) != wantWire {
+		t.Fatalf("series point wire=%s, want %s", wire, wantWire)
+	}
+
+	var decoded SeriesPoint
+	if err := json.Unmarshal([]byte(wantWire), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Timestamp.Equal(wantTimestamp) || decoded.Value != point.Value {
+		t.Fatalf("decoded series point=%+v, want %+v", decoded, point)
+	}
+
+	typ := reflect.TypeOf(SeriesPoint{})
+	if typ.NumField() != 2 {
+		t.Fatalf("SeriesPoint has %d fields, want exactly Timestamp and Value", typ.NumField())
+	}
+	timestamp, ok := typ.FieldByName("Timestamp")
+	if !ok || timestamp.Type != reflect.TypeOf(time.Time{}) || timestamp.Tag.Get("json") != "t" {
+		t.Fatalf("Timestamp field=%+v present=%v", timestamp, ok)
+	}
+	value, ok := typ.FieldByName("Value")
+	if !ok || value.Type.Kind() != reflect.String || value.Tag.Get("json") != "v" {
+		t.Fatalf("Value field=%+v present=%v", value, ok)
+	}
+}
+
+func TestPublishablePublicMethodSets(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  reflect.Type
+		want []string
+	}{
+		{"PublishableClient", reflect.TypeOf((*PublishableClient)(nil)), []string{"Close", "Counter"}},
+		{"PublishableCounterHandle", reflect.TypeOf((*PublishableCounterHandle)(nil)), []string{
+			"GroupSeries", "Leaderboard", "Member", "MemberSeries", "Series", "Value", "WindowLeaderboard",
+		}},
+		{"PublishableMemberHandle", reflect.TypeOf((*PublishableMemberHandle)(nil)), []string{"Get"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make([]string, tt.typ.NumMethod())
+			for i := 0; i < tt.typ.NumMethod(); i++ {
+				got[i] = tt.typ.Method(i).Name
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("exported methods=%v, want exactly %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPublishableHandleIdentityFields(t *testing.T) {
+	client, err := NewPublishableClient(PublishableOptions{APIKey: "pk_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := client.Counter("visible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counter.Key != "visible" {
+		t.Fatalf("counter Key=%q, want visible", counter.Key)
+	}
+	member, err := counter.Member("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member.CounterKey != "visible" || member.Member != "alice" {
+		t.Fatalf("member identity=(%q, %q), want (visible, alice)", member.CounterKey, member.Member)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		typ  reflect.Type
+		want []string
+	}{
+		{"PublishableCounterHandle", reflect.TypeOf(PublishableCounterHandle{}), []string{"Key"}},
+		{"PublishableMemberHandle", reflect.TypeOf(PublishableMemberHandle{}), []string{"CounterKey", "Member"}},
+	} {
+		var got []string
+		for i := 0; i < tt.typ.NumField(); i++ {
+			field := tt.typ.Field(i)
+			if field.IsExported() {
+				got = append(got, field.Name)
+				if field.Type.Kind() != reflect.String {
+					t.Fatalf("%s.%s type=%v, want string", tt.name, field.Name, field.Type)
+				}
+			}
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Fatalf("%s exported fields=%v, want exactly %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestBatchOnErrorPublicShapeIsTyped(t *testing.T) {
+	field, ok := reflect.TypeOf(BatchOptions{}).FieldByName("OnError")
+	if !ok {
+		t.Fatal("BatchOptions.OnError is missing")
+	}
+	want := reflect.TypeOf((func(Error))(nil))
+	if field.Type != want {
+		t.Fatalf("BatchOptions.OnError type=%v, want %v", field.Type, want)
+	}
+}
+
+func TestPublishableClientUsesScopedReadPaths(t *testing.T) {
+	var gotAuth, gotPath string
+	client, err := NewPublishableClient(PublishableOptions{
+		APIKey:  "pk_test",
+		BaseURL: "https://unit.test/v1",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+			return jsonLoopbackResponse(200, `{"key":"visible","value":"7","epoch":0}`), nil
+		})},
+		MaxRetries: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := client.Counter("visible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := handle.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Value != "7" || gotAuth != "Bearer pk_test" || gotPath != "/v1/counters/visible/value" {
+		t.Fatalf("value=%+v auth=%q path=%q", value, gotAuth, gotPath)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -808,8 +957,11 @@ func TestSeriesQueryEncodingAndPoints(t *testing.T) {
 			if s.CounterKey != "c" || s.Bucket != tc.params.Bucket {
 				t.Errorf("series=%+v", s)
 			}
-			if len(s.Points) != 2 || s.Points[0].V != "1" || s.Points[1].V != "100000000000000000000000000000000" {
+			if len(s.Points) != 2 || s.Points[0].Value != "1" || s.Points[1].Value != "100000000000000000000000000000000" {
 				t.Errorf("points=%+v", s.Points)
+			}
+			if !s.Points[0].Timestamp.Equal(from) || !s.Points[1].Timestamp.Equal(from.Add(time.Hour)) {
+				t.Errorf("point timestamps=%v, want %v and %v", s.Points, from, from.Add(time.Hour))
 			}
 		})
 	}
@@ -952,7 +1104,11 @@ func assertSeriesPoints(t *testing.T, got []SeriesPoint, want []any) {
 	}
 	for i, ep := range want {
 		epm := ep.(map[string]any)
-		if got[i].T != epm["t"].(string) || got[i].V != epm["v"].(string) {
+		wantTimestamp, err := time.Parse(time.RFC3339, epm["t"].(string))
+		if err != nil {
+			t.Fatalf("point %d has invalid expected timestamp: %v", i, err)
+		}
+		if !got[i].Timestamp.Equal(wantTimestamp) || got[i].Value != epm["v"].(string) {
 			t.Errorf("point %d = %+v, want %v", i, got[i], epm)
 		}
 	}
@@ -1723,10 +1879,10 @@ func TestImmediateModeRoutesErrorsToOnError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan Error, 1)
 	c, _ := NewClient(Options{
 		APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1,
-		Batch: &BatchOptions{Disabled: true, OnError: func(err error) { errCh <- err }},
+		Batch: &BatchOptions{Disabled: true, OnError: func(err Error) { errCh <- err }},
 	})
 	h, _ := c.Counter("c")
 	if err := h.Add(1); err != nil {

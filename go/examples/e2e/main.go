@@ -91,12 +91,22 @@ func mustCounter(c *counters.Client, key string) *counters.CounterHandle {
 	return h
 }
 
+func mustPublishableCounter(c *counters.PublishableClient, key string) *counters.PublishableCounterHandle {
+	h, err := c.Counter(key)
+	check(err, "publishable counter("+key+")")
+	invoked["PublishableClient.Counter"] = true
+	return h
+}
+
 func sumPoints(points []counters.SeriesPoint, what string) string {
 	sum := new(big.Int)
 	for _, p := range points {
-		v, ok := new(big.Int).SetString(p.V, 10)
+		if p.Timestamp.IsZero() {
+			fail(fmt.Sprintf("%s: series point has a zero timestamp", what))
+		}
+		v, ok := new(big.Int).SetString(p.Value, 10)
 		if !ok {
-			fail(fmt.Sprintf("%s: unparseable series point value %q", what, p.V))
+			fail(fmt.Sprintf("%s: unparseable series point value %q", what, p.Value))
 		}
 		sum.Add(sum, v)
 	}
@@ -143,7 +153,7 @@ func tour() {
 		HTTPClient: &http.Client{Timeout: 15 * time.Second},
 		Batch: &counters.BatchOptions{
 			Interval: 200 * time.Millisecond,
-			OnError:  func(e error) { fmt.Fprintln(os.Stderr, "batch flush failed:", e) },
+			OnError:  func(e counters.Error) { fmt.Fprintln(os.Stderr, "batch flush failed:", e) },
 		},
 	})
 	check(err, "NewClient")
@@ -284,7 +294,8 @@ func tour() {
 	expectStatus(err, 404, "cross-tenant read")
 	check(clientB.Close(), "close(B)")
 
-	// Publishable tokens: read-only, scoped. The pk_ token is just the bearer key.
+	// Publishable tokens get a distinct read-only client: forbidden calls are absent from its method
+	// set, so a write or organization-wide read fails at compile time instead of reaching the server.
 	pkDemo := mustCounter(client, "pk-demo") // fixed key the token is scoped to
 	_, err = pkDemo.AddNow(ctx, 1)           // ensure it exists before clearing (first run on a fresh DB)
 	check(err, "pk-demo seed")
@@ -292,20 +303,44 @@ func tour() {
 	check(err, "pk-demo clear")
 	_, err = pkDemo.AddNow(ctx, 7)
 	check(err, "pk-demo addNow(7)")
-	pkClient, err := counters.NewClient(counters.Options{APIKey: pkToken, BaseURL: baseURL})
-	check(err, "NewClient(pk)")
-	pkVal, err := mustCounter(pkClient, "pk-demo").Value(ctx)
+	pkSeedMember, err := pkDemo.Member("viewer")
+	check(err, "pk-demo seed member")
+	_, err = pkSeedMember.Add(ctx, 3)
+	check(err, "pk-demo seed member add")
+
+	pkClient, err := counters.NewPublishableClient(counters.PublishableOptions{APIKey: pkToken, BaseURL: baseURL})
+	check(err, "NewPublishableClient")
+	invoked["NewPublishableClient"] = true
+	pkCounter := mustPublishableCounter(pkClient, "pk-demo")
+	pkVal, err := pkCounter.Value(ctx)
+	invoked["PublishableCounterHandle.Value"] = true
 	check(err, "pk value")
-	assertEq(pkVal.Value, "7", "pk token reads its scoped counter")
-	_, err = mustCounter(pkClient, "pk-demo").Series(ctx, counters.SeriesParams{From: from, To: to, Bucket: "1h"})
+	assertEq(pkVal.Value, "10", "pk token reads its scoped counter")
+	_, err = pkCounter.Series(ctx, counters.SeriesParams{From: from, To: to, Bucket: "1h"})
+	invoked["PublishableCounterHandle.Series"] = true
 	check(err, "pk series") // read surface also includes series
-	_, err = mustCounter(pkClient, "pk-demo").AddNow(ctx, 1)
-	expectStatus(err, 403, "pk token cannot write")
-	_, err = mustCounter(pkClient, ns+"signups").Value(ctx)
+	_, err = pkCounter.Leaderboard(ctx, counters.LeaderboardParams{})
+	invoked["PublishableCounterHandle.Leaderboard"] = true
+	check(err, "pk leaderboard")
+	pkMember, err := pkCounter.Member("viewer")
+	invoked["PublishableCounterHandle.Member"] = true
+	check(err, "pk member")
+	_, err = pkMember.Get(ctx, counters.MemberGetParams{})
+	invoked["PublishableMemberHandle.Get"] = true
+	check(err, "pk member get")
+	_, err = pkCounter.MemberSeries(ctx, "viewer", counters.SeriesParams{From: from, To: to, Bucket: "1h"})
+	invoked["PublishableCounterHandle.MemberSeries"] = true
+	expectStatus(err, 400, "pk member series without member series enabled")
+	_, err = pkCounter.GroupSeries(ctx, counters.SeriesParams{From: from, To: to, Bucket: "1h"})
+	invoked["PublishableCounterHandle.GroupSeries"] = true
+	expectStatus(err, 400, "pk group series without member series enabled")
+	_, err = pkCounter.WindowLeaderboard(ctx, counters.WindowLeaderboardParams{Window: "7d"})
+	invoked["PublishableCounterHandle.WindowLeaderboard"] = true
+	expectStatus(err, 400, "pk windowed leaderboard without member series enabled")
+	_, err = mustPublishableCounter(pkClient, ns+"signups").Value(ctx)
 	expectStatus(err, 403, "pk token cannot leave its scope")
-	_, err = pkClient.List(ctx, "", 0)
-	expectStatus(err, 403, "pk token cannot list")
 	check(pkClient.Close(), "close(pk)")
+	invoked["PublishableClient.Close"] = true
 
 	// Usage: org-wide quota state. Tolerant lower-bound assertions — this org wrote many counters above.
 	usage, err := client.Usage(ctx)
@@ -866,6 +901,9 @@ func surfaceGate() {
 		{"CounterHandle", reflect.TypeOf((*counters.CounterHandle)(nil))},
 		{"MemberHandle", reflect.TypeOf((*counters.MemberHandle)(nil))},
 		{"DerivedHandle", reflect.TypeOf((*counters.DerivedHandle)(nil))},
+		{"PublishableClient", reflect.TypeOf((*counters.PublishableClient)(nil))},
+		{"PublishableCounterHandle", reflect.TypeOf((*counters.PublishableCounterHandle)(nil))},
+		{"PublishableMemberHandle", reflect.TypeOf((*counters.PublishableMemberHandle)(nil))},
 	} {
 		// reflect enumerates exported methods only — exactly the public surface. Any new exported
 		// method that this example app never invoked fails the gate.
@@ -876,6 +914,7 @@ func surfaceGate() {
 		}
 	}
 	assert(invoked["NewClient"], "constructor demonstrated")
+	assert(invoked["NewPublishableClient"], "publishable constructor demonstrated")
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────────────────────────
