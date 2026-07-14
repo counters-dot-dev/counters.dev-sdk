@@ -421,7 +421,7 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 		{reflect.TypeOf(WindowLeaderboard{}), "EffectiveEnd", timeType, "effectiveEnd"},
 		{reflect.TypeOf(MemberWriteOpts{}), "OccurredAt", timePointerType, ""},
 		{reflect.TypeOf(SubmitOpts{}), "OccurredAt", timePointerType, ""},
-		{reflect.TypeOf(Operation{}), "OccurredAt", timePointerType, "occurredAt,omitempty"},
+		{reflect.TypeOf(operation{}), "OccurredAt", timePointerType, "occurredAt,omitempty"},
 		{reflect.TypeOf(DerivedSeriesPoint{}), "Timestamp", timeType, "t"},
 		{reflect.TypeOf(DerivedSeriesPoint{}), "Value", stringPointerType, "v"},
 		{reflect.TypeOf(SeriesParams{}), "From", timeType, ""},
@@ -461,7 +461,13 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 	}
 	assertStructField(t, reflect.TypeOf(SeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
 	assertStructField(t, reflect.TypeOf(DerivedSeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
-	assertStructField(t, reflect.TypeOf(Operation{}), "Operation", reflect.TypeOf(""), "op")
+	assertStructField(t, reflect.TypeOf(operation{}), "Operation", reflect.TypeOf(""), "op")
+
+	// The spec requires a point value-type `mode` on both member-dimensional series shapes, and the
+	// window total is optional (absent on score boards) — so it must be a pointer.
+	assertStructField(t, reflect.TypeOf(MemberSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
+	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
+	assertStructField(t, reflect.TypeOf(WindowLeaderboard{}), "Total", stringPointerType, "total,omitempty")
 
 	for _, old := range []struct {
 		owner reflect.Type
@@ -471,7 +477,7 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 		{reflect.TypeOf(DerivedSeriesPoint{}), "V"},
 		{reflect.TypeOf(SeriesParams{}), "Tz"},
 		{reflect.TypeOf(DerivedSeriesParams{}), "Tz"},
-		{reflect.TypeOf(Operation{}), "Op"},
+		{reflect.TypeOf(operation{}), "Op"},
 		{usageType, "Ops"},
 		{limits.Type, "RateLimitRps"},
 		{limits.Type, "MonthlyOpsQuota"},
@@ -498,14 +504,14 @@ func TestOptionalRequestDateTimesStayNilWhenAbsent(t *testing.T) {
 		t.Fatal("absent member request timestamps must remain nil")
 	}
 
-	var operation Operation
-	if err := json.Unmarshal([]byte(`{"counterKey":"c","op":"clear"}`), &operation); err != nil {
+	var clearOp operation
+	if err := json.Unmarshal([]byte(`{"counterKey":"c","op":"clear"}`), &clearOp); err != nil {
 		t.Fatal(err)
 	}
-	if operation.OccurredAt != nil {
-		t.Fatalf("absent Operation.OccurredAt=%v, want nil", operation.OccurredAt)
+	if clearOp.OccurredAt != nil {
+		t.Fatalf("absent operation.OccurredAt=%v, want nil", clearOp.OccurredAt)
 	}
-	wire, err := json.Marshal(operation)
+	wire, err := json.Marshal(clearOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +520,7 @@ func TestOptionalRequestDateTimesStayNilWhenAbsent(t *testing.T) {
 	}
 
 	at := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
-	wire, err = json.Marshal(Operation{CounterKey: "c", Operation: "add", OccurredAt: &at})
+	wire, err = json.Marshal(operation{CounterKey: "c", Operation: "add", OccurredAt: &at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1639,10 +1645,48 @@ func assertLeaderboardEntries(t *testing.T, got []LeaderboardEntry, want []any) 
 	}
 }
 
+func TestWindowLeaderboardOnScoreBoardHasBoardModeAndNoTotal(t *testing.T) {
+	// A windowed board follows the board mode; score boards omit `total` entirely on the wire.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"best-lap","mode":"min","window":"7d","order":"asc",` +
+			`"memberCount":2,"limit":100,"offset":0,` +
+			`"effectiveStart":"2026-06-27T00:00:00Z","effectiveEnd":"2026-07-04T09:30:00Z",` +
+			`"entries":[{"rank":1,"member":"alice","value":"1417"}]}`))
+	}))
+	defer srv.Close()
+	client, err := NewClient(Options{APIKey: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	h, err := client.Counter("best-lap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lb, err := h.WindowLeaderboard(context.Background(), WindowLeaderboardParams{Window: "7d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lb.Mode != "min" {
+		t.Errorf("mode=%q, want min", lb.Mode)
+	}
+	if lb.Total != nil {
+		t.Errorf("total must be nil on score-board windows, got %q", *lb.Total)
+	}
+	if len(lb.Entries) != 1 || lb.Entries[0].Value != "1417" {
+		t.Errorf("entries=%+v", lb.Entries)
+	}
+}
+
 func assertWindowLeaderboard(t *testing.T, got *WindowLeaderboard, exp map[string]any) {
 	t.Helper()
-	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) || got.Total != exp["total"].(string) {
+	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) {
 		t.Errorf("window leaderboard=%+v, expect=%v", got, exp)
+	}
+	// The window group total is non-nil only on sum boards; the conformance vectors carry sum boards.
+	if got.Total == nil || *got.Total != exp["total"].(string) {
+		t.Errorf("window total=%v, want %q", got.Total, exp["total"])
 	}
 	wantStart, err := time.Parse(time.RFC3339, exp["effectiveStart"].(string))
 	if err != nil {
@@ -2335,7 +2379,7 @@ func TestBatchResultsCorrelateByUniqueCounterKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ops := []Operation{
+	ops := []operation{
 		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
 		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
 	}
@@ -2346,7 +2390,7 @@ func TestBatchResultsCorrelateByUniqueCounterKey(t *testing.T) {
 }
 
 func TestBatchPerOperationProblemStatusMustBeHTTPCode(t *testing.T) {
-	ops := []Operation{{
+	ops := []operation{{
 		CounterKey: "alpha", Operation: "add", Amount: "2",
 		IdempotencyKey: "idem-alpha",
 	}}
@@ -2386,7 +2430,7 @@ func TestBatchPerOperationProblemStatusMustBeHTTPCode(t *testing.T) {
 }
 
 func TestMalformedBatchResultsFanOutValidationIdentity(t *testing.T) {
-	ops := []Operation{
+	ops := []operation{
 		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
 		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
 	}

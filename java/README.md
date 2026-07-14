@@ -162,6 +162,12 @@ System.out.println(r.memberAccepted()); // false when the standing best was bett
 WindowLeaderboard recent = board.windowLeaderboard(new WindowLeaderboardParams("7d"));
 ```
 
+A windowed board follows the board's mode: a sum board ranks the window-sum and carries a non-null
+`total()`; a score board ranks the window-best (`min`/`max`) or window-latest (`latest`) value and
+its `total()` is null. The same rule drives member series: on a score board `memberSeries` returns
+sparse best/latest points (`mode()` tells you which), and a missing bucket means "no submission",
+not zero.
+
 Member writes carry optional `metadata` (≤ 1024 **UTF-8 bytes** — byte-counted, validated
 client-side), `occurredAt`, and a caller-supplied `idempotencyKey` via
 `MemberWriteOptions` / `SubmitOptions`.

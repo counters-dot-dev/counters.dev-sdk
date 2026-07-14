@@ -566,7 +566,8 @@ public final class CountersClient implements ReadOnlyCountersClient {
             }
             series.add(new MemberSeriesEntry(str(sm, "member"), List.copyOf(points)));
         }
-        return new MemberGroupSeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "tz"),
+        return new MemberGroupSeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "mode"),
+                str(m, "tz"),
                 new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(series));
     }
 

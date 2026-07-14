@@ -535,9 +535,9 @@ export interface PublishableCounterHandle {
   readonly key: string;
   /** Current value. */
   value(): Promise<ValueResponse>;
-  /** One member's time series (delta per bucket). Requires member series enabled on the counter. */
+  /** One member's series (delta per bucket on a sum board; sparse best/latest scores on a score board). Requires member series enabled. */
   series(params: SeriesParams & { member: string }): Promise<MemberSeriesResponse>;
-  /** The dense per-member multi-series. Requires member series enabled on the counter. */
+  /** The per-member multi-series (dense on a sum board, sparse per member on a score board). Requires member series enabled. */
   series(params: SeriesParams & { groupBy: "member" }): Promise<MemberGroupSeriesResponse>;
   /** Time series (delta per bucket). */
   series(params: SeriesParams): Promise<SeriesResponse>;
@@ -649,9 +649,9 @@ export class CounterHandle {
     return this.client.getValue(this.key);
   }
 
-  /** One member's time series (delta per bucket). Requires member series enabled on the counter. */
+  /** One member's series (delta per bucket on a sum board; sparse best/latest scores on a score board). Requires member series enabled. */
   series(params: SeriesParams & { member: string }): Promise<MemberSeriesResponse>;
-  /** The dense per-member multi-series. Requires member series enabled on the counter. */
+  /** The per-member multi-series (dense on a sum board, sparse per member on a score board). Requires member series enabled. */
   series(params: SeriesParams & { groupBy: "member" }): Promise<MemberGroupSeriesResponse>;
   /** Time series (delta per bucket). */
   series(params: SeriesParams): Promise<SeriesResponse>;
@@ -663,7 +663,7 @@ export class CounterHandle {
 
   /** The ranked member leaderboard for this counter (top-N). */
   leaderboard(params?: LeaderboardParams): Promise<Leaderboard>;
-  /** The windowed leaderboard: members ranked by summed activity over the trailing window. */
+  /** The windowed leaderboard: members ranked by their activity over the trailing window. */
   leaderboard(params: WindowLeaderboardParams): Promise<WindowLeaderboard>;
   leaderboard(
     params: LeaderboardParams & { window?: Window } = {},
@@ -788,11 +788,13 @@ type WireDerivedSeriesResponse = Omit<
 };
 
 type WireUsage = Omit<Usage, "operations" | "limits"> & {
-  ops: Omit<Usage["operations"], "resetsAt"> & { resetsAt: string };
+  // `quota`/`monthlyOpsQuota` are optional on the wire (unlimited plans omit them); the public type
+  // normalises absent to null so callers branch on one representation.
+  ops: Omit<Usage["operations"], "resetsAt" | "quota"> & { resetsAt: string; quota?: number | null };
   limits: {
     rateLimitRps: number;
     maxCounters: number;
-    monthlyOpsQuota: number | null;
+    monthlyOpsQuota?: number | null;
   };
 };
 
@@ -889,11 +891,15 @@ function parseUsage(usage: WireUsage): Usage {
   const { ops, limits, ...fields } = usage;
   return {
     ...fields,
-    operations: { ...ops, resetsAt: parseDate(ops.resetsAt, "usage.operations.resetsAt") },
+    operations: {
+      ...ops,
+      quota: ops.quota ?? null,
+      resetsAt: parseDate(ops.resetsAt, "usage.operations.resetsAt"),
+    },
     limits: {
       rateLimitRequestsPerSecond: limits.rateLimitRps,
       maxCounters: limits.maxCounters,
-      monthlyOperationsQuota: limits.monthlyOpsQuota,
+      monthlyOperationsQuota: limits.monthlyOpsQuota ?? null,
     },
   };
 }

@@ -126,6 +126,35 @@ describe("leaderboard conformance — parse (response → typed fields)", () => 
     assertNativeTimestamps(result, c);
   });
 
+  it("parses a score-board window (board mode, no total — a windowed board follows the board mode)", async () => {
+    const client = clientWith(
+      mockFetch(() =>
+        jsonResponse(200, {
+          key: "best-lap",
+          mode: "min",
+          window: "7d",
+          order: "asc",
+          // Score boards have no meaningful group total; the server omits the field entirely.
+          memberCount: 2,
+          limit: 100,
+          offset: 0,
+          effectiveStart: "2026-06-27T00:00:00Z",
+          effectiveEnd: "2026-07-04T09:30:00Z",
+          entries: [
+            { rank: 1, member: "alice", value: "1417" },
+            { rank: 2, member: "bob", value: "1502" },
+          ],
+        }),
+      ),
+    );
+
+    const result = await client.counter("best-lap").leaderboard({ window: "7d" });
+    expect(result.mode).toBe("min");
+    expect(result.total, "total must be absent on score-board windows").toBeUndefined();
+    expect(result.entries[0]?.value).toBe("1417");
+    await client.close();
+  });
+
   it("uses the requested all-time variant when the response carries a stray window field", async () => {
     const client = clientWith(
       mockFetch(() =>

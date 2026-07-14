@@ -17,6 +17,11 @@ export type OperationType = "add" | "subtract" | "clear" | "delete";
 export type Mode = "sum" | "latest" | "min" | "max";
 /** Trailing-window sizes for a windowed leaderboard read (`leaderboard?window=`). */
 export type Window = "1h" | "6h" | "12h" | "1d" | "7d" | "30d";
+/**
+ * How to read each bucket's value in a member-dimensional series: `delta` (per-bucket change) on a
+ * sum board, or the board mode (`min`/`max`/`latest` — bucket-best or bucket-latest) on a score board.
+ */
+export type MemberSeriesMode = "delta" | "min" | "max" | "latest";
 /** Ranking direction. */
 export type Order = "asc" | "desc";
 
@@ -187,13 +192,18 @@ export interface WindowEntry {
   value: Value;
 }
 
-/** A windowed leaderboard: always a `sum` board, ranking summed activity over the trailing window. */
+/**
+ * A windowed leaderboard: members ranked by their activity over the trailing window — the window-sum
+ * on a `sum` board, the window-best (`min`/`max`) or window-latest (`latest`) value on a score board.
+ * Members with no activity in the window are absent.
+ */
 export interface WindowLeaderboard {
   key: string;
-  mode: "sum";
+  mode: Mode;
   window: Window;
   order: Order;
-  total: Value;
+  /** The window group total — present only on `sum` boards (a sum of best lap times is nonsense). */
+  total?: Value;
   memberCount: number;
   limit: number;
   offset: number;
@@ -281,12 +291,16 @@ export interface MemberSnapshot {
 
 // ── Dimensional member series (series?member= / series?groupBy=member) ──────────────────────────────
 
-/** One member's per-bucket delta series (`series?member=`). */
+/**
+ * One member's per-bucket series (`series?member=`). On a sum board each point is the bucket's
+ * signed delta (`mode: "delta"`); on a score board each point is the bucket-best or bucket-latest
+ * value and points are sparse — a missing bucket means "no submission", not zero.
+ */
 export interface MemberSeriesResponse {
   counterKey: string;
   member: string;
   bucket: string;
-  mode: "delta";
+  mode: MemberSeriesMode;
   /** IANA time zone used for calendar bucket boundaries. */
   timeZone?: string;
   range: { from: Date; to: Date };
@@ -298,10 +312,14 @@ export interface MemberSeriesEntry {
   points: SeriesPoint[];
 }
 
-/** The dense per-member multi-series (`series?groupBy=member`). No top-level `mode`. */
+/**
+ * The per-member multi-series (`series?groupBy=member`): dense (gapfilled) on a sum board, sparse
+ * per member on a score board (same rule as {@link MemberSeriesResponse} — a gap is "no submission").
+ */
 export interface MemberGroupSeriesResponse {
   counterKey: string;
   bucket: string;
+  mode: MemberSeriesMode;
   /** IANA time zone used for calendar bucket boundaries. */
   timeZone?: string;
   range: { from: Date; to: Date };

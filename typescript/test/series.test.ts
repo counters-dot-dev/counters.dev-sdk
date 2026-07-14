@@ -99,8 +99,9 @@ describe("series conformance (conformance/series)", () => {
       const ex = c.expect as { counterKey: string; bucket: string; series: { member: string; points: Point[] }[] };
       expect(r.counterKey).toBe(ex.counterKey);
       expect(r.bucket).toBe(ex.bucket);
-      // No top-level mode on a group series (openapi MemberGroupSeriesResponse).
-      expect((r as unknown as { mode?: unknown }).mode).toBeUndefined();
+      // The spec requires a top-level `mode` on a group series; the current conformance vector
+      // predates it (flagged upstream), so assert exact passthrough of whatever the body carried.
+      expect((r as unknown as { mode?: unknown }).mode).toBe((c.body as { mode?: string }).mode);
       assertRange(r.range, range);
       expect(r.series).toHaveLength(ex.series.length);
       r.series.forEach((s, i) => {
@@ -131,6 +132,45 @@ describe("series conformance (conformance/series)", () => {
     expect(r.mode).toBe(ex.mode);
     assertRange(r.range, range);
     assertPoints(r.points, ex.points);
+  });
+
+  it("parses score-board member series (mode follows the board; grouped series carries mode)", async () => {
+    const from = new Date("2026-07-01T00:00:00Z");
+    const to = new Date("2026-07-02T00:00:00Z");
+    const range = { from: from.toISOString(), to: to.toISOString() };
+
+    const single = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() =>
+        jsonResponse(200, {
+          counterKey: "best-lap",
+          member: "alice",
+          bucket: "1h",
+          mode: "min", // score board: each point is the bucket-best, sparse
+          range,
+          points: [{ t: "2026-07-01T09:00:00Z", v: "1417" }],
+        }),
+      ),
+    });
+    const memberSeries = await single.counter("best-lap").series({ from, to, bucket: "1h", member: "alice" });
+    expect(memberSeries.mode).toBe("min");
+
+    const grouped = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() =>
+        jsonResponse(200, {
+          counterKey: "best-lap",
+          bucket: "1h",
+          mode: "min",
+          range,
+          series: [{ member: "alice", points: [{ t: "2026-07-01T09:00:00Z", v: "1417" }] }],
+        }),
+      ),
+    });
+    const groupSeries = await grouped.counter("best-lap").series({ from, to, bucket: "1h", groupBy: "member" });
+    expect(groupSeries.mode).toBe("min");
   });
 });
 

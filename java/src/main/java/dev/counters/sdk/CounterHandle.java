@@ -179,13 +179,19 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
         return client.getSeries(key, params);
     }
 
-    /** One member's time series (delta per bucket). Requires member series enabled on the counter. */
+    /**
+     * One member's time series (delta per bucket on a sum board; sparse best/latest scores on a
+     * score board). Requires member series enabled on the counter.
+     */
     public MemberSeriesResponse memberSeries(String member, SeriesParams params) {
         Validation.assertMemberKey(member);
         return client.getMemberSeries(key, member, params);
     }
 
-    /** Dense per-member multi-series. Requires member series enabled on the counter. */
+    /**
+     * The per-member multi-series (dense on a sum board, sparse per member on a score board).
+     * Requires member series enabled on the counter.
+     */
     public MemberGroupSeriesResponse groupSeries(SeriesParams params) {
         return client.getGroupSeries(key, params);
     }
@@ -200,7 +206,7 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
         return client.getLeaderboard(key, params);
     }
 
-    /** The windowed leaderboard: members ranked by summed activity over the trailing window. */
+    /** The windowed leaderboard: members ranked by their activity over the trailing window. */
     public WindowLeaderboard windowLeaderboard(WindowLeaderboardParams params) {
         return client.getWindowLeaderboard(key, params);
     }

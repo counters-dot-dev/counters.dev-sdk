@@ -347,18 +347,37 @@ class ExpandedSurfaceTest {
     @Test
     void groupSeriesSendsGroupByAndParses() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200,
-                "{\"counterKey\":\"board\",\"bucket\":\"1h\","
+                "{\"counterKey\":\"board\",\"bucket\":\"1h\",\"mode\":\"delta\","
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-01T01:00:00Z\"},"
                         + "\"series\":[{\"member\":\"alice\",\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"5\"}]}]}"));
         try (CountersClient c = client(baseUrl)) {
             MemberGroupSeriesResponse s = c.counter("board").groupSeries(
                     new SeriesParams(at(), at().plus(1, ChronoUnit.HOURS), "1h"));
             assertEquals("member", parseQuery(recorded.get(0).query()).get("groupBy"));
+            assertEquals("delta", s.mode());
             assertEquals("alice", s.series().get(0).member());
             assertNull(s.timeZone());
             assertEquals(Instant.parse("2026-01-01T00:00:00Z"),
                     s.series().get(0).points().get(0).timestamp());
             assertEquals("5", s.series().get(0).points().get(0).value());
+        }
+    }
+
+    @Test
+    void windowLeaderboardOnScoreBoardHasBoardModeAndNoTotal() throws IOException {
+        // A windowed board follows the board mode; score boards omit `total` entirely on the wire.
+        String baseUrl = startServer((ex, r) -> json(ex, 200,
+                "{\"key\":\"best-lap\",\"mode\":\"min\",\"window\":\"7d\",\"order\":\"asc\","
+                        + "\"memberCount\":2,\"limit\":100,\"offset\":0,"
+                        + "\"effectiveStart\":\"2026-06-27T00:00:00Z\","
+                        + "\"effectiveEnd\":\"2026-07-04T09:30:00Z\","
+                        + "\"entries\":[{\"rank\":1,\"member\":\"alice\",\"value\":\"1417\"}]}"));
+        try (CountersClient c = client(baseUrl)) {
+            WindowLeaderboard lb = c.counter("best-lap")
+                    .windowLeaderboard(new WindowLeaderboardParams("7d"));
+            assertEquals("min", lb.mode());
+            assertNull(lb.total(), "total must be null on score-board windows");
+            assertEquals("1417", lb.entries().get(0).value());
         }
     }
 

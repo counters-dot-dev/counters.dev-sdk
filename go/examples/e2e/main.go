@@ -752,7 +752,7 @@ func runStep(client *counters.Client, handle *counters.CounterHandle, op vectorO
 			if err != nil {
 				return stepResult{}, err
 			}
-			return stepResult{key: r.Key, value: r.Total, mode: r.Mode, order: r.Order, total: r.Total, memberCount: r.MemberCount, entries: windowEntries(r.Entries)}, nil
+			return stepResult{key: r.Key, value: stringValue(r.Total), mode: r.Mode, order: r.Order, total: stringValue(r.Total), memberCount: r.MemberCount, entries: windowEntries(r.Entries)}, nil
 		}
 		r, err := handle.Leaderboard(ctx, counters.LeaderboardParams{Limit: op.Limit, Offset: op.Offset, Order: op.Order, Epoch: op.Epoch})
 		if err != nil {

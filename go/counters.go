@@ -337,7 +337,8 @@ type LeaderboardParams struct {
 }
 
 // WindowLeaderboardParams are the read parameters for a windowed leaderboard. Window is
-// required: one of Windows ("1h", "6h", "12h", "1d", "7d", "30d").
+// required: one of Windows ("1h", "6h", "12h", "1d", "7d", "30d"). Epoch is accepted for
+// parameter-struct symmetry but ignored by windowed reads (member rollups are epoch-agnostic).
 type WindowLeaderboardParams struct {
 	Limit  int
 	Offset int
@@ -377,14 +378,17 @@ type WindowEntry struct {
 	Value  string `json:"value"`
 }
 
-// WindowLeaderboard ranks members by summed activity over a trailing window. EffectiveStart
-// and EffectiveEnd are the bounds actually summed (the start is floored to a rollup boundary).
+// WindowLeaderboard ranks members by their activity over a trailing window: the window-sum on a
+// "sum" board, the window-best ("min"/"max") or window-latest ("latest") value on a score board.
+// Total is the window group total, non-nil only on "sum" boards (a sum of best times is nonsense).
+// EffectiveStart and EffectiveEnd are the bounds actually covered (the start is floored to a
+// rollup boundary).
 type WindowLeaderboard struct {
 	Key            string        `json:"key"`
 	Mode           string        `json:"mode"`
 	Window         string        `json:"window"`
 	Order          string        `json:"order"`
-	Total          string        `json:"total"`
+	Total          *string       `json:"total,omitempty"`
 	MemberCount    int           `json:"memberCount"`
 	Limit          int           `json:"limit"`
 	Offset         int           `json:"offset"`
@@ -463,7 +467,10 @@ type MemberSnapshot struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
-// MemberSeriesResponse is one member's per-bucket delta series (series?member=).
+// MemberSeriesResponse is one member's per-bucket series (series?member=). Mode tells you how to
+// read each point: "delta" (the bucket's signed delta sum) on a sum board, or the board mode
+// ("min"/"max"/"latest" — bucket-best or bucket-latest) on a score board, where points are sparse
+// (a missing bucket means "no submission", not zero).
 type MemberSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Member     string `json:"member"`
@@ -483,10 +490,13 @@ type MemberSeriesEntry struct {
 	Points []SeriesPoint `json:"points"`
 }
 
-// MemberGroupSeriesResponse is the dense per-member multi-series (series?groupBy=member).
+// MemberGroupSeriesResponse is the per-member multi-series (series?groupBy=member): dense
+// (gapfilled) on a sum board, sparse per member on a score board. Mode reads as in
+// MemberSeriesResponse: "delta" on a sum board, else the board mode.
 type MemberGroupSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
+	Mode       string `json:"mode"`
 	TimeZone   string `json:"tz"`
 	Range      struct {
 		From time.Time `json:"from"`
@@ -537,8 +547,11 @@ type DerivedSeriesResponse struct {
 	Points []DerivedSeriesPoint `json:"points"`
 }
 
-// Operation is one entry in a batch.
-type Operation struct {
+// operation is one entry in a POST /batch request. Deliberately unexported: no public SDK method
+// accepts or returns a batch operation, and exporting it would freeze a dead-end shape (the spec's
+// Operation also carries member-write fields this SDK never sends). Export deliberately if a
+// public batch API ever ships.
+type operation struct {
 	CounterKey     string `json:"counterKey"`
 	Operation      string `json:"op"`
 	Amount         string `json:"amount,omitempty"`
@@ -665,7 +678,7 @@ func NewClient(opts Options) (*Client, error) {
 	}
 	c.batchEnabled = enabled
 	c.onWriteError = onErr
-	c.batcher = newBatcher(func(ops []Operation) ([]WriteFailure, error) {
+	c.batcher = newBatcher(func(ops []operation) ([]WriteFailure, error) {
 		return c.submitBatch(context.Background(), ops)
 	}, maxSize, interval, onErr)
 	return c, nil
@@ -858,8 +871,8 @@ func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResp
 	return &out, nil
 }
 
-// MemberSeries reads one member's time series (delta per bucket). Requires member series
-// enabled on the counter.
+// MemberSeries reads one member's time series (delta per bucket on a sum board; sparse
+// best/latest scores on a score board). Requires member series enabled on the counter.
 func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p SeriesParams) (*MemberSeriesResponse, error) {
 	if err := validateMemberKey(member); err != nil {
 		return nil, err
@@ -877,8 +890,8 @@ func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p Serie
 	return &out, nil
 }
 
-// GroupSeries reads the dense per-member multi-series. Requires member series enabled on the
-// counter.
+// GroupSeries reads the per-member multi-series (dense on a sum board, sparse per member on a
+// score board). Requires member series enabled on the counter.
 func (h *CounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*MemberGroupSeriesResponse, error) {
 	q, err := seriesQuery(p)
 	if err != nil {
@@ -903,7 +916,7 @@ func (h *CounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*
 	return &out, nil
 }
 
-// WindowLeaderboard ranks members by summed activity over the trailing p.Window.
+// WindowLeaderboard ranks members by their activity over the trailing p.Window.
 func (h *CounterHandle) WindowLeaderboard(ctx context.Context, p WindowLeaderboardParams) (*WindowLeaderboard, error) {
 	if err := validateWindow(p.Window); err != nil {
 		return nil, err
@@ -1265,7 +1278,7 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	if err != nil {
 		return err
 	}
-	op := Operation{CounterKey: key, IdempotencyKey: idempotencyKey}
+	op := operation{CounterKey: key, IdempotencyKey: idempotencyKey}
 	if delta.Sign() >= 0 {
 		op.Operation, op.Amount = "add", delta.String()
 	} else {
@@ -1274,7 +1287,7 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	// Fire-and-forget, like a background flush — so failures route to the same OnError sink
 	// (previously they were dropped, which silently lost counted writes).
 	go func() {
-		failures, err := c.submitBatch(context.Background(), []Operation{op})
+		failures, err := c.submitBatch(context.Background(), []operation{op})
 		if err == nil || c.onWriteError == nil {
 			return
 		}
@@ -1298,7 +1311,7 @@ type batchResponse struct {
 	Results *[]batchResult `json:"results"`
 }
 
-func (c *Client) submitBatch(ctx context.Context, ops []Operation) ([]WriteFailure, error) {
+func (c *Client) submitBatch(ctx context.Context, ops []operation) ([]WriteFailure, error) {
 	// A 200 only means the batch was accepted; each op carries its own status. Surface a per-op
 	// "error" (e.g. a counter/quota cap) instead of silently dropping the buffered write.
 	var raw json.RawMessage
@@ -1322,7 +1335,7 @@ func (c *Client) submitBatch(ctx context.Context, ops []Operation) ([]WriteFailu
 		return invalidBatchResponse(ops, "got %d results for %d submitted operations", len(results), len(ops))
 	}
 
-	opsByCounter := make(map[string]Operation, len(ops))
+	opsByCounter := make(map[string]operation, len(ops))
 	for _, op := range ops {
 		opsByCounter[op.CounterKey] = op
 	}
@@ -1386,7 +1399,7 @@ func (c *Client) submitBatch(ctx context.Context, ops []Operation) ([]WriteFailu
 	return failures, firstErr
 }
 
-func invalidBatchResponse(ops []Operation, format string, args ...any) ([]WriteFailure, error) {
+func invalidBatchResponse(ops []operation, format string, args ...any) ([]WriteFailure, error) {
 	err := &ValidationError{Msg: "invalid batch response: " + fmt.Sprintf(format, args...)}
 	failures := make([]WriteFailure, 0, len(ops))
 	for _, op := range ops {
@@ -1395,7 +1408,7 @@ func invalidBatchResponse(ops []Operation, format string, args ...any) ([]WriteF
 	return failures, err
 }
 
-func writeFailure(op Operation, err Error) WriteFailure {
+func writeFailure(op operation, err Error) WriteFailure {
 	delta := op.Amount
 	if op.Operation == "subtract" && delta != "" && delta != "0" {
 		delta = "-" + delta

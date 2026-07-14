@@ -33,6 +33,25 @@ describe("client.usage()", () => {
     expect(usage.limits).not.toHaveProperty("monthlyOpsQuota");
   });
 
+  it("normalises quotas the server omits (unlimited plans) to null, never undefined", async () => {
+    const client = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() =>
+        jsonResponse(200, {
+          month: "2026-07",
+          // `quota`/`monthlyOpsQuota` are optional on the wire — unlimited plans omit them entirely.
+          ops: { used: 42, resetsAt: "2026-08-01T00:00:00Z" },
+          counters: { used: 3, max: 1000 },
+          limits: { rateLimitRps: 50, maxCounters: 1000 },
+        }),
+      ),
+    });
+    const usage = await client.usage();
+    expect(usage.operations.quota).toBeNull();
+    expect(usage.limits.monthlyOperationsQuota).toBeNull();
+  });
+
   it("carries a numeric quota when the plan is capped", async () => {
     const client = new CountersClient({
       apiKey: "k",

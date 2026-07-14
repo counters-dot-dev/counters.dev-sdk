@@ -12,10 +12,10 @@ public interface ReadOnlyCounterHandle {
     /** Time series (delta per bucket). */
     SeriesResponse series(SeriesParams params);
 
-    /** One member's time series. Requires member series enabled on the counter. */
+    /** One member's time series (delta on a sum board; sparse scores on a score board). Requires member series enabled. */
     MemberSeriesResponse memberSeries(String member, SeriesParams params);
 
-    /** Dense per-member multi-series. Requires member series enabled on the counter. */
+    /** The per-member multi-series (dense on a sum board, sparse on a score board). Requires member series enabled. */
     MemberGroupSeriesResponse groupSeries(SeriesParams params);
 
     /** The ranked member leaderboard using server defaults. */

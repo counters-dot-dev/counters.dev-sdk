@@ -180,6 +180,11 @@ const windowed = await board.leaderboard({ window: "7d" }); // 1h | 6h | 12h | 1
 console.log(windowed.effectiveStart.toISOString(), windowed.effectiveEnd.toISOString());
 ```
 
+A windowed board follows the board's mode: a sum board ranks the window-sum and carries a `total`;
+a score board ranks the window-best (`min`/`max`) or window-latest (`latest`) value and has no
+`total`. The same rule drives member series: on a score board `series({ member })` returns sparse
+best/latest points (`mode` tells you which), and a missing bucket means "no submission", not zero.
+
 Member writes carry optional `metadata` (≤ 1024 **UTF-8 bytes** — byte-counted, validated
 client-side) and `occurredAt` (a `Date`).
 

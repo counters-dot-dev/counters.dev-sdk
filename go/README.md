@@ -149,15 +149,20 @@ fmt.Println(r.MemberAccepted) // false when the standing best was better
 recent, _ := board.WindowLeaderboard(ctx, counters.WindowLeaderboardParams{Window: "7d"})
 ```
 
+A windowed board follows the board's mode: a sum board ranks the window-sum and carries a non-nil
+`Total`; a score board ranks the window-best (`min`/`max`) or window-latest (`latest`) value and its
+`Total` is nil. The same rule drives member series: on a score board `MemberSeries` returns sparse
+best/latest points (`Mode` tells you which), and a missing bucket means "no submission", not zero.
+
 Every machine-SDK date-time uses Go's native `time.Time`. This includes series points and ranges,
 usage resets, leaderboard update times, and window boundaries. Required values are `time.Time`; optional
 values such as `Counter.CreatedAt`, `Counter.UpdatedAt`, and request `OccurredAt` fields are
 `*time.Time` and stay `nil` when absent. The standard JSON encoder and decoder preserve their RFC
 3339 wire representation.
 
-Other fields the API may omit are pointers: `Leaderboard.Total` (sum boards only),
-`MemberValue.Value`, entry/snapshot `Metadata`, and the usage quota fields — `nil` means "not
-present", never zero.
+Other fields the API may omit are pointers: `Leaderboard.Total` and `WindowLeaderboard.Total`
+(sum boards only), `MemberValue.Value`, entry/snapshot `Metadata`, and the usage quota fields —
+`nil` means "not present", never zero.
 
 ## Derived counters
 
