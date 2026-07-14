@@ -1,6 +1,6 @@
 name: sdk-typescript-ci
 
-# The example app is COMPILED here, not run: exercising it end-to-end needs a live counters.dev
+# The example apps are COMPILED here, not run: exercising them end-to-end needs a live counters.dev
 # service, which lives in a separate (private) repository. Maintainers run the end-to-end suites
 # there against a checkout of this repo. Here: unit tests + conformance vectors + build only.
 on:
@@ -53,7 +53,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   example:
-    # Compile the example app against the SDK just built. It is deliberately NOT executed: running it
+    # Compile the example apps against the SDK just built. They are deliberately NOT executed: running them
     # requires a live counters.dev service (private repo). This proves the documented example still
     # compiles against the current client surface.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - name: Example app — compile against the current client surface
+      - name: Example apps — compile against the current client surface
         id: app
         shell: bash
         working-directory: typescript
@@ -74,6 +74,9 @@ jobs:
           cd examples/e2e
           npm install --no-fund --no-audit
           node --check main.mjs 2>&1 | tee /tmp/example.log
+          cd ../nextjs
+          npm ci --no-fund --no-audit
+          npm run typecheck 2>&1 | tee -a /tmp/example.log
       - name: PR comment (results)
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true
@@ -88,9 +91,9 @@ jobs:
             [ "$EXAMPLE_OUTCOME" = "success" ] && echo "### ✅ sdk-typescript" || echo "### ❌ sdk-typescript"
             printf '%s\n' "$UNIT_SUMMARY"
             if [ "$EXAMPLE_OUTCOME" = "success" ]; then
-              echo "- example app: compiles"
+              echo "- example apps: compile"
             else
-              echo "- example app: **$EXAMPLE_OUTCOME**"
+              echo "- example apps: **$EXAMPLE_OUTCOME**"
               echo '```'
               tail -15 /tmp/example.log 2>/dev/null || echo "no output — see the run log"
               echo '```'
