@@ -257,12 +257,19 @@ if errors.As(err, &transportErr) {
 ```
 
 The server replays the original result instead of double-applying the operation when the same key
-is reused for the same operation and payload **within its deduplication window**. The window's
-duration is not part of the public contract, so this is not an unbounded retry guarantee; using the
-key for a different operation returns `409 Conflict`. Same-operation reuse with a changed payload is
-not specified, so do not rely on it. `MemberWriteOpts` and `SubmitOpts` also accept
-`IdempotencyKey`, while confirmed clear, delete, and member removal accept `WriteOptions`. Empty
-keys ask the SDK to generate one; supplied keys may contain at most 255 characters.
+is reused for the same operation and payload **within a six-hour deduplication window**. After six
+hours the key may be pruned, so a later reuse can execute a new operation — retry promptly, not days
+later. Using the key for a different operation returns `409 Conflict`; same-operation reuse with a
+changed payload is not specified, so do not rely on it. `MemberWriteOpts` and `SubmitOpts` also
+accept `IdempotencyKey`, while confirmed clear, delete, and member removal accept `WriteOptions`.
+Empty keys ask the SDK to generate one; supplied keys may contain at most 255 characters.
+
+Each organization has a plan-derived cap on live idempotency keys, sized so that traffic within your
+rate limit can never reach it. If it is somehow exhausted, a write returns `403 Forbidden` (a
+`*counters.APIError` with `Status == 403`) and no `Retry-After` — the condition clears only as keys
+age out of the window, so **do not retry it automatically**; wait, or slow your write rate. A batch reports this per
+operation as a `403` error result. Every write in a batch carries its own key, so a 1,000-operation
+batch consumes 1,000 keys, not one.
 
 Writes after `Close` return `ErrClientClosed`. It is a `*counters.ValidationError`, and remains
 matchable with `errors.Is` as well as `errors.As`.

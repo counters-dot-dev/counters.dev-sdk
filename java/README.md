@@ -105,11 +105,17 @@ try {
 }
 ```
 
-The service de-duplicates that retry within its deduplication window. Reusing the key for a different
-operation is rejected with `409`; retrying after the unspecified window is not guaranteed to
-de-duplicate. The contract does not specify same-operation reuse with a changed payload, so do not
-rely on it. `clear(String)`, `delete(String)`, and `MemberHandle.remove(String)` accept keys too;
-member add/subtract/submit use the `idempotencyKey` component of their option records.
+The service de-duplicates that retry within a **six-hour deduplication window**; after six hours the
+key may be pruned, so retry promptly rather than days later. Reusing the key for a different operation
+is rejected with `409`. The contract does not specify same-operation reuse with a changed payload, so
+do not rely on it. `clear(String)`, `delete(String)`, and `MemberHandle.remove(String)` accept keys
+too; member add/subtract/submit use the `idempotencyKey` component of their option records.
+
+Each organization has a plan-derived cap on live idempotency keys, sized so that traffic within your
+rate limit can never reach it. If it is somehow exhausted, a write throws `CountersApiException` with
+status `403` and no `Retry-After` — the condition clears only as keys age out, so **do not retry it
+automatically**; wait, or slow your write rate. A batch reports it per operation as a `403` result.
+Every write in a batch carries its own key, so a 1,000-operation batch consumes 1,000 keys, not one.
 
 The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
 this SDK against a live server — it is the fastest way to see the whole surface in use.

@@ -112,10 +112,17 @@ try {
 }
 ```
 
-The server replays the original result only within its deduplication window. That window's duration
-is not specified, so this is not an indefinite guarantee. Reusing the key for a different operation
-is rejected with HTTP 409. The contract does not specify what happens when the operation is the same
-but its payload changes; do not rely on that case.
+The server replays the original result only within a **six-hour deduplication window**; after that
+the key may be pruned, so retry promptly rather than days later. Reusing the key for a different
+operation is rejected with HTTP 409. The contract does not specify what happens when the operation is
+the same but its payload changes; do not rely on that case.
+
+Each organization has a plan-derived cap on live idempotency keys, sized so that traffic within your
+rate limit can never reach it. If it is somehow exhausted, a write fails with HTTP 403 (a
+`CountersApiError`) and no `Retry-After` — the condition clears only as keys age out, so **do not
+retry it automatically**; the SDK's own retry loop already treats 403 as terminal. A batch surfaces
+it per operation as a 403 result. Every write in a batch carries its own key, so a 1,000-operation
+batch consumes 1,000 keys, not one.
 
 The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
 this SDK against a live server — it is the fastest way to see the whole surface in use.
