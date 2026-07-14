@@ -1,0 +1,23 @@
+# Raid completion example
+
+This narrative app sketches the reporting path after a party clears Molten Core. It buffers a
+fire-and-forget increment to the global `raids-completed` counter, then records each player's damage
+as a member of the cumulative `raid-molten-core` sum leaderboard. The post-raid screen reads both the
+top five and each party member's own rank and percentile.
+
+The leaderboard is the important modeling choice: one counter per player followed by client-side
+sorting would duplicate ranking logic and require many reads. Member values let counters.dev own the
+ranking, ties, percentiles, and aggregate total. Individual raid contributions fit in a Java `long`,
+but cumulative season damage need not, so response strings are converted directly to `BigInteger`
+and never pass through a floating-point or 64-bit parser.
+
+The error branches also reflect game-server priorities. API quota failures are logged without
+rolling back the raid, transport failures are dropped after the SDK's built-in retries, and
+client-side validation failures are treated as code/configuration bugs. Background failures from
+the buffered telemetry counter reach the same handler through `onBatchError`.
+
+The app is compile-checked rather than run in CI. With a real API key, run it from this directory:
+
+```bash
+COUNTERS_API_KEY=ck_... gradle run
+```
