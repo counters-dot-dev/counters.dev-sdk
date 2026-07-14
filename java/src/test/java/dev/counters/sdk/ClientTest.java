@@ -534,7 +534,7 @@ class ClientTest {
     void retryBackoffGrowsExponentially() throws IOException {
         String baseUrl = startServer((ex, r) -> empty(ex, 503)); // always retryable, no Retry-After
         java.util.List<Long> delays = new java.util.ArrayList<>();
-        Http http = new Http(baseUrl, "k", null, 3, 100);
+        Http http = new Http(baseUrl, "k", null, 3, 100, 30_000);
         http.setSleeper(delays::add);
         assertThrows(CountersApiException.class, () -> http.request("GET", "/counters", null, null, null));
         assertEquals(List.of(100L, 200L, 400L), delays); // exponential, not linear/constant
@@ -552,7 +552,7 @@ class ClientTest {
             }
         });
         java.util.List<Long> delays = new java.util.ArrayList<>();
-        Http http = new Http(baseUrl, "k", null, 3, 0);
+        Http http = new Http(baseUrl, "k", null, 3, 0, 30_000);
         http.setSleeper(delays::add);
         http.request("POST", "/counters/c/add", Map.of("amount", "1"), "idem", null);
         assertEquals(List.of(2000L), delays); // honored the header, not the (zeroed) exponential
@@ -684,6 +684,21 @@ class ClientTest {
         CounterHandle c = client.counter("c");
         client.close();
         assertThrows(CountersException.class, () -> c.add(1));
+    }
+
+    @Test
+    void requestTimeoutIsConfigurableAndSurfacesAsTransport() throws Exception {
+        String base = startServer((exchange, r) -> {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            json(exchange, 200, "{}");
+        });
+        CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0).requestTimeoutMillis(50).build();
+        assertThrows(CountersTransportException.class, () -> client.counter("c").value());
     }
 
     @Test

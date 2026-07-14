@@ -40,7 +40,8 @@ public final class CountersClient implements AutoCloseable {
         if (b.apiKey == null || b.apiKey.isEmpty()) {
             throw new IllegalArgumentException("CountersClient: apiKey is required");
         }
-        this.http = new Http(b.baseUrl, b.apiKey, b.httpClient, b.maxRetries, b.backoffMillis);
+        this.http = new Http(b.baseUrl, b.apiKey, b.httpClient, b.maxRetries, b.backoffMillis,
+                b.requestTimeoutMillis);
         this.batchEnabled = b.batchEnabled;
         this.onWriteError = b.onBatchError;
         this.batcher = new Batcher(this::submitBatch, b.maxBatchSize, b.batchIntervalMillis, b.onBatchError);
@@ -508,6 +509,7 @@ public final class CountersClient implements AutoCloseable {
         private HttpClient httpClient; // null -> sensible default
         private int maxRetries = 3;
         private long backoffMillis = 200;
+        private long requestTimeoutMillis = 30_000;
         private boolean batchEnabled = true;
         private int maxBatchSize = 100;
         private long batchIntervalMillis = 1000;
@@ -543,6 +545,16 @@ public final class CountersClient implements AutoCloseable {
         /** Base backoff in milliseconds, doubled per retry, default 200. */
         public Builder backoffMillis(long backoffMillis) {
             this.backoffMillis = backoffMillis;
+            return this;
+        }
+
+        /**
+         * Per-attempt request timeout in milliseconds, default 30000. A timed-out attempt is retried
+         * like a network error; exhausted retries throw {@link CountersTransportException}.
+         */
+        public Builder requestTimeoutMillis(long requestTimeoutMillis) {
+            if (requestTimeoutMillis <= 0) throw new IllegalArgumentException("requestTimeoutMillis must be > 0");
+            this.requestTimeoutMillis = requestTimeoutMillis;
             return this;
         }
 

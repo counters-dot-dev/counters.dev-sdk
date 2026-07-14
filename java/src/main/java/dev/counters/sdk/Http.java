@@ -21,21 +21,23 @@ import java.util.function.LongConsumer;
 final class Http {
 
     private static final Set<Integer> RETRYABLE_STATUS = Set.of(429, 500, 502, 503, 504);
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
     private final String baseUrl;
     private final String apiKey;
     private final HttpClient client;
     private final int maxRetries;
     private final long backoffMillis;
+    private final Duration requestTimeout;
     private LongConsumer sleeper = Http::sleep; // test seam: records the backoff sequence
 
-    Http(String baseUrl, String apiKey, HttpClient client, int maxRetries, long backoffMillis) {
+    Http(String baseUrl, String apiKey, HttpClient client, int maxRetries, long backoffMillis,
+            long requestTimeoutMillis) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.apiKey = apiKey;
         this.client = client != null ? client : HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         this.maxRetries = maxRetries;
         this.backoffMillis = backoffMillis;
+        this.requestTimeout = Duration.ofMillis(requestTimeoutMillis);
     }
 
     /** Test seam: replace the inter-retry sleep to record the backoff sequence. */
@@ -60,7 +62,7 @@ final class Http {
 
         String payload = body == null ? null : Json.write(body);
         HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(url.toString()))
-                .timeout(REQUEST_TIMEOUT)
+                .timeout(requestTimeout)
                 .header("Authorization", "Bearer " + apiKey);
         if (payload != null) rb.header("Content-Type", "application/json");
         if (idempotencyKey != null) rb.header("Idempotency-Key", idempotencyKey);
