@@ -1,7 +1,6 @@
 # counters.dev — Java SDK
 
-Official Java SDK for [counters.dev](https://counters.dev) — the multi-tenant
-**arbitrary-precision** counter service. Pure JDK 17 standard library, zero runtime dependencies.
+Official Java SDK for [counters.dev](https://counters.dev) — the **arbitrary-precision** counter service. Pure JDK 17 standard library, zero runtime dependencies.
 
 ## The mental model
 

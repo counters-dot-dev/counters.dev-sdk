@@ -1,6 +1,6 @@
 # counters.dev SDKs
 
-Official client libraries for [counters.dev](https://counters.dev) — a multi-tenant,
+Official client libraries for [counters.dev](https://counters.dev) — an
 **arbitrary-precision** counter API. Create a counter, add to it, read its value, roll it up into a
 time series, rank members on a leaderboard, or derive one counter from others.
 

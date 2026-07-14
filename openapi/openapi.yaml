@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Counters API
   version: 0.5.1
-  summary: Multi-tenant arbitrary-precision counter service.
+  summary: Arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
     (drift-checked in CI; there is no client codegen).

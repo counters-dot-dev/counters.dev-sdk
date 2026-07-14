@@ -1,6 +1,6 @@
 # counters.dev — Go SDK
 
-Official Go SDK for [counters.dev](https://counters.dev), the multi-tenant **arbitrary-precision**
+Official Go SDK for [counters.dev](https://counters.dev), the **arbitrary-precision**
 counter service. Pure standard library — zero dependencies.
 
 ```sh

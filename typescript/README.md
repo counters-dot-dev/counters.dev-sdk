@@ -1,6 +1,6 @@
 # counters.dev — TypeScript SDK
 
-Official TypeScript SDK for [counters.dev](https://counters.dev), the multi-tenant
+Official TypeScript SDK for [counters.dev](https://counters.dev), the
 **arbitrary-precision** counter service.
 
 - Pure TypeScript, **ESM**, **zero runtime dependencies** (uses the platform `fetch` and `crypto`).
