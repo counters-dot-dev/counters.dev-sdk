@@ -7,8 +7,10 @@ import {
   PublishableCountersClient,
   type CountersClientOptions,
   type DerivedSeriesPoint,
-  type Operation,
-  type OperationType,
+  type MemberGroupSeriesResponse,
+  type MemberSeriesMode,
+  type MemberSeriesResponse,
+  type Mode,
   type PublishableCounterHandle,
   type PublishableMemberHandle,
   type SeriesResponse,
@@ -40,12 +42,20 @@ seriesResponse.timeZone?.toString();
 // @ts-expect-error `tz` is a compact wire key, not part of the public response.
 seriesResponse.tz;
 
-declare const operation: Operation;
-const operationType: OperationType = operation.operation;
-operation.occurredAt?.toISOString();
-// @ts-expect-error `op` is a compact wire key, not part of the public operation.
-operation.op;
-void operationType;
+// Internal wire helpers must NOT be part of the published surface (no public method takes them).
+// @ts-expect-error `Operation` is an internal batch wire shape, not a published type.
+void ({} as import("../src/index.js").Operation);
+// @ts-expect-error `BatchResult` is an internal batch wire shape, not a published type.
+void ({} as import("../src/index.js").BatchResult);
+
+declare const memberSeries: MemberSeriesResponse;
+const memberSeriesMode: MemberSeriesMode = memberSeries.mode;
+void memberSeriesMode;
+
+declare const groupSeries: MemberGroupSeriesResponse;
+// The spec requires a top-level `mode` on the grouped series (delta on sum boards, else the board mode).
+const groupSeriesMode: MemberSeriesMode = groupSeries.mode;
+void groupSeriesMode;
 
 declare const usage: Usage;
 usage.operations.resetsAt.toISOString();
@@ -61,6 +71,19 @@ usage.limits.monthlyOpsQuota;
 declare const windowLeaderboard: WindowLeaderboard;
 windowLeaderboard.effectiveStart.toISOString();
 windowLeaderboard.effectiveEnd.toISOString();
+// A windowed board follows the board mode; `total` is present only on sum boards.
+const windowMode: Mode = windowLeaderboard.mode;
+void windowMode;
+windowLeaderboard.total?.toString();
+// @ts-expect-error `total` is absent on score-board windows — narrow before use.
+windowLeaderboard.total.toString();
+
+declare const usageQuota: Usage;
+// Absent wire quotas are normalised to null — never undefined.
+const opsQuota: number | null = usageQuota.operations.quota;
+const monthlyQuota: number | null = usageQuota.limits.monthlyOperationsQuota;
+void opsQuota;
+void monthlyQuota;
 
 const writable = new CountersClient({
   apiKey: "ck_server",

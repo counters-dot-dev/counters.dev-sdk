@@ -7,8 +7,8 @@ import (
 )
 
 func TestBatcherCoalesce(t *testing.T) {
-	var captured [][]Operation
-	b := newBatcher(func(ops []Operation) ([]WriteFailure, error) {
+	var captured [][]operation
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
 		captured = append(captured, ops)
 		return nil, nil
 	}, 1000, 0, nil)
@@ -27,8 +27,8 @@ func TestBatcherCoalesce(t *testing.T) {
 }
 
 func TestBatcherNetNegativeAndZeroSkip(t *testing.T) {
-	var captured [][]Operation
-	b := newBatcher(func(ops []Operation) ([]WriteFailure, error) {
+	var captured [][]operation
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
 		captured = append(captured, ops)
 		return nil, nil
 	}, 1000, 0, nil)
@@ -48,8 +48,8 @@ func TestBatcherNetNegativeAndZeroSkip(t *testing.T) {
 }
 
 func TestBatcherMaxSizeFlush(t *testing.T) {
-	flushed := make(chan []Operation, 4)
-	b := newBatcher(func(ops []Operation) ([]WriteFailure, error) {
+	flushed := make(chan []operation, 4)
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
 		flushed <- ops
 		return nil, nil
 	}, 2, 0, nil)

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-type submitFn func(ops []Operation) ([]WriteFailure, error)
+type submitFn func(ops []operation) ([]WriteFailure, error)
 
 type bufferedWrite struct {
 	delta          *big.Int
@@ -93,16 +93,16 @@ func (b *batcher) Flush() error {
 
 func (b *batcher) flush() ([]WriteFailure, error) {
 	b.mu.Lock()
-	ops := make([]Operation, 0, len(b.buf))
+	ops := make([]operation, 0, len(b.buf))
 	for key, buffered := range b.buf {
 		delta := buffered.delta
 		if delta.Sign() == 0 {
 			continue // add then equal subtract -> net no-op
 		}
 		if delta.Sign() > 0 {
-			ops = append(ops, Operation{CounterKey: key, Operation: "add", Amount: delta.String(), IdempotencyKey: buffered.idempotencyKey})
+			ops = append(ops, operation{CounterKey: key, Operation: "add", Amount: delta.String(), IdempotencyKey: buffered.idempotencyKey})
 		} else {
-			ops = append(ops, Operation{CounterKey: key, Operation: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: buffered.idempotencyKey})
+			ops = append(ops, operation{CounterKey: key, Operation: "subtract", Amount: new(big.Int).Neg(delta).String(), IdempotencyKey: buffered.idempotencyKey})
 		}
 	}
 	b.buf = map[string]*bufferedWrite{}

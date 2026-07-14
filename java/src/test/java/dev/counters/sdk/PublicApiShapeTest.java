@@ -56,6 +56,8 @@ class PublicApiShapeTest {
         assertRecordShape(Operation.class,
                 new String[] {"counterKey", "operation", "amount", "idempotencyKey", "occurredAt"},
                 new Class<?>[] {String.class, String.class, String.class, String.class, Instant.class});
+        assertFalse(java.lang.reflect.Modifier.isPublic(Operation.class.getModifiers()),
+                "Operation is an internal batch wire shape — publishing it would freeze a dead-end type");
 
         assertRecordShape(SeriesResponse.class,
                 new String[] {"counterKey", "bucket", "mode", "timeZone", "range", "points"},
@@ -69,8 +71,9 @@ class PublicApiShapeTest {
                 new Class<?>[] {String.class, String.class, String.class, String.class, String.class,
                         SeriesResponse.Range.class, List.class});
         assertRecordShape(MemberGroupSeriesResponse.class,
-                new String[] {"counterKey", "bucket", "timeZone", "range", "series"},
-                new Class<?>[] {String.class, String.class, String.class, SeriesResponse.Range.class, List.class});
+                new String[] {"counterKey", "bucket", "mode", "timeZone", "range", "series"},
+                new Class<?>[] {String.class, String.class, String.class, String.class,
+                        SeriesResponse.Range.class, List.class});
         assertRecordShape(DerivedSeriesPoint.class,
                 new String[] {"timestamp", "value"},
                 new Class<?>[] {Instant.class, String.class});

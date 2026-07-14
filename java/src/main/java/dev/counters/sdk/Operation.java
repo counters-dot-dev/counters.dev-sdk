@@ -9,8 +9,12 @@ import java.util.Map;
  * {@code amount}
  * is required for add/subtract and ignored otherwise. {@code occurredAt} buckets the operation at event
  * time instead of ingest time (offline spools).
+ *
+ * <p>Deliberately package-private: no public SDK method accepts or returns a batch operation, and
+ * publishing it would freeze a dead-end shape (the spec's Operation also carries member-write
+ * fields this SDK never sends). Widen deliberately if a public batch API ever ships.
  */
-public record Operation(
+record Operation(
         String counterKey,
         String operation,
         String amount,
