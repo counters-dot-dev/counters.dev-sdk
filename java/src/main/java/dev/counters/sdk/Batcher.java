@@ -120,8 +120,8 @@ final class Batcher {
     private void flushSafe() {
         try {
             flush();
-        } catch (CountersException error) {
-            if (onError != null) onError.accept(error);
+        } catch (Throwable failure) {
+            if (onError != null) onError.accept(CountersException.normalizeBatchFailure(failure));
         }
     }
 

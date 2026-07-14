@@ -114,10 +114,12 @@ public final class CountersClient implements ReadOnlyCountersClient {
         CompletableFuture.runAsync(() -> {
             try {
                 submitBatch(List.of(op));
-            } catch (CountersException e) {
+            } catch (RuntimeException e) {
                 // Fire-and-forget, like a background flush — so failures route to the same onError sink
                 // (previously they were swallowed, which silently dropped counted writes).
-                if (onWriteError != null) onWriteError.accept(e);
+                if (onWriteError != null) {
+                    onWriteError.accept(CountersException.normalizeBatchFailure(e));
+                }
             }
         });
     }

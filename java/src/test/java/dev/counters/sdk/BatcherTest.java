@@ -110,6 +110,25 @@ class BatcherTest {
     }
 
     @Test
+    void backgroundFlushNormalizesUnexpectedFailuresToTypedTransportErrors() throws InterruptedException {
+        CountDownLatch failed = new CountDownLatch(1);
+        AtomicReference<CountersException> seen = new AtomicReference<>();
+        IllegalStateException cause = new IllegalStateException("unexpected");
+        Batcher b = new Batcher(ops -> {
+            throw cause;
+        }, 1, 0, error -> {
+            seen.set(error);
+            failed.countDown();
+        });
+
+        b.enqueue("a", big(1));
+
+        assertTrue(failed.await(2, TimeUnit.SECONDS), "onError was not invoked");
+        assertTrue(seen.get() instanceof CountersTransportException);
+        assertEquals(cause, seen.get().getCause());
+    }
+
+    @Test
     void closeStopsTimerAndFlushesRemainder() {
         List<List<Operation>> captured = new CopyOnWriteArrayList<>();
         Batcher b = new Batcher(captured::add, 1000, 60_000, null);
