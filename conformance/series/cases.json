@@ -4,54 +4,143 @@
     {
       "name": "minimal",
       "note": "Only from/to/bucket set; no tz, no mode, gapfill defaulted false ⇒ exactly three params.",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h" },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h"
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h"
+      }
     },
     {
       "name": "gapfill-true",
       "note": "gapfill=true is encoded as the string \"true\".",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d", "gapfill": true },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d", "gapfill": "true" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d",
+        "gapfill": true
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d",
+        "gapfill": "true"
+      }
     },
     {
       "name": "gapfill-false-omitted",
       "note": "gapfill=false must NOT appear in the query string at all (server default is false).",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d", "gapfill": false },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d",
+        "gapfill": false
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d"
+      }
     },
     {
       "name": "tz-passthrough",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z", "bucket": "1mo", "tz": "Europe/London" },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z", "bucket": "1mo", "tz": "Europe/London" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-02-01T00:00:00Z",
+        "bucket": "1mo",
+        "tz": "Europe/London"
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-02-01T00:00:00Z",
+        "bucket": "1mo",
+        "tz": "Europe/London"
+      }
     },
     {
       "name": "mode-passthrough",
       "note": "When an SDK exposes `mode`, an explicit mode reaches the query string (today the enum has one value, `delta`, but dropping it silently is a trap — B8).",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "mode": "delta" },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "mode": "delta" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h",
+        "mode": "delta"
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h",
+        "mode": "delta"
+      }
     },
     {
       "name": "all-params",
-      "params": { "from": "2026-03-01T00:00:00Z", "to": "2026-03-08T00:00:00Z", "bucket": "1w", "mode": "delta", "tz": "America/New_York", "gapfill": true },
-      "query": { "from": "2026-03-01T00:00:00Z", "to": "2026-03-08T00:00:00Z", "bucket": "1w", "mode": "delta", "tz": "America/New_York", "gapfill": "true" }
+      "params": {
+        "from": "2026-03-01T00:00:00Z",
+        "to": "2026-03-08T00:00:00Z",
+        "bucket": "1w",
+        "mode": "delta",
+        "tz": "America/New_York",
+        "gapfill": true
+      },
+      "query": {
+        "from": "2026-03-01T00:00:00Z",
+        "to": "2026-03-08T00:00:00Z",
+        "bucket": "1w",
+        "mode": "delta",
+        "tz": "America/New_York",
+        "gapfill": "true"
+      }
     },
     {
       "name": "member-param-passthrough",
       "note": "series?member=<key> selects one member's series (MemberSeriesResponse). The member key reaches the query verbatim; it is validated against member-keys.json before the query is built (no additional encoding).",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "member": "alice" },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "member": "alice" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h",
+        "member": "alice"
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h",
+        "member": "alice"
+      }
     },
     {
       "name": "groupby-member-passthrough",
       "note": "series?groupBy=member returns the dense per-member multi-series (MemberGroupSeriesResponse). `groupBy` reaches the query as the literal string \"member\" (its only value).",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d", "groupBy": "member" },
-      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d", "groupBy": "member" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d",
+        "groupBy": "member"
+      },
+      "query": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1d",
+        "groupBy": "member"
+      }
     },
     {
       "name": "member-and-groupby-locally-exclusive",
       "note": "member and groupBy are mutually exclusive (the server returns 400 — see requests.json member-series-member-and-groupby-400). An SDK that exposes both must reject the combination client-side BEFORE issuing the request; the error carries the 'validation' taxonomy type (conformance/errors). A case with `expect.taxonomy` has no `query` — the contract is that encoding raises, not that a request is sent.",
-      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "member": "alice", "groupBy": "member" },
-      "expect": { "taxonomy": "validation" }
+      "params": {
+        "from": "2026-01-01T00:00:00Z",
+        "to": "2026-01-02T00:00:00Z",
+        "bucket": "1h",
+        "member": "alice",
+        "groupBy": "member"
+      },
+      "expect": {
+        "taxonomy": "validation"
+      }
     }
   ],
   "parse": [
@@ -61,10 +150,19 @@
         "counterKey": "signups",
         "bucket": "1h",
         "mode": "delta",
-        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-01T02:00:00Z" },
+        "range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-01-01T02:00:00Z"
+        },
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "5" },
-          { "t": "2026-01-01T01:00:00Z", "v": "-3" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "5"
+          },
+          {
+            "t": "2026-01-01T01:00:00Z",
+            "v": "-3"
+          }
         ]
       },
       "expect": {
@@ -72,8 +170,14 @@
         "bucket": "1h",
         "mode": "delta",
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "5" },
-          { "t": "2026-01-01T01:00:00Z", "v": "-3" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "5"
+          },
+          {
+            "t": "2026-01-01T01:00:00Z",
+            "v": "-3"
+          }
         ]
       }
     },
@@ -84,7 +188,10 @@
         "counterKey": "signups",
         "bucket": "1d",
         "mode": "delta",
-        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z" },
+        "range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-01-02T00:00:00Z"
+        },
         "points": []
       },
       "expect": {
@@ -101,9 +208,15 @@
         "counterKey": "views",
         "bucket": "1mo",
         "mode": "delta",
-        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z" },
+        "range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-02-01T00:00:00Z"
+        },
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "170141183460469231731687303715884105728" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "170141183460469231731687303715884105728"
+          }
         ]
       },
       "expect": {
@@ -111,7 +224,10 @@
         "bucket": "1mo",
         "mode": "delta",
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "170141183460469231731687303715884105728" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "170141183460469231731687303715884105728"
+          }
         ]
       }
     },
@@ -124,10 +240,19 @@
         "member": "alice",
         "bucket": "1h",
         "mode": "delta",
-        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-01T02:00:00Z" },
+        "range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-01-01T02:00:00Z"
+        },
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "5" },
-          { "t": "2026-01-01T01:00:00Z", "v": "-3" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "5"
+          },
+          {
+            "t": "2026-01-01T01:00:00Z",
+            "v": "-3"
+          }
         ]
       },
       "expect": {
@@ -136,32 +261,54 @@
         "bucket": "1h",
         "mode": "delta",
         "points": [
-          { "t": "2026-01-01T00:00:00Z", "v": "5" },
-          { "t": "2026-01-01T01:00:00Z", "v": "-3" }
+          {
+            "t": "2026-01-01T00:00:00Z",
+            "v": "5"
+          },
+          {
+            "t": "2026-01-01T01:00:00Z",
+            "v": "-3"
+          }
         ]
       }
     },
     {
       "name": "member-group-series-two-members",
       "kind": "memberGroupSeries",
-      "note": "A `MemberGroupSeriesResponse` body (series?groupBy=member): a `series` array of {member, points}. Two members x two points. There is no top-level `mode` on this shape (openapi.yaml MemberGroupSeriesResponse). Deltas stay arbitrary-precision decimal strings.",
+      "note": "A `MemberGroupSeriesResponse` body (series?groupBy=member): a `series` array of {member, points}. Two members x two points. `mode` IS present and required on this shape (openapi.yaml MemberGroupSeriesResponse: required [counterKey, bucket, mode, range, series]) — the server always sends it. Deltas stay arbitrary-precision decimal strings.",
       "body": {
         "counterKey": "signups",
         "bucket": "1h",
-        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-01T02:00:00Z" },
+        "mode": "sum",
+        "range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-01-01T02:00:00Z"
+        },
         "series": [
           {
             "member": "alice",
             "points": [
-              { "t": "2026-01-01T00:00:00Z", "v": "5" },
-              { "t": "2026-01-01T01:00:00Z", "v": "2" }
+              {
+                "t": "2026-01-01T00:00:00Z",
+                "v": "5"
+              },
+              {
+                "t": "2026-01-01T01:00:00Z",
+                "v": "2"
+              }
             ]
           },
           {
             "member": "bob",
             "points": [
-              { "t": "2026-01-01T00:00:00Z", "v": "0" },
-              { "t": "2026-01-01T01:00:00Z", "v": "-4" }
+              {
+                "t": "2026-01-01T00:00:00Z",
+                "v": "0"
+              },
+              {
+                "t": "2026-01-01T01:00:00Z",
+                "v": "-4"
+              }
             ]
           }
         ]
@@ -169,19 +316,32 @@
       "expect": {
         "counterKey": "signups",
         "bucket": "1h",
+        "mode": "sum",
         "series": [
           {
             "member": "alice",
             "points": [
-              { "t": "2026-01-01T00:00:00Z", "v": "5" },
-              { "t": "2026-01-01T01:00:00Z", "v": "2" }
+              {
+                "t": "2026-01-01T00:00:00Z",
+                "v": "5"
+              },
+              {
+                "t": "2026-01-01T01:00:00Z",
+                "v": "2"
+              }
             ]
           },
           {
             "member": "bob",
             "points": [
-              { "t": "2026-01-01T00:00:00Z", "v": "0" },
-              { "t": "2026-01-01T01:00:00Z", "v": "-4" }
+              {
+                "t": "2026-01-01T00:00:00Z",
+                "v": "0"
+              },
+              {
+                "t": "2026-01-01T01:00:00Z",
+                "v": "-4"
+              }
             ]
           }
         ]

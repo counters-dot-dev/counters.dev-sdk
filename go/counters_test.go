@@ -1684,9 +1684,13 @@ func assertWindowLeaderboard(t *testing.T, got *WindowLeaderboard, exp map[strin
 	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) {
 		t.Errorf("window leaderboard=%+v, expect=%v", got, exp)
 	}
-	// The window group total is non-nil only on sum boards; the conformance vectors carry sum boards.
-	if got.Total == nil || *got.Total != exp["total"].(string) {
-		t.Errorf("window total=%v, want %q", got.Total, exp["total"])
+	// The window group total is non-nil only on sum boards; score boards (min/max/latest) omit it.
+	if expTotal, ok := exp["total"]; ok {
+		if got.Total == nil || *got.Total != expTotal.(string) {
+			t.Errorf("window total=%v, want %v", got.Total, expTotal)
+		}
+	} else if got.Total != nil {
+		t.Errorf("window total=%v, want nil (score board)", *got.Total)
 	}
 	wantStart, err := time.Parse(time.RFC3339, exp["effectiveStart"].(string))
 	if err != nil {

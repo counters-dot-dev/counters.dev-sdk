@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Counters API
-  version: 0.5.1
-  summary: Multi-tenant arbitrary-precision counter service.
+  version: 0.6.0
+  summary: Arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
     (drift-checked in CI; there is no client codegen).
@@ -14,9 +14,9 @@ info:
     - **Idempotency:** every write — `add`, `subtract`, `clear`, `delete`, and the member operations — accepts an
       `Idempotency-Key` header. Retrying with the same key is safe and is not double-applied (at-least-once delivery +
       dedup = effectively-once): the retry replays the original result (same value/epoch, or the original `204` for a
-      delete) instead of re-running the write. A key is scoped to the operation that first used it; reusing the same key
-      for a **different** operation (e.g. an `add` key replayed on a `clear`) is rejected with `409 Conflict` rather than
-      returning a result the second operation never produced.
+      delete) instead of re-running the write. The guaranteed deduplication window is six hours. A key is scoped to the
+      operation that first used it; reusing the same key for a **different** operation (e.g. an `add` key replayed on a
+      `clear`) is rejected with `409 Conflict` rather than returning a result the second operation never produced.
     - **Auth:** SDK/machine calls use an organization API key (HTTP Bearer). All data is scoped to the key's organization.
     - **Counters may go negative.** `clear` resets to zero by starting a new epoch; historical series are retained.
 
@@ -427,6 +427,7 @@ paths:
       responses:
         '204': { description: Deleted. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
@@ -498,6 +499,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Counter' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
@@ -683,6 +685,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/MemberRemoved' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/QuotaExceeded' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
@@ -796,8 +799,9 @@ paths:
       summary: Apply a batch of operations
       description: |
         The SDK's primary write path. Operations are coalesced client-side and submitted together. Each operation
-        carries its own idempotency key, so the batch is safe to retry. The HTTP call succeeding means the batch was
-        accepted — inspect each per-operation result.
+        carries its own idempotency key (there is no batch-level key), so the batch is safe to retry. The HTTP call
+        succeeding means the batch was accepted — inspect each per-operation result, including a possible `403`
+        live-idempotency-key-cap error.
       tags: [operations]
       requestBody:
         required: true
@@ -986,7 +990,18 @@ components:
       name: Idempotency-Key
       in: header
       required: false
-      description: Client-supplied key; retries with the same key are de-duplicated within the dedup window.
+      description: |
+        Client-supplied key for effectively-once writes. The SDKs send a fresh key on every write; a batch carries
+        one key per operation, not one key for the HTTP request. The guaranteed deduplication window is six hours:
+        retrying the same operation with the same key during that window replays its original result. Keys older than
+        six hours are eligible for pruning, so reusing one later may execute a new operation. Reusing a live key for a
+        different operation returns `409 Conflict`.
+
+        Each organization also has a plan-derived live-key cap, defaulted to 110% of the maximum writes its enforced
+        rate limit permits during six hours. Traffic within that rate limit cannot exhaust the cap. If the cap is
+        exhausted, a standalone write returns `403 Forbidden`; a batch reports an `error` result with status `403` for
+        that operation. No `Retry-After` header is sent because the service does not promise an exact recovery time.
+        Do not retry automatically; retry only after older keys have left the six-hour window.
       schema: { type: string, maxLength: 255 }
     Cursor:
       name: cursor
@@ -1487,7 +1502,9 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     QuotaExceeded:
-      description: A plan limit was reached (e.g. maximum counters or the monthly ops quota).
+      description: >-
+        A plan-derived limit was reached (e.g. maximum counters, monthly ops quota, or the live idempotency-key cap).
+        Idempotency-cap responses do not include Retry-After; retry only after older keys leave the six-hour window.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/QuotaProblem' }
