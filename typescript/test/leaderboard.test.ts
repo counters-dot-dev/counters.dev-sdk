@@ -120,12 +120,69 @@ describe("leaderboard conformance — parse (response → typed fields)", () => 
         break;
     }
     assertFields(result, c.expect);
+    assertNativeTimestamps(result, c);
+  });
+
+  it("uses the requested all-time variant when the response carries a stray window field", async () => {
+    const client = clientWith(
+      mockFetch(() =>
+        jsonResponse(200, {
+          key: "scores",
+          mode: "max",
+          epoch: 0,
+          order: "desc",
+          memberCount: 1,
+          limit: 100,
+          offset: 0,
+          window: null,
+          entries: [
+            {
+              rank: 1,
+              member: "alice",
+              value: "10",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const result = await client.counter("scores").leaderboard();
+    expect(result.entries[0]?.updatedAt).toBeInstanceOf(Date);
+    expect(result.entries[0]?.updatedAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    await client.close();
   });
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────────────────────────
 
 const STRING_FIELDS = new Set(["value", "total", "memberValue", "percentile"]);
+
+function assertNativeTimestamps(actual: Record<string, unknown>, vector: ParseCase): void {
+  if (vector.kind === "leaderboard") {
+    const actualEntries = actual.entries as Record<string, unknown>[];
+    const wireEntries = vector.body.entries as Record<string, unknown>[];
+    actualEntries.forEach((entry, i) => {
+      const updatedAt = entry.updatedAt;
+      expect(updatedAt, `entry ${i} updatedAt must be a Date`).toBeInstanceOf(Date);
+      expect((updatedAt as Date).toISOString()).toBe(
+        new Date(wireEntries[i]!.updatedAt as string).toISOString(),
+      );
+    });
+  }
+  if (vector.kind === "windowLeaderboard") {
+    const entries = actual.entries as Record<string, unknown>[];
+    entries.forEach((entry, i) => {
+      expect(entry, `window entry ${i} must not gain updatedAt`).not.toHaveProperty("updatedAt");
+    });
+  }
+  if (vector.kind === "memberSnapshot") {
+    expect(actual.updatedAt, "member snapshot updatedAt must be a Date").toBeInstanceOf(Date);
+    expect((actual.updatedAt as Date).toISOString()).toBe(
+      new Date(vector.body.updatedAt as string).toISOString(),
+    );
+  }
+}
 
 function assertFields(actual: Record<string, unknown>, expected: Record<string, unknown>): void {
   for (const [k, v] of Object.entries(expected)) {

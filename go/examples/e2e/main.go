@@ -358,6 +358,7 @@ func leaderboards() {
 	assertEq(lb.MemberCount, 3, "leaderboard member count")
 	assertEq(lb.Entries[0].Member, "bob", "rank 1 member")
 	assertEq(lb.Entries[0].Value, "25", "rank 1 value")
+	assert(!lb.Entries[0].UpdatedAt.IsZero(), "leaderboard entry updatedAt decodes as time.Time")
 	assertEq(lb.Entries[1].Rank, 2, "tie rank")
 	assertEq(lb.Entries[2].Rank, 2, "tie rank shared")
 
@@ -373,6 +374,7 @@ func leaderboards() {
 	assertEq(snap.Rank, 1, "bob snapshot rank")
 	assertEq(snap.Value, "25", "bob snapshot value")
 	assertEq(snap.Percentile, "100.00", "leader percentile")
+	assert(!snap.UpdatedAt.IsZero(), "member snapshot updatedAt decodes as time.Time")
 
 	removed, err := carol.Remove(ctx)
 	invoked["MemberHandle.Remove"] = true

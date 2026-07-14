@@ -16,6 +16,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -117,6 +118,8 @@ class ClientTest {
             assertEquals("c", counter.key());
             assertEquals("5", counter.value());
             assertEquals(0, counter.epoch());
+            assertNull(counter.createdAt(), "absent optional createdAt must stay null");
+            assertNull(counter.updatedAt(), "absent optional updatedAt must stay null");
 
             Recorded r = recorded.get(0);
             assertEquals("POST", r.method());
@@ -628,7 +631,9 @@ class ClientTest {
     @Test
     void listSendsPaginationAndParsesPage() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200,
-                "{\"data\":[{\"key\":\"a\",\"value\":\"1\",\"epoch\":0},"
+                "{\"data\":[{\"key\":\"a\",\"value\":\"1\",\"epoch\":0,"
+                        + "\"createdAt\":\"2026-01-01T00:00:00Z\","
+                        + "\"updatedAt\":\"2026-01-01T00:00:01Z\"},"
                         + "{\"key\":\"b\",\"value\":\"-2\",\"epoch\":1}],\"nextCursor\":\"n1\"}"));
         try (CountersClient c = client(baseUrl)) {
             CounterPage page = c.list("abc", 2);
@@ -638,7 +643,11 @@ class ClientTest {
             assertEquals("2", q.get("limit"));
             assertEquals(2, page.data().size());
             assertEquals("a", page.data().get(0).key());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), page.data().get(0).createdAt());
+            assertEquals(Instant.parse("2026-01-01T00:00:01Z"), page.data().get(0).updatedAt());
             assertEquals("-2", page.data().get(1).value());
+            assertNull(page.data().get(1).createdAt(), "absent optional createdAt must stay null");
+            assertNull(page.data().get(1).updatedAt(), "absent optional updatedAt must stay null");
             assertEquals("n1", page.nextCursor());
 
             CounterPage first = c.list();

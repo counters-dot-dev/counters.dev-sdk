@@ -46,6 +46,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
@@ -299,6 +300,8 @@ public final class E2e {
             checkEq(lb.entries().get(0).member(), "bob", "rank 1 is bob");
             checkEq(lb.entries().get(0).rank(), 1L, "bob is rank 1");
             checkEq(lb.entries().get(0).value(), "25", "bob value");
+            Instant leaderboardUpdatedAt = lb.entries().get(0).updatedAt();
+            check(leaderboardUpdatedAt != null, "leaderboard entry carries its required updatedAt instant");
             checkEq(lb.entries().get(1).rank(), 2L, "alice/carol tie at rank 2");
             checkEq(lb.entries().get(2).rank(), 2L, "the tie shares rank 2");
 
@@ -313,6 +316,8 @@ public final class E2e {
             checkEq(snap.value(), "25", "bob snapshot value");
             checkEq(snap.percentile(), "100.00", "the leader's percentile is 100.00");
             check(snap.percentile() instanceof String, "percentile stays a string");
+            Instant snapshotUpdatedAt = snap.updatedAt();
+            check(snapshotUpdatedAt != null, "member snapshot carries its required updatedAt instant");
 
             checkEq(carol.remove().value(), "30", "board total after removing carol (40 - 10)");
             INVOKED.add("MemberHandle.remove");

@@ -311,11 +311,11 @@ type WindowLeaderboardParams struct {
 // LeaderboardEntry is one ranked member. Value is an arbitrary-precision integer string;
 // Metadata is nil when the entry carries none.
 type LeaderboardEntry struct {
-	Rank      int     `json:"rank"`
-	Member    string  `json:"member"`
-	Value     string  `json:"value"`
-	Metadata  *string `json:"metadata,omitempty"`
-	UpdatedAt string  `json:"updatedAt"`
+	Rank      int       `json:"rank"`
+	Member    string    `json:"member"`
+	Value     string    `json:"value"`
+	Metadata  *string   `json:"metadata,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Leaderboard is a ranked page of a counter's members. Total (the group total) is non-nil
@@ -402,16 +402,16 @@ type MemberRemoved struct {
 // MemberSnapshot is a member's rank, percentile, and standing value within its board.
 // Percentile is a scale-2 decimal string such as "83.33" — never a float.
 type MemberSnapshot struct {
-	Key         string  `json:"key"`
-	Member      string  `json:"member"`
-	Value       string  `json:"value"`
-	Metadata    *string `json:"metadata,omitempty"`
-	Rank        int     `json:"rank"`
-	Percentile  string  `json:"percentile"`
-	MemberCount int     `json:"memberCount"`
-	Mode        string  `json:"mode"`
-	Epoch       int64   `json:"epoch"`
-	UpdatedAt   string  `json:"updatedAt"`
+	Key         string    `json:"key"`
+	Member      string    `json:"member"`
+	Value       string    `json:"value"`
+	Metadata    *string   `json:"metadata,omitempty"`
+	Rank        int       `json:"rank"`
+	Percentile  string    `json:"percentile"`
+	MemberCount int       `json:"memberCount"`
+	Mode        string    `json:"mode"`
+	Epoch       int64     `json:"epoch"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // MemberSeriesResponse is one member's per-bucket delta series (series?member=).

@@ -2,6 +2,7 @@ package dev.counters.sdk;
 
 import java.math.BigInteger;
 import java.net.http.HttpClient;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -321,6 +322,11 @@ public final class CountersClient implements AutoCloseable {
         return v == null ? null : v.toString();
     }
 
+    private static Instant instant(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        return v == null ? null : Instant.parse(v.toString());
+    }
+
     private static long longVal(Map<String, Object> m, String key) {
         return m.get(key) instanceof Number n ? n.longValue() : 0L;
     }
@@ -356,7 +362,7 @@ public final class CountersClient implements AutoCloseable {
 
     private static Counter toCounter(Map<String, Object> m) {
         return new Counter(str(m, "key"), str(m, "value"), longVal(m, "epoch"),
-                str(m, "createdAt"), str(m, "updatedAt"));
+                instant(m, "createdAt"), instant(m, "updatedAt"));
     }
 
     private static CounterPage toCounterPage(Map<String, Object> m) {
@@ -395,7 +401,7 @@ public final class CountersClient implements AutoCloseable {
         for (Object item : asList(m.get("entries"))) {
             Map<String, Object> em = asMap(item);
             entries.add(new LeaderboardEntry(longVal(em, "rank"), str(em, "member"), str(em, "value"),
-                    str(em, "metadata"), str(em, "updatedAt")));
+                    str(em, "metadata"), instant(em, "updatedAt")));
         }
         return new Leaderboard(
                 str(m, "key"),
@@ -449,7 +455,7 @@ public final class CountersClient implements AutoCloseable {
                 longVal(m, "memberCount"),
                 str(m, "mode"),
                 longVal(m, "epoch"),
-                str(m, "updatedAt"));
+                instant(m, "updatedAt"));
     }
 
     private static MemberSeriesResponse toMemberSeries(Map<String, Object> m) {

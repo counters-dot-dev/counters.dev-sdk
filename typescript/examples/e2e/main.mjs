@@ -85,6 +85,8 @@ async function tour() {
   invoked.add("CounterHandle.addNow");
   assertEq(first.value, "5", "addNow(5) on a fresh counter");
   assertEq(first.epoch, 0, "fresh counter epoch");
+  assert(first.createdAt === undefined || first.createdAt instanceof Date, "counter createdAt is a Date when present");
+  assert(first.updatedAt === undefined || first.updatedAt instanceof Date, "counter updatedAt is a Date when present");
 
   const afterSub = await signups.subtractNow("2");
   invoked.add("CounterHandle.subtractNow");
@@ -225,6 +227,7 @@ async function leaderboards() {
   assertEq(lb.entries[0].member, "bob", "rank 1 is bob");
   assertEq(lb.entries[0].rank, 1, "bob is rank 1");
   assertEq(lb.entries[0].value, "25", "bob value");
+  assert(lb.entries[0].updatedAt instanceof Date, "leaderboard entry updatedAt is a Date");
   assertEq(lb.entries[1].rank, 2, "alice/carol tie at rank 2 (competition rank)");
   assertEq(lb.entries[2].rank, 2, "the tie shares rank 2");
 
@@ -241,6 +244,7 @@ async function leaderboards() {
   assertEq(snap.value, "25", "bob snapshot value");
   assertEq(snap.percentile, "100.00", "the leader's percentile is 100.00");
   assert(typeof snap.percentile === "string", "percentile stays a string");
+  assert(snap.updatedAt instanceof Date, "member snapshot updatedAt is a Date");
 
   // Remove a member: a sum board compensates the removed value out of the group total.
   const removed = await carol.remove();

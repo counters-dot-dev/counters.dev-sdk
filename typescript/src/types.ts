@@ -22,8 +22,8 @@ export interface Counter {
   key: string;
   value: Value;
   epoch: number;
-  createdAt?: string;
-  updatedAt?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface ValueResponse {
@@ -150,7 +150,7 @@ export interface LeaderboardEntry {
   value: Value;
   /** Opaque per-entry payload; present only when the entry carries it. */
   metadata?: string;
-  updatedAt: string;
+  updatedAt: Date;
 }
 
 export interface Leaderboard {
@@ -247,7 +247,7 @@ export interface MemberSnapshot {
   memberCount: number;
   mode: Mode;
   epoch: number;
-  updatedAt: string;
+  updatedAt: Date;
 }
 
 // ── Dimensional member series (series?member= / series?groupBy=member) ──────────────────────────────

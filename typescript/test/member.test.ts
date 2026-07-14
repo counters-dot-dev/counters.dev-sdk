@@ -100,6 +100,8 @@ describe("MemberHandle — HTTP wiring", () => {
     expect(idem).toBeUndefined();
     expect(snap.percentile).toBe("83.33");
     expect(typeof snap.percentile).toBe("string");
+    expect(snap.updatedAt).toBeInstanceOf(Date);
+    expect(snap.updatedAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
   });
 
   it("remove DELETEs …/members/{member} with an idempotency key", async () => {

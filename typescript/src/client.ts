@@ -21,6 +21,7 @@ import type {
   DerivedSeriesResponse,
   DerivedValueResponse,
   Leaderboard,
+  LeaderboardEntry,
   LeaderboardParams,
   MemberApplyOptions,
   MemberGetParams,
@@ -99,9 +100,11 @@ export class CountersClient {
 
   /** List counters in the organization. */
   list(opts: { cursor?: string; limit?: number } = {}): Promise<CounterPage> {
-    return this.http.request<CounterPage>("GET", "/counters", {
-      query: { cursor: opts.cursor, limit: opts.limit },
-    });
+    return this.http
+      .request<WireCounterPage>("GET", "/counters", {
+        query: { cursor: opts.cursor, limit: opts.limit },
+      })
+      .then(parseCounterPage);
   }
 
   /** Current quota state for the organization (month-to-date ops, counter headroom, plan limits). */
@@ -138,25 +141,31 @@ export class CountersClient {
 
   /** @internal */
   addNow(key: string, amount: bigint, opts?: ApplyOptions): Promise<Counter> {
-    return this.http.request<Counter>("POST", `/counters/${enc(key)}/add`, {
-      body: applyBody(amount, opts),
-      idempotencyKey: newIdempotencyKey(),
-    });
+    return this.http
+      .request<WireCounter>("POST", `/counters/${enc(key)}/add`, {
+        body: applyBody(amount, opts),
+        idempotencyKey: newIdempotencyKey(),
+      })
+      .then(parseCounter);
   }
 
   /** @internal */
   subtractNow(key: string, amount: bigint, opts?: ApplyOptions): Promise<Counter> {
-    return this.http.request<Counter>("POST", `/counters/${enc(key)}/subtract`, {
-      body: applyBody(amount, opts),
-      idempotencyKey: newIdempotencyKey(),
-    });
+    return this.http
+      .request<WireCounter>("POST", `/counters/${enc(key)}/subtract`, {
+        body: applyBody(amount, opts),
+        idempotencyKey: newIdempotencyKey(),
+      })
+      .then(parseCounter);
   }
 
   /** @internal */
   clearCounter(key: string): Promise<Counter> {
-    return this.http.request<Counter>("POST", `/counters/${enc(key)}/clear`, {
-      idempotencyKey: newIdempotencyKey(),
-    });
+    return this.http
+      .request<WireCounter>("POST", `/counters/${enc(key)}/clear`, {
+        idempotencyKey: newIdempotencyKey(),
+      })
+      .then(parseCounter);
   }
 
   /** @internal */
@@ -214,28 +223,29 @@ export class CountersClient {
     params: LeaderboardParams & { window?: Window },
   ): Promise<Leaderboard | WindowLeaderboard> {
     if (params.window !== undefined) assertWindow(params.window);
-    return this.http.request<Leaderboard | WindowLeaderboard>(
-      "GET",
-      `/counters/${enc(key)}/leaderboard`,
-      {
-        query: {
-          limit: params.limit,
-          offset: params.offset,
-          order: params.order,
-          epoch: params.epoch,
-          window: params.window,
-        },
+    const path = `/counters/${enc(key)}/leaderboard`;
+    const opts = {
+      query: {
+        limit: params.limit,
+        offset: params.offset,
+        order: params.order,
+        epoch: params.epoch,
+        window: params.window,
       },
-    );
+    };
+    if (params.window !== undefined) {
+      return this.http.request<WindowLeaderboard>("GET", path, opts);
+    }
+    return this.http.request<WireLeaderboard>("GET", path, opts).then(parseLeaderboard);
   }
 
   /** @internal */
   getMember(key: string, member: string, params?: MemberGetParams): Promise<MemberSnapshot> {
-    return this.http.request<MemberSnapshot>(
-      "GET",
-      `/counters/${enc(key)}/members/${enc(member)}`,
-      { query: { epoch: params?.epoch, order: params?.order } },
-    );
+    return this.http
+      .request<WireMemberSnapshot>("GET", `/counters/${enc(key)}/members/${enc(member)}`, {
+        query: { epoch: params?.epoch, order: params?.order },
+      })
+      .then(parseMemberSnapshot);
   }
 
   /** @internal */
@@ -479,6 +489,46 @@ export class DerivedHandle {
 
 function enc(key: string): string {
   return encodeURIComponent(key);
+}
+
+type WireCounter = Omit<Counter, "createdAt" | "updatedAt"> & {
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+type WireCounterPage = Omit<CounterPage, "data"> & { data: WireCounter[] };
+
+type WireLeaderboardEntry = Omit<LeaderboardEntry, "updatedAt"> & { updatedAt: string };
+
+type WireLeaderboard = Omit<Leaderboard, "entries"> & { entries: WireLeaderboardEntry[] };
+
+type WireMemberSnapshot = Omit<MemberSnapshot, "updatedAt"> & { updatedAt: string };
+
+function parseCounter(counter: WireCounter): Counter {
+  const { createdAt, updatedAt, ...fields } = counter;
+  return {
+    ...fields,
+    ...(createdAt == null ? {} : { createdAt: new Date(createdAt) }),
+    ...(updatedAt == null ? {} : { updatedAt: new Date(updatedAt) }),
+  };
+}
+
+function parseCounterPage(page: WireCounterPage): CounterPage {
+  return { ...page, data: page.data.map(parseCounter) };
+}
+
+function parseLeaderboard(leaderboard: WireLeaderboard): Leaderboard {
+  return {
+    ...leaderboard,
+    entries: leaderboard.entries.map((entry) => ({
+      ...entry,
+      updatedAt: new Date(entry.updatedAt),
+    })),
+  };
+}
+
+function parseMemberSnapshot(snapshot: WireMemberSnapshot): MemberSnapshot {
+  return { ...snapshot, updatedAt: new Date(snapshot.updatedAt) };
 }
 
 function toIso(t: string | Date): string {

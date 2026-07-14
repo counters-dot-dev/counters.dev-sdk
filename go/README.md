@@ -124,8 +124,14 @@ fmt.Println(r.MemberAccepted) // false when the standing best was better
 recent, _ := board.WindowLeaderboard(ctx, counters.WindowLeaderboardParams{Window: "7d"})
 ```
 
-Fields the API may omit are pointers: `Leaderboard.Total` (sum boards only), `MemberValue.Value`,
-entry/snapshot `Metadata`, and the usage quota fields — `nil` means "not present", never zero.
+The `CreatedAt`/`UpdatedAt` response fields use Go's native `time.Time`: required
+`LeaderboardEntry.UpdatedAt` and `MemberSnapshot.UpdatedAt` values are `time.Time`, while optional
+`Counter.CreatedAt` and `Counter.UpdatedAt` values are `*time.Time` and stay `nil` when absent. The
+standard JSON decoder parses their RFC 3339 wire values directly.
+
+Other fields the API may omit are pointers: `Leaderboard.Total` (sum boards only),
+`MemberValue.Value`, entry/snapshot `Metadata`, and the usage quota fields — `nil` means "not
+present", never zero.
 
 ## Derived counters
 

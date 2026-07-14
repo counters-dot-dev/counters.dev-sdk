@@ -52,12 +52,37 @@ describe("CountersClient", () => {
     const seen: string[] = [];
     const f = mockFetch((url) => {
       seen.push(url.pathname);
-      return jsonResponse(200, { key: "c", value: "1", epoch: 0 });
+      return jsonResponse(200, {
+        key: "c",
+        value: "1",
+        epoch: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:01Z",
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     const r = await c.counter("c").addNow(1);
     expect(seen[0]).toBe("/v1/counters/c/add");
     expect(r.value).toBe("1");
+    expect(r.createdAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    expect(r.updatedAt?.toISOString()).toBe("2026-01-01T00:00:01.000Z");
+  });
+
+  it("subtractNow parses counter timestamps into Dates", async () => {
+    const f = mockFetch(() =>
+      jsonResponse(200, {
+        key: "c",
+        value: "-1",
+        epoch: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:02Z",
+      }),
+    );
+    const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
+    const r = await c.counter("c").subtractNow(1);
+    expect(r.createdAt).toBeInstanceOf(Date);
+    expect(r.updatedAt).toBeInstanceOf(Date);
+    expect(r.updatedAt?.toISOString()).toBe("2026-01-01T00:00:02.000Z");
   });
 
   it("value() GETs the value endpoint", async () => {

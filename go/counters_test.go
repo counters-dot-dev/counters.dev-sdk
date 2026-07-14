@@ -280,13 +280,9 @@ func TestAddNowAndValue(t *testing.T) {
 }
 
 func TestCounterDecodesCreatedAtUpdatedAt(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"key":"c","value":"5","epoch":0,"createdAt":"2026-07-01T12:00:00Z","updatedAt":"2026-07-02T08:30:00Z"}`)
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0,"createdAt":"2026-07-01T12:00:00Z","updatedAt":"2026-07-02T08:30:00Z"}`), nil
+	})
 	h, _ := c.Counter("c")
 	ctr, err := h.AddNow(context.Background(), 5)
 	if err != nil {
@@ -304,13 +300,9 @@ func TestCounterDecodesCreatedAtUpdatedAt(t *testing.T) {
 }
 
 func TestCounterOmitsTimestampsWhenAbsent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"key":"c","value":"5","epoch":0}`)
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0}`), nil
+	})
 	h, _ := c.Counter("c")
 	ctr, err := h.AddNow(context.Background(), 5)
 	if err != nil {
@@ -318,6 +310,58 @@ func TestCounterOmitsTimestampsWhenAbsent(t *testing.T) {
 	}
 	if ctr.CreatedAt != nil || ctr.UpdatedAt != nil {
 		t.Errorf("expected nil timestamps when the server omits them, got createdAt=%v updatedAt=%v", ctr.CreatedAt, ctr.UpdatedAt)
+	}
+}
+
+func TestRequiredTimestampsRoundTripAsTime(t *testing.T) {
+	const wireTimestamp = "2026-01-01T00:00:00Z"
+	want, err := time.Parse(time.RFC3339, wireTimestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		body string
+		read func([]byte) (time.Time, error)
+	}{
+		{
+			name: "leaderboard entry",
+			body: `{"rank":1,"member":"alice","value":"5","updatedAt":"` + wireTimestamp + `"}`,
+			read: func(body []byte) (time.Time, error) {
+				var entry LeaderboardEntry
+				err := json.Unmarshal(body, &entry)
+				return entry.UpdatedAt, err
+			},
+		},
+		{
+			name: "member snapshot",
+			body: `{"key":"lb","member":"alice","value":"5","rank":1,"percentile":"100.00","memberCount":1,"mode":"sum","epoch":0,"updatedAt":"` + wireTimestamp + `"}`,
+			read: func(body []byte) (time.Time, error) {
+				var snapshot MemberSnapshot
+				err := json.Unmarshal(body, &snapshot)
+				return snapshot.UpdatedAt, err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.read([]byte(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(want) {
+				t.Fatalf("updatedAt=%v, want %v", got, want)
+			}
+			roundTripped, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(roundTripped) != `"`+wireTimestamp+`"` {
+				t.Errorf("round-tripped timestamp=%s, want %q", roundTripped, wireTimestamp)
+			}
+		})
 	}
 }
 

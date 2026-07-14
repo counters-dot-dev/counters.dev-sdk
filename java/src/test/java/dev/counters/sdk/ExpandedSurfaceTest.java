@@ -18,6 +18,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -181,6 +182,7 @@ class ExpandedSurfaceTest {
             assertEquals(huge, lb.total());
             assertEquals(huge, lb.entries().get(0).value(), "leaderboard values stay strings beyond u64");
             assertEquals(huge, new BigInteger(lb.entries().get(0).value()).toString());
+            assertEquals(Instant.parse("2026-01-01T00:00:02Z"), lb.entries().get(0).updatedAt());
         }
     }
 
@@ -275,6 +277,7 @@ class ExpandedSurfaceTest {
             assertEquals(Map.of("epoch", "4", "order", "asc"), parseQuery(recorded.get(0).query()));
             assertEquals("83.33", snap.percentile(), "percentile stays a scale-2 string");
             assertEquals("room1:500", snap.metadata());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), snap.updatedAt());
         }
     }
 

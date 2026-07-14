@@ -18,6 +18,10 @@ The one thing you must not do is undo that: parse values with `new BigInteger(va
 `new BigDecimal(value)` for derived values), never `Double.parseDouble` or `Long.parseLong` unless
 you know the magnitude fits.
 
+The `createdAt`/`updatedAt` response fields are native `java.time.Instant` values.
+`Counter.createdAt()` and `Counter.updatedAt()` are nullable because those fields are optional;
+`LeaderboardEntry.updatedAt()` and `MemberSnapshot.updatedAt()` are required instants.
+
 ### Counter or leaderboard?
 
 A leaderboard is not a separate product — it is the same counter with **per-member sub-values**.

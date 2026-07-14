@@ -8,6 +8,7 @@ Official TypeScript SDK for [counters.dev](https://counters.dev), the
   `Idempotency-Key`, so retries are safe.
 - Amounts and values are **arbitrary precision**: `bigint` internally, **strings on the wire**. The
   SDK never represents a counter value as a JS `number`. Decimal (derived) values stay strings too.
+- Response timestamps (`createdAt` and `updatedAt`) are native JavaScript `Date` values.
 - This is the **reference SDK** — the dashboard dogfoods it and the other language SDKs mirror its shape.
 
 ## The mental model
@@ -70,6 +71,7 @@ registrations.add(1); // buffered + coalesced, flushed in the background
 // Immediate, confirmed: applies now and returns the new counter state.
 const state = await registrations.addNow("18446744073709551616"); // larger than a u64
 console.log(state.value); // a decimal string, always
+console.log(state.updatedAt?.toISOString()); // timestamps are Date values; counter timestamps are optional
 
 const { value, epoch } = await registrations.value();
 
@@ -127,12 +129,13 @@ const board = client.counter("raid-dps");
 const alice = board.member("alice");
 await alice.add(10);
 await alice.subtract(3);
-const snap = await alice.get(); // rank, percentile ("83.33" — a string), value
+const snap = await alice.get(); // rank, percentile ("83.33" — a string), value, updatedAt (Date)
 await alice.remove();
 
 // Leaderboard (top-N, ranked). `total` is present only on sum boards.
 const lb = await board.leaderboard({ limit: 25, order: "desc" });
-lb.entries.forEach((e) => console.log(e.rank, e.member, e.value)); // value is a string
+lb.entries.forEach((e) => console.log(e.rank, e.member, e.value, e.updatedAt.toISOString()));
+// value is a string; updatedAt is a required Date
 
 // Score board: submit a signed score. `mode` is required on the first submit to a board.
 const scores = client.counter("best-lap");

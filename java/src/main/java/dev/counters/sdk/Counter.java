@@ -1,5 +1,7 @@
 package dev.counters.sdk;
 
+import java.time.Instant;
+
 /**
  * A counter's metadata and current value (mirrors {@code openapi/openapi.yaml}).
  *
@@ -7,4 +9,4 @@ package dev.counters.sdk;
  * {@code long}/{@code double} unless you know it fits; use {@code new java.math.BigInteger(value)}.
  * {@code epoch} is incremented by {@code clear}; the value sums deltas in the current epoch.
  */
-public record Counter(String key, String value, long epoch, String createdAt, String updatedAt) {}
+public record Counter(String key, String value, long epoch, Instant createdAt, Instant updatedAt) {}
