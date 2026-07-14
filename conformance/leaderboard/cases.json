@@ -4,8 +4,18 @@
     {
       "name": "board-read-all-params",
       "note": "GET /v1/counters/{key}/leaderboard?limit&offset&order&epoch. All four are passed through as strings; order is one of asc|desc, epoch/limit/offset are non-negative integers rendered without separators.",
-      "params": { "limit": 25, "offset": 50, "order": "asc", "epoch": 3 },
-      "query": { "limit": "25", "offset": "50", "order": "asc", "epoch": "3" }
+      "params": {
+        "limit": 25,
+        "offset": 50,
+        "order": "asc",
+        "epoch": 3
+      },
+      "query": {
+        "limit": "25",
+        "offset": "50",
+        "order": "asc",
+        "epoch": "3"
+      }
     },
     {
       "name": "board-read-defaults-omitted",
@@ -16,19 +26,33 @@
     {
       "name": "window-read-passthrough",
       "note": "GET /v1/counters/{key}/leaderboard?window=7d returns a WindowLeaderboard. `window` reaches the query verbatim.",
-      "params": { "window": "7d" },
-      "query": { "window": "7d" }
+      "params": {
+        "window": "7d"
+      },
+      "query": {
+        "window": "7d"
+      }
     },
     {
       "name": "window-read-with-limit",
-      "params": { "window": "1h", "limit": 10 },
-      "query": { "window": "1h", "limit": "10" }
+      "params": {
+        "window": "1h",
+        "limit": 10
+      },
+      "query": {
+        "window": "1h",
+        "limit": "10"
+      }
     },
     {
       "name": "window-invalid-value-local-reject",
       "note": "`window` is a fixed enum (1h|6h|12h|1d|7d|30d). An SDK that exposes the windowed read validates it client-side and rejects a bad value with the 'validation' taxonomy type before issuing the request. Error case: has `expect.taxonomy`, no `query`.",
-      "params": { "window": "2h" },
-      "expect": { "taxonomy": "validation" }
+      "params": {
+        "window": "2h"
+      },
+      "expect": {
+        "taxonomy": "validation"
+      }
     }
   ],
   "encodeBody": [
@@ -36,34 +60,66 @@
       "name": "member-add-amount-only",
       "note": "POST /v1/counters/{key}/members/{member}/add body. Only `amount` set: metadata and occurredAt MUST be absent from the body (presence-exact).",
       "op": "memberAdd",
-      "input": { "amount": "10" },
-      "body": { "amount": "10" }
+      "input": {
+        "amount": "10"
+      },
+      "body": {
+        "amount": "10"
+      }
     },
     {
       "name": "member-add-full",
       "note": "amount + metadata + occurredAt all present; each value passes through byte-verbatim (amount is an arbitrary-precision integer string, never reformatted; metadata is opaque).",
       "op": "memberAdd",
-      "input": { "amount": "170141183460469231731687303715884105728", "metadata": "room1:500", "occurredAt": "2026-01-01T00:00:00Z" },
-      "body": { "amount": "170141183460469231731687303715884105728", "metadata": "room1:500", "occurredAt": "2026-01-01T00:00:00Z" }
+      "input": {
+        "amount": "170141183460469231731687303715884105728",
+        "metadata": "room1:500",
+        "occurredAt": "2026-01-01T00:00:00Z"
+      },
+      "body": {
+        "amount": "170141183460469231731687303715884105728",
+        "metadata": "room1:500",
+        "occurredAt": "2026-01-01T00:00:00Z"
+      }
     },
     {
       "name": "member-subtract-amount-only",
       "op": "memberSubtract",
-      "input": { "amount": "3" },
-      "body": { "amount": "3" }
+      "input": {
+        "amount": "3"
+      },
+      "body": {
+        "amount": "3"
+      }
     },
     {
       "name": "member-submit-value-and-mode",
       "note": "POST /v1/counters/{key}/members/{member}/submit body. value + mode; metadata and occurredAt absent.",
       "op": "memberSubmit",
-      "input": { "value": "1502", "mode": "min" },
-      "body": { "value": "1502", "mode": "min" }
+      "input": {
+        "value": "1502",
+        "mode": "min"
+      },
+      "body": {
+        "value": "1502",
+        "mode": "min"
+      }
     },
     {
       "name": "member-submit-full",
       "op": "memberSubmit",
-      "input": { "value": "1417", "mode": "max", "metadata": "room1:400", "occurredAt": "2026-01-01T00:00:00Z" },
-      "body": { "value": "1417", "mode": "max", "metadata": "room1:400", "occurredAt": "2026-01-01T00:00:00Z" }
+      "input": {
+        "value": "1417",
+        "mode": "max",
+        "metadata": "room1:400",
+        "occurredAt": "2026-01-01T00:00:00Z"
+      },
+      "body": {
+        "value": "1417",
+        "mode": "max",
+        "metadata": "room1:400",
+        "occurredAt": "2026-01-01T00:00:00Z"
+      }
     }
   ],
   "parse": [
@@ -81,9 +137,25 @@
         "limit": 100,
         "offset": 0,
         "entries": [
-          { "rank": 1, "member": "bob", "value": "170141183460469231731687303715884105728", "updatedAt": "2026-01-01T00:00:02Z" },
-          { "rank": 2, "member": "alice", "value": "25", "metadata": "room1:500", "updatedAt": "2026-01-01T00:00:00Z" },
-          { "rank": 2, "member": "carol", "value": "10", "updatedAt": "2026-01-01T00:00:01Z" }
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "170141183460469231731687303715884105728",
+            "updatedAt": "2026-01-01T00:00:02Z"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "25",
+            "metadata": "room1:500",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
         ]
       },
       "expect": {
@@ -94,9 +166,22 @@
         "total": "170141183460469231731687303715884105763",
         "memberCount": 3,
         "entries": [
-          { "rank": 1, "member": "bob", "value": "170141183460469231731687303715884105728" },
-          { "rank": 2, "member": "alice", "value": "25", "metadata": "room1:500" },
-          { "rank": 2, "member": "carol", "value": "10" }
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "170141183460469231731687303715884105728"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "25",
+            "metadata": "room1:500"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10"
+          }
         ]
       }
     },
@@ -113,8 +198,19 @@
         "limit": 100,
         "offset": 0,
         "entries": [
-          { "rank": 1, "member": "dan", "value": "1300", "updatedAt": "2026-01-01T00:00:00Z" },
-          { "rank": 2, "member": "alice|bob|carol", "value": "1417", "metadata": "room1:400", "updatedAt": "2026-01-01T00:00:01Z" }
+          {
+            "rank": 1,
+            "member": "dan",
+            "value": "1300",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          },
+          {
+            "rank": 2,
+            "member": "alice|bob|carol",
+            "value": "1417",
+            "metadata": "room1:400",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
         ]
       },
       "expect": {
@@ -125,15 +221,24 @@
         "totalAbsent": true,
         "memberCount": 2,
         "entries": [
-          { "rank": 1, "member": "dan", "value": "1300" },
-          { "rank": 2, "member": "alice|bob|carol", "value": "1417", "metadata": "room1:400" }
+          {
+            "rank": 1,
+            "member": "dan",
+            "value": "1300"
+          },
+          {
+            "rank": 2,
+            "member": "alice|bob|carol",
+            "value": "1417",
+            "metadata": "room1:400"
+          }
         ]
       }
     },
     {
       "name": "window-leaderboard",
       "kind": "windowLeaderboard",
-      "note": "A WindowLeaderboard is always a sum board; it carries `window`, `effectiveStart`/`effectiveEnd` (the floored range actually summed) and a `total`. WindowEntry has no metadata/updatedAt.",
+      "note": "A sum-mode WindowLeaderboard: carries `window`, `effectiveStart`/`effectiveEnd` (the floored range actually summed) and a `total`. `mode` is required on every WindowLeaderboard. WindowEntry has no metadata/updatedAt. See `window-leaderboard-score-mode` for a score board, which has NO `total`.",
       "body": {
         "key": "rocks",
         "mode": "sum",
@@ -146,9 +251,21 @@
         "effectiveStart": "2025-12-25T00:00:00Z",
         "effectiveEnd": "2026-01-01T00:00:00Z",
         "entries": [
-          { "rank": 1, "member": "bob", "value": "25" },
-          { "rank": 2, "member": "alice", "value": "10" },
-          { "rank": 2, "member": "carol", "value": "10" }
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "25"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "10"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10"
+          }
         ]
       },
       "expect": {
@@ -161,9 +278,80 @@
         "effectiveStart": "2025-12-25T00:00:00Z",
         "effectiveEnd": "2026-01-01T00:00:00Z",
         "entries": [
-          { "rank": 1, "member": "bob", "value": "25" },
-          { "rank": 2, "member": "alice", "value": "10" },
-          { "rank": 2, "member": "carol", "value": "10" }
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "25"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "10"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10"
+          }
+        ]
+      }
+    },
+    {
+      "name": "window-leaderboard-score-mode",
+      "kind": "windowLeaderboard",
+      "note": "A score-mode (min/max/latest) WindowLeaderboard has NO `total` — a sum of best values is meaningless, so the server omits it (openapi.yaml: `total` is null on score boards). Parsing MUST tolerate its absence rather than defaulting it to zero or failing. `order` defaults to `asc` for `min` (fastest-first). Entries rank the window-best value.",
+      "body": {
+        "key": "rocks",
+        "mode": "min",
+        "window": "7d",
+        "order": "asc",
+        "memberCount": 3,
+        "limit": 100,
+        "offset": 0,
+        "effectiveStart": "2025-12-25T00:00:00Z",
+        "effectiveEnd": "2026-01-01T00:00:00Z",
+        "entries": [
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "25"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "10"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10"
+          }
+        ]
+      },
+      "expect": {
+        "key": "rocks",
+        "mode": "min",
+        "window": "7d",
+        "order": "asc",
+        "memberCount": 3,
+        "effectiveStart": "2025-12-25T00:00:00Z",
+        "effectiveEnd": "2026-01-01T00:00:00Z",
+        "entries": [
+          {
+            "rank": 1,
+            "member": "bob",
+            "value": "25"
+          },
+          {
+            "rank": 2,
+            "member": "alice",
+            "value": "10"
+          },
+          {
+            "rank": 2,
+            "member": "carol",
+            "value": "10"
+          }
         ]
       }
     },
