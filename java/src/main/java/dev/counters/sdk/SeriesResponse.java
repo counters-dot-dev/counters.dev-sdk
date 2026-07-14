@@ -1,5 +1,6 @@
 package dev.counters.sdk;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -10,10 +11,10 @@ public record SeriesResponse(
         String counterKey,
         String bucket,
         String mode,
-        String tz,
+        String timeZone,
         Range range,
         List<SeriesPoint> points) {
 
-    /** The [from, to) range the series covers, RFC 3339. */
-    public record Range(String from, String to) {}
+    /** The [from, to) range the series covers. */
+    public record Range(Instant from, Instant to) {}
 }

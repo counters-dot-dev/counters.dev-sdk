@@ -1,5 +1,16 @@
-export { CountersClient, CounterHandle, MemberHandle, DerivedHandle } from "./client.js";
-export type { CountersClientOptions } from "./client.js";
+export {
+  CountersClient,
+  CounterHandle,
+  MemberHandle,
+  DerivedHandle,
+  PublishableCountersClient,
+} from "./client.js";
+export type {
+  CountersClientOptions,
+  PublishableCountersClientOptions,
+  PublishableCounterHandle,
+  PublishableMemberHandle,
+} from "./client.js";
 export {
   CountersApiError,
   CountersError,
@@ -27,4 +38,48 @@ export {
   toValue,
 } from "./validation.js";
 export { newIdempotencyKey } from "./idempotency.js";
-export type * from "./types.js";
+// The published type surface, enumerated explicitly so nothing is frozen by accident. Internal wire
+// helpers (`Operation`, `OperationType`, `BatchResult`, `BatchResponse`) are deliberately absent:
+// no public method accepts or returns them — publishing them would freeze a dead-end shape.
+export type {
+  Amount,
+  AmountInput,
+  ApplyOptions,
+  Counter,
+  CounterPage,
+  DecimalValue,
+  DerivedSeriesParams,
+  DerivedSeriesPoint,
+  DerivedSeriesResponse,
+  DerivedValueResponse,
+  Granularity,
+  Leaderboard,
+  LeaderboardEntry,
+  LeaderboardParams,
+  MemberApplyOptions,
+  MemberGetParams,
+  MemberGroupSeriesResponse,
+  MemberRemoved,
+  MemberSeriesEntry,
+  MemberSeriesMode,
+  MemberSeriesResponse,
+  MemberSnapshot,
+  MemberValue,
+  Mode,
+  Order,
+  Problem,
+  SeriesParams,
+  SeriesPoint,
+  SeriesResponse,
+  SubmitOptions,
+  Usage,
+  Value,
+  ValueInput,
+  ValueResponse,
+  Window,
+  WindowEntry,
+  WindowLeaderboard,
+  WindowLeaderboardParams,
+  WriteFailure,
+  WriteOptions,
+} from "./types.js";

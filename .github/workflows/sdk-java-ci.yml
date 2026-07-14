@@ -43,7 +43,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   example:
-    # Compile the example app against the SDK just built. It is deliberately NOT executed: running it
+    # Compile the example apps against the SDK just built. They are deliberately NOT executed: running them
     # requires a live counters.dev service (private repo). This proves the documented example still
     # compiles against the current client surface.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -52,10 +52,12 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
-      - name: Example app — compile against the current client surface
+      - name: Example apps — compile against the current client surface
         id: app
         shell: bash
-        run: gradle --no-daemon -p java/examples/e2e assemble --console=plain 2>&1 | tee /tmp/example.log
+        run: |
+          gradle --no-daemon -p java/examples/e2e assemble --console=plain 2>&1 | tee /tmp/example.log
+          gradle --no-daemon -p java/examples/raid assemble --console=plain 2>&1 | tee -a /tmp/example.log
       - name: PR comment (results)
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true
@@ -70,9 +72,9 @@ jobs:
             [ "$EXAMPLE_OUTCOME" = "success" ] && echo "### ✅ sdk-java" || echo "### ❌ sdk-java"
             printf '%s\n' "$UNIT_SUMMARY"
             if [ "$EXAMPLE_OUTCOME" = "success" ]; then
-              echo "- example app: compiles"
+              echo "- example apps: compile"
             else
-              echo "- example app: **$EXAMPLE_OUTCOME**"
+              echo "- example apps: **$EXAMPLE_OUTCOME**"
               echo '```'
               tail -15 /tmp/example.log 2>/dev/null || echo "no output — see the run log"
               echo '```'

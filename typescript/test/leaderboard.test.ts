@@ -92,7 +92,10 @@ describe("leaderboard conformance — encodeBody (member write → request JSON)
     // presence-exact on the object: exactly the keys the vector names.
     expect(new Set(Object.keys(parsed))).toEqual(new Set(Object.keys(c.body)));
     // byte-verbatim on the values (amount/value/metadata copied through unchanged).
-    for (const [k, v] of Object.entries(c.body)) expect(parsed[k]).toBe(v);
+    for (const [k, v] of Object.entries(c.body)) {
+      const expected = k === "occurredAt" ? new Date(v).toISOString() : v;
+      expect(parsed[k]).toBe(expected);
+    }
   });
 });
 
@@ -120,12 +123,106 @@ describe("leaderboard conformance — parse (response → typed fields)", () => 
         break;
     }
     assertFields(result, c.expect);
+    assertNativeTimestamps(result, c);
+  });
+
+  it("parses a score-board window (board mode, no total — a windowed board follows the board mode)", async () => {
+    const client = clientWith(
+      mockFetch(() =>
+        jsonResponse(200, {
+          key: "best-lap",
+          mode: "min",
+          window: "7d",
+          order: "asc",
+          // Score boards have no meaningful group total; the server omits the field entirely.
+          memberCount: 2,
+          limit: 100,
+          offset: 0,
+          effectiveStart: "2026-06-27T00:00:00Z",
+          effectiveEnd: "2026-07-04T09:30:00Z",
+          entries: [
+            { rank: 1, member: "alice", value: "1417" },
+            { rank: 2, member: "bob", value: "1502" },
+          ],
+        }),
+      ),
+    );
+
+    const result = await client.counter("best-lap").leaderboard({ window: "7d" });
+    expect(result.mode).toBe("min");
+    expect(result.total, "total must be absent on score-board windows").toBeUndefined();
+    expect(result.entries[0]?.value).toBe("1417");
+    await client.close();
+  });
+
+  it("uses the requested all-time variant when the response carries a stray window field", async () => {
+    const client = clientWith(
+      mockFetch(() =>
+        jsonResponse(200, {
+          key: "scores",
+          mode: "max",
+          epoch: 0,
+          order: "desc",
+          memberCount: 1,
+          limit: 100,
+          offset: 0,
+          window: null,
+          entries: [
+            {
+              rank: 1,
+              member: "alice",
+              value: "10",
+              updatedAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const result = await client.counter("scores").leaderboard();
+    expect(result.entries[0]?.updatedAt).toBeInstanceOf(Date);
+    expect(result.entries[0]?.updatedAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    await client.close();
   });
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────────────────────────
 
 const STRING_FIELDS = new Set(["value", "total", "memberValue", "percentile"]);
+
+function assertNativeTimestamps(actual: Record<string, unknown>, vector: ParseCase): void {
+  if (vector.kind === "leaderboard") {
+    const actualEntries = actual.entries as Record<string, unknown>[];
+    const wireEntries = vector.body.entries as Record<string, unknown>[];
+    actualEntries.forEach((entry, i) => {
+      const updatedAt = entry.updatedAt;
+      expect(updatedAt, `entry ${i} updatedAt must be a Date`).toBeInstanceOf(Date);
+      expect((updatedAt as Date).toISOString()).toBe(
+        new Date(wireEntries[i]!.updatedAt as string).toISOString(),
+      );
+    });
+  }
+  if (vector.kind === "windowLeaderboard") {
+    expect(actual.effectiveStart, "window effectiveStart must be a Date").toBeInstanceOf(Date);
+    expect((actual.effectiveStart as Date).toISOString()).toBe(
+      new Date(vector.body.effectiveStart as string).toISOString(),
+    );
+    expect(actual.effectiveEnd, "window effectiveEnd must be a Date").toBeInstanceOf(Date);
+    expect((actual.effectiveEnd as Date).toISOString()).toBe(
+      new Date(vector.body.effectiveEnd as string).toISOString(),
+    );
+    const entries = actual.entries as Record<string, unknown>[];
+    entries.forEach((entry, i) => {
+      expect(entry, `window entry ${i} must not gain updatedAt`).not.toHaveProperty("updatedAt");
+    });
+  }
+  if (vector.kind === "memberSnapshot") {
+    expect(actual.updatedAt, "member snapshot updatedAt must be a Date").toBeInstanceOf(Date);
+    expect((actual.updatedAt as Date).toISOString()).toBe(
+      new Date(vector.body.updatedAt as string).toISOString(),
+    );
+  }
+}
 
 function assertFields(actual: Record<string, unknown>, expected: Record<string, unknown>): void {
   for (const [k, v] of Object.entries(expected)) {
@@ -144,6 +241,11 @@ function assertFields(actual: Record<string, unknown>, expected: Record<string, 
       wantEntries.forEach((we, i) => assertFields(gotEntries[i]!, we));
       continue;
     }
+    if (k === "effectiveStart" || k === "effectiveEnd") {
+      expect(actual[k], `${k} must be a Date`).toBeInstanceOf(Date);
+      expect((actual[k] as Date).toISOString()).toBe(new Date(v as string).toISOString());
+      continue;
+    }
     if (STRING_FIELDS.has(k)) {
       // Arbitrary-precision decimal/integer strings must survive parsing AS strings (never a number).
       expect(typeof actual[k], `${k} must stay a string`).toBe("string");
@@ -152,10 +254,10 @@ function assertFields(actual: Record<string, unknown>, expected: Record<string, 
   }
 }
 
-function optsFrom(input: Record<string, string>): { metadata?: string; occurredAt?: string } {
-  const opts: { metadata?: string; occurredAt?: string } = {};
+function optsFrom(input: Record<string, string>): { metadata?: string; occurredAt?: Date } {
+  const opts: { metadata?: string; occurredAt?: Date } = {};
   if (input.metadata !== undefined) opts.metadata = input.metadata;
-  if (input.occurredAt !== undefined) opts.occurredAt = input.occurredAt;
+  if (input.occurredAt !== undefined) opts.occurredAt = new Date(input.occurredAt);
   return opts;
 }
 
@@ -170,8 +272,8 @@ function leaderboardStub(params: Record<string, unknown>): Record<string, unknow
         memberCount: 0,
         limit: 100,
         offset: 0,
-        effectiveStart: "",
-        effectiveEnd: "",
+        effectiveStart: "2026-01-01T00:00:00Z",
+        effectiveEnd: "2026-01-01T01:00:00Z",
         entries: [],
       }
     : { key: "k", mode: "sum", epoch: 0, order: "desc", memberCount: 0, limit: 100, offset: 0, entries: [] };

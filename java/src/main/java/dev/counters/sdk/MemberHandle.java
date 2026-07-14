@@ -6,7 +6,7 @@ import java.math.BigInteger;
  * A typed handle to a single member of a counter's board. Member writes are immediate; they are never
  * routed through the counter write buffer.
  */
-public final class MemberHandle {
+public final class MemberHandle implements ReadOnlyMemberHandle {
 
     private final CountersClient client;
     private final String counterKey;
@@ -40,7 +40,12 @@ public final class MemberHandle {
 
     /** Remove this member from the current board. */
     public MemberRemoved remove() {
-        return client.removeMember(counterKey, member);
+        return remove(null);
+    }
+
+    /** Remove this member using a caller-supplied idempotency key. */
+    public MemberRemoved remove(String idempotencyKey) {
+        return client.removeMember(counterKey, member, idempotencyKey);
     }
 
     /** Add a non-negative delta to this member (sum board). */

@@ -7,8 +7,11 @@ import (
 )
 
 func TestBatcherCoalesce(t *testing.T) {
-	var captured [][]Operation
-	b := newBatcher(func(ops []Operation) error { captured = append(captured, ops); return nil }, 1000, 0, nil)
+	var captured [][]operation
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
+		captured = append(captured, ops)
+		return nil, nil
+	}, 1000, 0, nil)
 	b.enqueue("c", big.NewInt(1))
 	b.enqueue("c", big.NewInt(2))
 	b.enqueue("c", big.NewInt(3))
@@ -18,14 +21,17 @@ func TestBatcherCoalesce(t *testing.T) {
 	if len(captured) != 1 || len(captured[0]) != 1 {
 		t.Fatalf("got %v", captured)
 	}
-	if captured[0][0].Amount != "6" || captured[0][0].Op != "add" {
+	if captured[0][0].Amount != "6" || captured[0][0].Operation != "add" {
 		t.Errorf("op=%+v", captured[0][0])
 	}
 }
 
 func TestBatcherNetNegativeAndZeroSkip(t *testing.T) {
-	var captured [][]Operation
-	b := newBatcher(func(ops []Operation) error { captured = append(captured, ops); return nil }, 1000, 0, nil)
+	var captured [][]operation
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
+		captured = append(captured, ops)
+		return nil, nil
+	}, 1000, 0, nil)
 	b.enqueue("a", big.NewInt(2))
 	b.enqueue("a", big.NewInt(-9)) // net -7 -> subtract 7
 	b.enqueue("z", big.NewInt(5))
@@ -36,14 +42,17 @@ func TestBatcherNetNegativeAndZeroSkip(t *testing.T) {
 	if len(captured) != 1 || len(captured[0]) != 1 {
 		t.Fatalf("expected 1 op (z skipped), got %v", captured)
 	}
-	if captured[0][0].Op != "subtract" || captured[0][0].Amount != "7" {
+	if captured[0][0].Operation != "subtract" || captured[0][0].Amount != "7" {
 		t.Errorf("op=%+v", captured[0][0])
 	}
 }
 
 func TestBatcherMaxSizeFlush(t *testing.T) {
-	flushed := make(chan []Operation, 4)
-	b := newBatcher(func(ops []Operation) error { flushed <- ops; return nil }, 2, 0, nil)
+	flushed := make(chan []operation, 4)
+	b := newBatcher(func(ops []operation) ([]WriteFailure, error) {
+		flushed <- ops
+		return nil, nil
+	}, 2, 0, nil)
 	b.enqueue("a", big.NewInt(1))
 	b.enqueue("b", big.NewInt(1)) // size hits 2 -> async flush
 	select {

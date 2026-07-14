@@ -1,13 +1,23 @@
 package dev.counters.sdk;
 
-/** Base (unchecked) exception for all SDK failures. */
-public class CountersException extends RuntimeException {
+/**
+ * Catchable root for the SDK's three error kinds. Every SDK-originated failure is exactly one of
+ * {@link CountersApiException}, {@link CountersTransportException}, or
+ * {@link CountersValidationException}.
+ */
+public abstract sealed class CountersException extends RuntimeException
+        permits CountersApiException, CountersTransportException, CountersValidationException {
 
-    public CountersException(String message) {
+    protected CountersException(String message) {
         super(message);
     }
 
-    public CountersException(String message, Throwable cause) {
+    protected CountersException(String message, Throwable cause) {
         super(message, cause);
+    }
+
+    static CountersException normalizeBatchFailure(Throwable failure) {
+        if (failure instanceof CountersException countersFailure) return countersFailure;
+        return new CountersTransportException("unexpected batch submission failure", failure);
     }
 }

@@ -12,16 +12,20 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.reflect.Modifier;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.Instant;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -106,6 +110,13 @@ class ClientTest {
         return CountersClient.builder().apiKey("secret").baseUrl(baseUrl).backoffMillis(1).build();
     }
 
+    private static void assertExactlyOneTaxonomyKind(CountersException error) {
+        int kinds = (error instanceof CountersApiException ? 1 : 0)
+                + (error instanceof CountersTransportException ? 1 : 0)
+                + (error instanceof CountersValidationException ? 1 : 0);
+        assertEquals(1, kinds, "error must be exactly one taxonomy kind: " + error.getClass());
+    }
+
     // ---- addNow: request shape, headers, response parsing ----
 
     @Test
@@ -117,6 +128,8 @@ class ClientTest {
             assertEquals("c", counter.key());
             assertEquals("5", counter.value());
             assertEquals(0, counter.epoch());
+            assertNull(counter.createdAt(), "absent optional createdAt must stay null");
+            assertNull(counter.updatedAt(), "absent optional updatedAt must stay null");
 
             Recorded r = recorded.get(0);
             assertEquals("POST", r.method());
@@ -137,10 +150,10 @@ class ClientTest {
     void addNowForwardsOccurredAtAndOmitsItWhenAbsent() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200, "{\"key\":\"c\",\"value\":\"1\",\"epoch\":0}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime at = OffsetDateTime.of(2026, 7, 1, 12, 0, 0, 0, ZoneOffset.UTC);
+            Instant at = Instant.parse("2026-07-01T12:00:00Z");
             c.counter("c").addNow(1, at);
             c.counter("c").addNow(1);
-            c.counter("c").subtractNow("2", at.withOffsetSameInstant(ZoneOffset.ofHours(2)));
+            c.counter("c").subtractNow("2", at);
 
             Map<String, Object> withAt = parseBody(recorded.get(0).body());
             assertEquals("2026-07-01T12:00:00Z", withAt.get("occurredAt"));
@@ -149,7 +162,6 @@ class ClientTest {
             Map<String, Object> without = parseBody(recorded.get(1).body());
             assertFalse(without.containsKey("occurredAt"), "plain addNow must not send occurredAt");
 
-            // Non-UTC offsets are normalised to UTC on the wire.
             Recorded sub = recorded.get(2);
             assertEquals("/v1/counters/c/subtract", sub.path());
             assertEquals("2026-07-01T12:00:00Z", parseBody(sub.body()).get("occurredAt"));
@@ -176,8 +188,8 @@ class ClientTest {
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-02T00:00:00Z\"},"
                         + "\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"7\"}]}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime from = OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-            OffsetDateTime to = OffsetDateTime.of(2026, 1, 2, 0, 0, 0, 0, ZoneOffset.UTC);
+            Instant from = Instant.parse("2026-01-01T00:00:00Z");
+            Instant to = Instant.parse("2026-01-02T00:00:00Z");
             SeriesResponse s = c.counter("c").series(new SeriesParams(from, to, "1h", "Europe/London", true));
 
             assertEquals("/v1/counters/c/series", recorded.get(0).path());
@@ -190,9 +202,11 @@ class ClientTest {
 
             assertEquals("c", s.counterKey());
             assertEquals("delta", s.mode());
-            assertEquals("2026-01-01T00:00:00Z", s.range().from());
+            assertEquals("Europe/London", s.timeZone());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.range().from());
             assertEquals(1, s.points().size());
-            assertEquals("7", s.points().get(0).v());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals("7", s.points().get(0).value());
 
             // Optional params are omitted, not sent empty.
             c.counter("c").series(new SeriesParams(from, to, "1d"));
@@ -211,12 +225,14 @@ class ClientTest {
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-02T00:00:00Z\"},"
                         + "\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"" + huge + "\"}]}"));
         try (CountersClient c = client(baseUrl)) {
-            OffsetDateTime from = OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-            OffsetDateTime to = OffsetDateTime.of(2026, 1, 2, 0, 0, 0, 0, ZoneOffset.UTC);
+            Instant from = Instant.parse("2026-01-01T00:00:00Z");
+            Instant to = Instant.parse("2026-01-02T00:00:00Z");
             SeriesResponse s = c.counter("c").series(new SeriesParams(from, to, "1h"));
 
             assertEquals(1, s.points().size());
-            assertEquals(huge, s.points().get(0).v(), "series point must round-trip as a string, no precision loss");
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals(huge, s.points().get(0).value(),
+                    "series point must round-trip as a string, no precision loss");
         }
     }
 
@@ -244,14 +260,15 @@ class ClientTest {
             String bucket = (String) p.get("bucket");
             String baseUrl = startServer((ex, r) -> json(ex, 200,
                     "{\"counterKey\":\"c\",\"bucket\":\"" + bucket + "\",\"mode\":\"delta\","
-                            + "\"range\":{\"from\":\"\",\"to\":\"\"},\"points\":[]}"));
+                            + "\"range\":{\"from\":\"" + p.get("from") + "\",\"to\":\""
+                            + p.get("to") + "\"},\"points\":[]}"));
             try (CountersClient c2 = client(baseUrl)) {
-                OffsetDateTime from = OffsetDateTime.parse((String) p.get("from"));
-                OffsetDateTime to = OffsetDateTime.parse((String) p.get("to"));
-                String tz = (String) p.get("tz");
+                Instant from = Instant.parse((String) p.get("from"));
+                Instant to = Instant.parse((String) p.get("to"));
+                String timeZone = (String) p.get("tz");
                 Boolean gapfill = (Boolean) p.get("gapfill");
                 String mode = (String) p.get("mode");
-                SeriesParams params = new SeriesParams(from, to, bucket, mode, tz, gapfill);
+                SeriesParams params = new SeriesParams(from, to, bucket, mode, timeZone, gapfill);
                 if (p.get("member") instanceof String member) {
                     c2.counter("c").memberSeries(member, params);
                 } else if ("member".equals(p.get("groupBy"))) {
@@ -279,8 +296,8 @@ class ClientTest {
             String baseUrl = startServer((ex, r) -> json(ex, 200, Json.write(body)));
             try (CountersClient c2 = client(baseUrl)) {
                 Map<String, Object> range = (Map<String, Object>) body.get("range");
-                OffsetDateTime from = OffsetDateTime.parse((String) range.get("from"));
-                OffsetDateTime to = OffsetDateTime.parse((String) range.get("to"));
+                Instant from = Instant.parse((String) range.get("from"));
+                Instant to = Instant.parse((String) range.get("to"));
                 SeriesParams params = new SeriesParams(from, to, (String) body.get("bucket"));
                 if ("memberSeries".equals(kind)) {
                     MemberSeriesResponse s = c2.counter((String) body.get("counterKey"))
@@ -320,16 +337,16 @@ class ClientTest {
         assertEquals(expected.size(), actual.size(), name);
         for (int i = 0; i < expected.size(); i++) {
             Map<String, Object> ep = (Map<String, Object>) expected.get(i);
-            assertEquals(ep.get("t"), actual.get(i).t(), name);
+            assertEquals(Instant.parse((String) ep.get("t")), actual.get(i).timestamp(), name);
             // Delta stays a string (arbitrary precision).
-            assertEquals(ep.get("v"), actual.get(i).v(), name);
+            assertEquals(ep.get("v"), actual.get(i).value(), name);
         }
     }
 
     @Test
     void seriesRejectsUnknownBucket() {
-        OffsetDateTime t = OffsetDateTime.now(ZoneOffset.UTC);
-        assertThrows(CountersValidationException.class, () -> new SeriesParams(t.minusHours(1), t, "2h"));
+        Instant t = Instant.now();
+        assertThrows(CountersValidationException.class, () -> new SeriesParams(t.minusSeconds(3600), t, "2h"));
     }
 
     // ---- retry & error mapping ----
@@ -412,6 +429,7 @@ class ClientTest {
                     .apiKey("k").baseUrl(baseUrl).backoffMillis(1).maxRetries(0).build()) {
                 CountersApiException e = assertThrows(CountersApiException.class,
                         () -> client.counter("c").addNow(1), "api/" + name);
+                assertExactlyOneTaxonomyKind(e);
                 assertTrue(e instanceof CountersException, "api/" + name + ": not a CountersException");
                 assertEquals(((Number) expect.get("status")).intValue(), e.status(), "api/" + name + " status");
                 if (expect.get("title") instanceof String title) {
@@ -431,6 +449,7 @@ class ClientTest {
                     .apiKey("k").baseUrl(baseUrl).backoffMillis(1).maxRetries(0).build()) {
                 CountersException e = assertThrows(CountersTransportException.class,
                         () -> client.counter("c").addNow(1), "transport/" + name);
+                assertExactlyOneTaxonomyKind(e);
                 assertFalse(e instanceof CountersApiException, "transport/" + name + " must not be an API exception");
             }
         }
@@ -464,10 +483,12 @@ class ClientTest {
             String baseUrl = startServer((ex, r) -> json(ex, status, body));
             try (CountersClient client = CountersClient.builder()
                     .apiKey("k").baseUrl(baseUrl).batchIntervalMillis(0).maxRetries(0).build()) {
-                client.counter("a").add(1);
+                client.counter("signups").add(1);
+                client.counter("capped").add(1);
                 if ("api".equals(expect.get("taxonomy"))) {
                     CountersApiException e = assertThrows(CountersApiException.class,
                             client::flush, "batch/" + name);
+                    assertExactlyOneTaxonomyKind(e);
                     assertEquals(((Number) expect.get("status")).intValue(), e.status(),
                             "batch/" + name + " status");
                     if (expect.get("title") instanceof String title) {
@@ -476,6 +497,7 @@ class ClientTest {
                 } else {
                     CountersException e = assertThrows(CountersValidationException.class,
                             client::flush, "batch/" + name);
+                    assertExactlyOneTaxonomyKind(e);
                     assertFalse(e instanceof CountersApiException,
                             "batch/" + name + " must not be an API exception");
                 }
@@ -505,7 +527,8 @@ class ClientTest {
 
     @Test
     void bufferedAddsCoalesceIntoOneBatchRequest() throws IOException {
-        String baseUrl = startServer((ex, r) -> json(ex, 200, "{\"results\":[]}"));
+        String baseUrl = startServer((ex, r) -> json(ex, 200,
+                "{\"results\":[{\"counterKey\":\"registrations\",\"status\":\"applied\",\"value\":\"6\"}]}"));
         try (CountersClient c = CountersClient.builder()
                 .apiKey("k").baseUrl(baseUrl).batchIntervalMillis(0).build()) {
             CounterHandle reg = c.counter("registrations");
@@ -534,7 +557,7 @@ class ClientTest {
     void retryBackoffGrowsExponentially() throws IOException {
         String baseUrl = startServer((ex, r) -> empty(ex, 503)); // always retryable, no Retry-After
         java.util.List<Long> delays = new java.util.ArrayList<>();
-        Http http = new Http(baseUrl, "k", null, 3, 100);
+        Http http = new Http(baseUrl, "k", null, 3, 100, 30_000);
         http.setSleeper(delays::add);
         assertThrows(CountersApiException.class, () -> http.request("GET", "/counters", null, null, null));
         assertEquals(List.of(100L, 200L, 400L), delays); // exponential, not linear/constant
@@ -552,7 +575,7 @@ class ClientTest {
             }
         });
         java.util.List<Long> delays = new java.util.ArrayList<>();
-        Http http = new Http(baseUrl, "k", null, 3, 0);
+        Http http = new Http(baseUrl, "k", null, 3, 0, 30_000);
         http.setSleeper(delays::add);
         http.request("POST", "/counters/c/add", Map.of("amount", "1"), "idem", null);
         assertEquals(List.of(2000L), delays); // honored the header, not the (zeroed) exponential
@@ -628,7 +651,9 @@ class ClientTest {
     @Test
     void listSendsPaginationAndParsesPage() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200,
-                "{\"data\":[{\"key\":\"a\",\"value\":\"1\",\"epoch\":0},"
+                "{\"data\":[{\"key\":\"a\",\"value\":\"1\",\"epoch\":0,"
+                        + "\"createdAt\":\"2026-01-01T00:00:00Z\","
+                        + "\"updatedAt\":\"2026-01-01T00:00:01Z\"},"
                         + "{\"key\":\"b\",\"value\":\"-2\",\"epoch\":1}],\"nextCursor\":\"n1\"}"));
         try (CountersClient c = client(baseUrl)) {
             CounterPage page = c.list("abc", 2);
@@ -638,7 +663,11 @@ class ClientTest {
             assertEquals("2", q.get("limit"));
             assertEquals(2, page.data().size());
             assertEquals("a", page.data().get(0).key());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), page.data().get(0).createdAt());
+            assertEquals(Instant.parse("2026-01-01T00:00:01Z"), page.data().get(0).updatedAt());
             assertEquals("-2", page.data().get(1).value());
+            assertNull(page.data().get(1).createdAt(), "absent optional createdAt must stay null");
+            assertNull(page.data().get(1).updatedAt(), "absent optional updatedAt must stay null");
             assertEquals("n1", page.nextCursor());
 
             CounterPage first = c.list();
@@ -659,8 +688,203 @@ class ClientTest {
     }
 
     @Test
+    void immediateModeRoutesErrorsToOnBatchError() throws Exception {
+        String base = startServer((exchange, r) ->
+                json(exchange, 403, "{\"title\":\"quota exceeded\",\"status\":403}"));
+        java.util.concurrent.BlockingQueue<WriteFailure> errors =
+                new java.util.concurrent.LinkedBlockingQueue<>();
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0)
+                .batchEnabled(false)
+                .onBatchError(errors::add)
+                .build()) {
+            client.counter("c").add(1);
+            WriteFailure failure = errors.poll(2, java.util.concurrent.TimeUnit.SECONDS);
+            assertNotNull(failure, "immediate-mode write failure never reached onBatchError");
+            assertEquals("c", failure.counterKey());
+            assertEquals("1", failure.delta());
+            assertNull(failure.member());
+            assertNotNull(failure.idempotencyKey());
+            assertTrue(failure.error() instanceof CountersApiException, "got " + failure.error());
+            assertEquals(403, ((CountersApiException) failure.error()).status());
+        }
+    }
+
+    @Test
+    void batchErrorReportsOnlyTheFailedCoalescedWriteIdentity() throws Exception {
+        String base = startServer((exchange, request) -> json(exchange, 200,
+                "{\"results\":["
+                        + "{\"counterKey\":\"a\",\"status\":\"applied\",\"value\":\"1\"},"
+                        + "{\"counterKey\":\"b\",\"status\":\"error\","
+                        + "\"error\":{\"title\":\"quota exceeded\",\"status\":403}}]}"));
+        java.util.concurrent.BlockingQueue<WriteFailure> failures =
+                new java.util.concurrent.LinkedBlockingQueue<>();
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0)
+                .batchIntervalMillis(0).maxBatchSize(2)
+                .onBatchError(failures::add)
+                .build()) {
+            client.counter("a").add(1);
+            client.counter("b").subtract(3);
+
+            WriteFailure failure = failures.poll(2, TimeUnit.SECONDS);
+            assertNotNull(failure, "partial batch failure never reached onBatchError");
+            assertEquals("b", failure.counterKey());
+            assertEquals("-3", failure.delta());
+            assertNull(failure.member());
+            assertTrue(failure.idempotencyKey().matches(UUID_V4));
+            assertTrue(failure.error() instanceof CountersApiException);
+            assertEquals(403, ((CountersApiException) failure.error()).status());
+            assertNull(failures.poll(100, TimeUnit.MILLISECONDS),
+                    "the applied sibling must not be reported as failed");
+        }
+    }
+
+    @Test
+    void callerCanReuseIdempotencyKeyAfterTransportFailure() throws Exception {
+        AtomicBoolean failWithoutResponse = new AtomicBoolean(true);
+        String base = startServer((exchange, request) -> {
+            if (failWithoutResponse.get()) {
+                exchange.close();
+            } else {
+                json(exchange, 200, "{\"key\":\"billing\",\"value\":\"5\",\"epoch\":0}");
+            }
+        });
+        String idempotencyKey = Idempotency.newKey();
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0).build()) {
+            CounterHandle counter = client.counter("billing");
+            assertThrows(CountersTransportException.class,
+                    () -> counter.addNow(5, null, idempotencyKey));
+
+            failWithoutResponse.set(false);
+            Counter applied = counter.addNow(5, null, idempotencyKey);
+            assertEquals("5", applied.value());
+        }
+
+        assertTrue(recorded.size() >= 2);
+        for (Recorded request : recorded) {
+            assertEquals(idempotencyKey, request.headers().get("Idempotency-Key"));
+            assertEquals("5", parseBody(request.body()).get("amount"));
+        }
+    }
+
+    @Test
+    void malformedSuccessfulJsonIsAnApiErrorWithTheRealStatus() throws Exception {
+        String base = startServer((exchange, request) -> json(exchange, 200, "{"));
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0).build()) {
+            CountersApiException error = assertThrows(CountersApiException.class,
+                    () -> client.counter("c").addNow(1));
+            assertEquals(200, error.status());
+            assertExactlyOneTaxonomyKind(error);
+        }
+    }
+
+    @Test
+    void parsedButUnrepresentableResponseIsValidation() throws Exception {
+        String base = startServer((exchange, request) -> json(exchange, 200,
+                "{\"key\":\"c\",\"value\":\"1\",\"epoch\":0,\"createdAt\":\"yesterday\"}"));
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0).build()) {
+            CountersValidationException error = assertThrows(CountersValidationException.class,
+                    () -> client.counter("c").addNow(1));
+            assertExactlyOneTaxonomyKind(error);
+        }
+    }
+
+    @Test
+    void mixedRetryFailuresPreserveTheReceivedHttpError() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        String base = startServer((exchange, request) -> {
+            if (attempts.incrementAndGet() == 1) {
+                json(exchange, 503, "{\"title\":\"temporarily unavailable\"}");
+            } else {
+                exchange.close();
+            }
+        });
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).backoffMillis(0).maxRetries(1).build()) {
+            CountersApiException error = assertThrows(CountersApiException.class,
+                    () -> client.counter("c").addNow(1));
+            assertEquals(503, error.status());
+            assertEquals("temporarily unavailable", error.title());
+            assertExactlyOneTaxonomyKind(error);
+        }
+    }
+
+    @Test
+    void immediateModeRejectsWritesAfterClose() throws Exception {
+        String base = startServer((exchange, r) -> json(exchange, 200, "{\"results\":[]}"));
+        CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).batchEnabled(false).build();
+        CounterHandle c = client.counter("c");
+        client.close();
+        assertThrows(CountersValidationException.class, () -> c.add(1));
+    }
+
+    @Test
+    void requestTimeoutIsConfigurableAndSurfacesAsTransport() throws Exception {
+        String base = startServer((exchange, r) -> {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            json(exchange, 200, "{}");
+        });
+        CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0).requestTimeoutMillis(50).build();
+        assertThrows(CountersTransportException.class, () -> client.counter("c").value());
+    }
+
+    @Test
     void builderRequiresApiKey() {
-        assertThrows(IllegalArgumentException.class, () -> CountersClient.builder().build());
-        assertThrows(IllegalArgumentException.class, () -> CountersClient.builder().apiKey("").build());
+        assertThrows(CountersValidationException.class, () -> CountersClient.builder().build());
+        assertThrows(CountersValidationException.class, () -> CountersClient.builder().apiKey("").build());
+    }
+
+    @Test
+    void everyLocallyProducibleFailureIsExactlyOneTaxonomyKind() {
+        assertTrue(Modifier.isAbstract(CountersException.class.getModifiers()));
+        assertTrue(CountersException.class.isSealed());
+        assertEquals(
+                Set.of(CountersApiException.class, CountersTransportException.class,
+                        CountersValidationException.class),
+                Set.copyOf(Arrays.asList(CountersException.class.getPermittedSubclasses())));
+
+        CountersClient client = CountersClient.builder().apiKey("k").build();
+        CounterHandle closed = client.counter("closed");
+        client.close();
+
+        List<CountersValidationException> failures = List.of(
+                assertThrows(CountersValidationException.class, () -> CountersClient.builder().build()),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().apiKey("bad\nkey").build()),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().apiKey("k").baseUrl(null).build()),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().apiKey("k").baseUrl("not a URL").build()),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().maxRetries(-1)),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().backoffMillis(-1)),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().requestTimeoutMillis(0)),
+                assertThrows(CountersValidationException.class,
+                        () -> CountersClient.builder().maxBatchSize(0)),
+                assertThrows(CountersValidationException.class, () -> client.counter("has space")),
+                assertThrows(CountersValidationException.class, () -> Validation.toAmount("-1")),
+                assertThrows(CountersValidationException.class,
+                        () -> client.counter("series").series(null)),
+                assertThrows(CountersValidationException.class,
+                        () -> client.derived("derived").series(null)),
+                assertThrows(CountersValidationException.class, () -> closed.add(1)),
+                assertThrows(CountersValidationException.class, () -> Idempotency.keyOrNew("")),
+                assertThrows(CountersValidationException.class,
+                        () -> Idempotency.keyOrNew("k".repeat(256))),
+                assertThrows(CountersValidationException.class, () -> Json.parse("{\"a\":")));
+
+        failures.forEach(ClientTest::assertExactlyOneTaxonomyKind);
     }
 }

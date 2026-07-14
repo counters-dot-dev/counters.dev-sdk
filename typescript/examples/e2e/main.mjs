@@ -19,6 +19,7 @@ import {
   CountersValidationError,
   DerivedHandle,
   MemberHandle,
+  PublishableCountersClient,
 } from "@counters.dev/sdk";
 
 const ORIGIN = required("COUNTERS_BASE_URL").replace(/\/$/, "");
@@ -72,7 +73,13 @@ async function tour() {
     apiKey: KEY_A,
     baseUrl: BASE_URL,
     timeoutMs: 15_000,
-    batch: { intervalMs: 200, onError: (e) => console.error("batch flush failed:", e) },
+    batch: {
+      intervalMs: 200,
+      onError: (failure) => console.error(
+        `batch write failed: key=${failure.counterKey} delta=${failure.delta} idempotencyKey=${failure.idempotencyKey}`,
+        failure.error,
+      ),
+    },
   });
   invoked.add("CountersClient.constructor");
 
@@ -85,6 +92,8 @@ async function tour() {
   invoked.add("CounterHandle.addNow");
   assertEq(first.value, "5", "addNow(5) on a fresh counter");
   assertEq(first.epoch, 0, "fresh counter epoch");
+  assert(first.createdAt === undefined || first.createdAt instanceof Date, "counter createdAt is a Date when present");
+  assert(first.updatedAt === undefined || first.updatedAt instanceof Date, "counter updatedAt is a Date when present");
 
   const afterSub = await signups.subtractNow("2");
   invoked.add("CounterHandle.subtractNow");
@@ -111,7 +120,10 @@ async function tour() {
   const to = new Date(t0.getTime() + 24 * 3600_000);
   for (const bucket of ["1m", "5m", "1h", "1d", "1w", "1mo"]) {
     const series = await signups.series({ from, to, bucket });
-    const sum = series.points.reduce((acc, p) => acc + BigInt(p.v), 0n);
+    for (const point of series.points) {
+      assert(point.timestamp instanceof Date, `series(${bucket}) point timestamp is a Date`);
+    }
+    const sum = series.points.reduce((acc, point) => acc + BigInt(point.value), 0n);
     assertEq(sum.toString(), "16", `series(${bucket}) sums to the total delta`);
   }
   invoked.add("CounterHandle.series");
@@ -172,21 +184,31 @@ async function tour() {
   const pkDemo = client.counter("pk-demo"); // fixed key the token is scoped to
   await pkDemo.addNow(1); // ensure it exists before clearing (first run on a fresh DB)
   await pkDemo.clear();
-  await pkDemo.addNow(7);
-  const pkClient = new CountersClient({ apiKey: PK_TOKEN, baseUrl: BASE_URL });
-  assertEq((await pkClient.counter("pk-demo").value()).value, "7", "pk token reads its scoped counter");
-  await pkClient.counter("pk-demo").series({ from, to, bucket: "1h" }); // read surface also includes series
-  await expectStatus(pkClient.counter("pk-demo").addNow(1), 403, "pk token cannot write");
+  await pkDemo.member("alice").add(7);
+  const pkClient = new PublishableCountersClient({ apiKey: PK_TOKEN, baseUrl: BASE_URL });
+  invoked.add("PublishableCountersClient.constructor");
+  const publicCounter = pkClient.counter("pk-demo");
+  invoked.add("PublishableCountersClient.counter");
+  assertEq((await publicCounter.value()).value, "7", "pk token reads its scoped counter");
+  invoked.add("PublishableCounterHandle.value");
+  await publicCounter.series({ from, to, bucket: "1h" });
+  invoked.add("PublishableCounterHandle.series");
+  await publicCounter.leaderboard();
+  invoked.add("PublishableCounterHandle.leaderboard");
+  const publicMember = publicCounter.member("alice");
+  invoked.add("PublishableCounterHandle.member");
+  await publicMember.get();
+  invoked.add("PublishableMemberHandle.get");
   await expectStatus(pkClient.counter(`${ns}signups`).value(), 403, "pk token cannot leave its scope");
-  await expectStatus(pkClient.list(), 403, "pk token cannot list");
   await pkClient.close();
+  invoked.add("PublishableCountersClient.close");
 
   // Usage: org-wide quota state. Tolerant lower-bound assertions — this org wrote many counters above.
   const usage = await client.usage();
   invoked.add("CountersClient.usage");
-  assert(usage.ops.used >= 1, "usage reports at least the writes this run made");
+  assert(usage.operations.used >= 1, "usage reports at least the writes this run made");
   assert(usage.counters.used >= 1, "usage reports at least one live counter");
-  assert(typeof usage.ops.resetsAt === "string" && usage.ops.resetsAt.length > 0, "usage carries a resetsAt instant");
+  assert(usage.operations.resetsAt instanceof Date, "usage carries a native-Date resetsAt instant");
   assert(typeof usage.month === "string", "usage carries the UTC month");
 
   await client.close();
@@ -225,6 +247,7 @@ async function leaderboards() {
   assertEq(lb.entries[0].member, "bob", "rank 1 is bob");
   assertEq(lb.entries[0].rank, 1, "bob is rank 1");
   assertEq(lb.entries[0].value, "25", "bob value");
+  assert(lb.entries[0].updatedAt instanceof Date, "leaderboard entry updatedAt is a Date");
   assertEq(lb.entries[1].rank, 2, "alice/carol tie at rank 2 (competition rank)");
   assertEq(lb.entries[2].rank, 2, "the tie shares rank 2");
 
@@ -241,6 +264,7 @@ async function leaderboards() {
   assertEq(snap.value, "25", "bob snapshot value");
   assertEq(snap.percentile, "100.00", "the leader's percentile is 100.00");
   assert(typeof snap.percentile === "string", "percentile stays a string");
+  assert(snap.updatedAt instanceof Date, "member snapshot updatedAt is a Date");
 
   // Remove a member: a sum board compensates the removed value out of the group total.
   const removed = await carol.remove();
@@ -353,7 +377,7 @@ async function replayVectors() {
               from: minutes(p.fromMin),
               to: minutes(p.toMin),
               bucket: p.bucket,
-              tz: p.tz,
+              timeZone: p.tz,
               gapfill: p.gapfill,
             });
           }
@@ -407,7 +431,7 @@ async function replayVectors() {
       if (expect.value !== undefined) assertEq(body.value, expect.value, `${where}: value`);
       if (expect.epoch !== undefined) assertEq(body.epoch, expect.epoch, `${where}: epoch`);
       if (expect.pointsSum !== undefined) {
-        const sum = body.points.reduce((acc, p) => acc + BigInt(p.v), 0n);
+        const sum = body.points.reduce((acc, point) => acc + BigInt(point.value), 0n);
         assertEq(sum.toString(), expect.pointsSum, `${where}: pointsSum`);
       }
       if (expect.pointsAtLeast !== undefined) {
@@ -421,9 +445,9 @@ async function replayVectors() {
       }
       if (expect.usage !== undefined) {
         const u = expect.usage;
-        if (u.opsUsedAtLeast !== undefined) assert(body.ops.used >= u.opsUsedAtLeast, `${where}: opsUsedAtLeast ${u.opsUsedAtLeast}, got ${body.ops.used}`);
+        if (u.opsUsedAtLeast !== undefined) assert(body.operations.used >= u.opsUsedAtLeast, `${where}: opsUsedAtLeast ${u.opsUsedAtLeast}, got ${body.operations.used}`);
         if (u.countersUsedAtLeast !== undefined) assert(body.counters.used >= u.countersUsedAtLeast, `${where}: countersUsedAtLeast ${u.countersUsedAtLeast}, got ${body.counters.used}`);
-        if (u.hasResetsAt !== undefined) assertEq(body.ops.resetsAt !== undefined && body.ops.resetsAt !== null, u.hasResetsAt, `${where}: hasResetsAt`);
+        if (u.hasResetsAt !== undefined) assertEq(body.operations.resetsAt !== undefined && body.operations.resetsAt !== null, u.hasResetsAt, `${where}: hasResetsAt`);
       }
       // Leaderboard/member expectations (member keys are literal — not namespaced).
       if (expect.memberValue !== undefined) assertEq(body.memberValue, expect.memberValue, `${where}: memberValue`);
@@ -459,24 +483,27 @@ function surfaceGate() {
     CounterHandle: ["add", "subtract", "addNow", "subtractNow", "clear", "delete", "value", "series", "leaderboard", "member"],
     MemberHandle: ["get", "remove", "add", "subtract", "submit"],
     DerivedHandle: ["value", "series"],
+    PublishableCountersClient: ["counter", "close"],
   };
   // TS `private`/@internal members still exist on the prototype at runtime; they are not SDK surface.
   const internals = {
     CountersClient: new Set([
       "constructor", "enqueue", "addNow", "subtractNow", "clearCounter", "deleteCounter", "getValue",
-      "getSeries", "fireSingle", "batcherOnError", "submitBatch", "getLeaderboard", "getMember",
+      "getSeries", "fireSingle", "submitBatch", "getLeaderboard", "getMember",
       "removeMember", "addToMember", "subtractFromMember", "submitMember", "memberDelta",
       "getDerivedValue", "getDerivedSeries",
     ]),
     CounterHandle: new Set(["constructor"]),
     MemberHandle: new Set(["constructor"]),
     DerivedHandle: new Set(["constructor"]),
+    PublishableCountersClient: new Set(["constructor"]),
   };
   for (const [name, proto] of [
     ["CountersClient", CountersClient.prototype],
     ["CounterHandle", CounterHandle.prototype],
     ["MemberHandle", MemberHandle.prototype],
     ["DerivedHandle", DerivedHandle.prototype],
+    ["PublishableCountersClient", PublishableCountersClient.prototype],
   ]) {
     for (const method of documented[name]) {
       assert(
@@ -489,6 +516,20 @@ function surfaceGate() {
       throw new Error(
         `${name}.${prop} is a new public prototype member not covered by the example app — ` +
           `demonstrate it here (and add it to 'documented') or mark it internal`,
+      );
+    }
+  }
+  // The publishable handles are exported interfaces backed by private implementations, so there is
+  // deliberately no constructible runtime class to inspect. Their full method sets are still pinned
+  // by the calls above and by the SDK's compile-only negative API tests.
+  for (const [name, methods] of Object.entries({
+    PublishableCounterHandle: ["value", "series", "leaderboard", "member"],
+    PublishableMemberHandle: ["get"],
+  })) {
+    for (const method of methods) {
+      assert(
+        invoked.has(`${name}.${method}`),
+        `public method ${name}.${method} was never demonstrated by this example app`,
       );
     }
   }

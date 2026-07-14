@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -43,7 +44,7 @@ func loopbackClient(t *testing.T, f roundTripFunc) *Client {
 		HTTPClient: &http.Client{
 			Transport: f,
 		},
-		MaxRetries: 0,
+		MaxRetries: -1, // disable retries: taxonomy cases must observe the first response
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -280,13 +281,9 @@ func TestAddNowAndValue(t *testing.T) {
 }
 
 func TestCounterDecodesCreatedAtUpdatedAt(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"key":"c","value":"5","epoch":0,"createdAt":"2026-07-01T12:00:00Z","updatedAt":"2026-07-02T08:30:00Z"}`)
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0,"createdAt":"2026-07-01T12:00:00Z","updatedAt":"2026-07-02T08:30:00Z"}`), nil
+	})
 	h, _ := c.Counter("c")
 	ctr, err := h.AddNow(context.Background(), 5)
 	if err != nil {
@@ -304,13 +301,9 @@ func TestCounterDecodesCreatedAtUpdatedAt(t *testing.T) {
 }
 
 func TestCounterOmitsTimestampsWhenAbsent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"key":"c","value":"5","epoch":0}`)
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0}`), nil
+	})
 	h, _ := c.Counter("c")
 	ctr, err := h.AddNow(context.Background(), 5)
 	if err != nil {
@@ -318,6 +311,451 @@ func TestCounterOmitsTimestampsWhenAbsent(t *testing.T) {
 	}
 	if ctr.CreatedAt != nil || ctr.UpdatedAt != nil {
 		t.Errorf("expected nil timestamps when the server omits them, got createdAt=%v updatedAt=%v", ctr.CreatedAt, ctr.UpdatedAt)
+	}
+}
+
+func TestRequiredTimestampsRoundTripAsTime(t *testing.T) {
+	const wireTimestamp = "2026-01-01T00:00:00Z"
+	want, err := time.Parse(time.RFC3339, wireTimestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		body string
+		read func([]byte) (time.Time, error)
+	}{
+		{
+			name: "leaderboard entry",
+			body: `{"rank":1,"member":"alice","value":"5","updatedAt":"` + wireTimestamp + `"}`,
+			read: func(body []byte) (time.Time, error) {
+				var entry LeaderboardEntry
+				err := json.Unmarshal(body, &entry)
+				return entry.UpdatedAt, err
+			},
+		},
+		{
+			name: "member snapshot",
+			body: `{"key":"lb","member":"alice","value":"5","rank":1,"percentile":"100.00","memberCount":1,"mode":"sum","epoch":0,"updatedAt":"` + wireTimestamp + `"}`,
+			read: func(body []byte) (time.Time, error) {
+				var snapshot MemberSnapshot
+				err := json.Unmarshal(body, &snapshot)
+				return snapshot.UpdatedAt, err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.read([]byte(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(want) {
+				t.Fatalf("updatedAt=%v, want %v", got, want)
+			}
+			roundTripped, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(roundTripped) != `"`+wireTimestamp+`"` {
+				t.Errorf("round-tripped timestamp=%s, want %q", roundTripped, wireTimestamp)
+			}
+		})
+	}
+}
+
+func TestSeriesPointPublicShapeAndWireMapping(t *testing.T) {
+	wantTimestamp := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	point := SeriesPoint{Timestamp: wantTimestamp, Value: "100000000000000000000000000000000"}
+
+	wire, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantWire = `{"t":"2026-07-01T12:30:00Z","v":"100000000000000000000000000000000"}`
+	if string(wire) != wantWire {
+		t.Fatalf("series point wire=%s, want %s", wire, wantWire)
+	}
+
+	var decoded SeriesPoint
+	if err := json.Unmarshal([]byte(wantWire), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Timestamp.Equal(wantTimestamp) || decoded.Value != point.Value {
+		t.Fatalf("decoded series point=%+v, want %+v", decoded, point)
+	}
+
+	typ := reflect.TypeOf(SeriesPoint{})
+	if typ.NumField() != 2 {
+		t.Fatalf("SeriesPoint has %d fields, want exactly Timestamp and Value", typ.NumField())
+	}
+	timestamp, ok := typ.FieldByName("Timestamp")
+	if !ok || timestamp.Type != reflect.TypeOf(time.Time{}) || timestamp.Tag.Get("json") != "t" {
+		t.Fatalf("Timestamp field=%+v present=%v", timestamp, ok)
+	}
+	value, ok := typ.FieldByName("Value")
+	if !ok || value.Type.Kind() != reflect.String || value.Tag.Get("json") != "v" {
+		t.Fatalf("Value field=%+v present=%v", value, ok)
+	}
+}
+
+func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
+	timeType := reflect.TypeOf(time.Time{})
+	timePointerType := reflect.TypeOf((*time.Time)(nil))
+	stringPointerType := reflect.TypeOf((*string)(nil))
+
+	for _, tc := range []struct {
+		owner reflect.Type
+		field string
+		want  reflect.Type
+		json  string
+	}{
+		{reflect.TypeOf(Counter{}), "CreatedAt", timePointerType, "createdAt,omitempty"},
+		{reflect.TypeOf(Counter{}), "UpdatedAt", timePointerType, "updatedAt,omitempty"},
+		{reflect.TypeOf(SeriesPoint{}), "Timestamp", timeType, "t"},
+		{reflect.TypeOf(LeaderboardEntry{}), "UpdatedAt", timeType, "updatedAt"},
+		{reflect.TypeOf(MemberSnapshot{}), "UpdatedAt", timeType, "updatedAt"},
+		{reflect.TypeOf(WindowLeaderboard{}), "EffectiveStart", timeType, "effectiveStart"},
+		{reflect.TypeOf(WindowLeaderboard{}), "EffectiveEnd", timeType, "effectiveEnd"},
+		{reflect.TypeOf(MemberWriteOpts{}), "OccurredAt", timePointerType, ""},
+		{reflect.TypeOf(SubmitOpts{}), "OccurredAt", timePointerType, ""},
+		{reflect.TypeOf(operation{}), "OccurredAt", timePointerType, "occurredAt,omitempty"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "Timestamp", timeType, "t"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "Value", stringPointerType, "v"},
+		{reflect.TypeOf(SeriesParams{}), "From", timeType, ""},
+		{reflect.TypeOf(SeriesParams{}), "To", timeType, ""},
+		{reflect.TypeOf(DerivedSeriesParams{}), "From", timeType, ""},
+		{reflect.TypeOf(DerivedSeriesParams{}), "To", timeType, ""},
+	} {
+		assertStructField(t, tc.owner, tc.field, tc.want, tc.json)
+	}
+
+	usageType := reflect.TypeOf(Usage{})
+	operations, ok := usageType.FieldByName("Operations")
+	if !ok || operations.Tag.Get("json") != "ops" {
+		t.Fatalf("Usage.Operations=%+v present=%v", operations, ok)
+	}
+	assertStructField(t, operations.Type, "ResetsAt", timeType, "resetsAt")
+	limits, ok := usageType.FieldByName("Limits")
+	if !ok {
+		t.Fatal("Usage.Limits is absent")
+	}
+	assertStructField(t, limits.Type, "RateLimitRequestsPerSecond", reflect.TypeOf(int64(0)), "rateLimitRps")
+	assertStructField(t, limits.Type, "MonthlyOperationsQuota", reflect.TypeOf((*int64)(nil)), "monthlyOpsQuota")
+
+	for _, owner := range []reflect.Type{
+		reflect.TypeOf(SeriesResponse{}),
+		reflect.TypeOf(MemberSeriesResponse{}),
+		reflect.TypeOf(MemberGroupSeriesResponse{}),
+		reflect.TypeOf(DerivedSeriesResponse{}),
+	} {
+		rangeField, ok := owner.FieldByName("Range")
+		if !ok {
+			t.Fatalf("%s.Range is absent", owner.Name())
+		}
+		assertStructField(t, rangeField.Type, "From", timeType, "from")
+		assertStructField(t, rangeField.Type, "To", timeType, "to")
+		assertStructField(t, owner, "TimeZone", reflect.TypeOf(""), "tz")
+	}
+	assertStructField(t, reflect.TypeOf(SeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
+	assertStructField(t, reflect.TypeOf(DerivedSeriesParams{}), "TimeZone", reflect.TypeOf(""), "")
+	assertStructField(t, reflect.TypeOf(operation{}), "Operation", reflect.TypeOf(""), "op")
+
+	// The spec requires a point value-type `mode` on both member-dimensional series shapes, and the
+	// window total is optional (absent on score boards) — so it must be a pointer.
+	assertStructField(t, reflect.TypeOf(MemberSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
+	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
+	assertStructField(t, reflect.TypeOf(WindowLeaderboard{}), "Total", stringPointerType, "total,omitempty")
+
+	for _, old := range []struct {
+		owner reflect.Type
+		field string
+	}{
+		{reflect.TypeOf(DerivedSeriesPoint{}), "T"},
+		{reflect.TypeOf(DerivedSeriesPoint{}), "V"},
+		{reflect.TypeOf(SeriesParams{}), "Tz"},
+		{reflect.TypeOf(DerivedSeriesParams{}), "Tz"},
+		{reflect.TypeOf(operation{}), "Op"},
+		{usageType, "Ops"},
+		{limits.Type, "RateLimitRps"},
+		{limits.Type, "MonthlyOpsQuota"},
+	} {
+		if _, ok := old.owner.FieldByName(old.field); ok {
+			t.Errorf("obsolete shorthand %s.%s remains public", old.owner.Name(), old.field)
+		}
+	}
+}
+
+func assertStructField(t *testing.T, owner reflect.Type, name string, wantType reflect.Type, wantJSON string) {
+	t.Helper()
+	field, ok := owner.FieldByName(name)
+	if !ok {
+		t.Fatalf("%s.%s is absent", owner.Name(), name)
+	}
+	if field.Type != wantType || field.Tag.Get("json") != wantJSON {
+		t.Errorf("%s.%s type/tag=%v %q, want %v %q", owner.Name(), name, field.Type, field.Tag.Get("json"), wantType, wantJSON)
+	}
+}
+
+func TestOptionalRequestDateTimesStayNilWhenAbsent(t *testing.T) {
+	if (MemberWriteOpts{}).OccurredAt != nil || (SubmitOpts{}).OccurredAt != nil {
+		t.Fatal("absent member request timestamps must remain nil")
+	}
+
+	var clearOp operation
+	if err := json.Unmarshal([]byte(`{"counterKey":"c","op":"clear"}`), &clearOp); err != nil {
+		t.Fatal(err)
+	}
+	if clearOp.OccurredAt != nil {
+		t.Fatalf("absent operation.OccurredAt=%v, want nil", clearOp.OccurredAt)
+	}
+	wire, err := json.Marshal(clearOp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(wire) != `{"counterKey":"c","op":"clear"}` {
+		t.Fatalf("operation wire=%s", wire)
+	}
+
+	at := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	wire, err = json.Marshal(operation{CounterKey: "c", Operation: "add", OccurredAt: &at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(wire) != `{"counterKey":"c","op":"add","occurredAt":"2026-07-01T12:30:00Z"}` {
+		t.Fatalf("timestamped operation wire=%s", wire)
+	}
+}
+
+func TestResponseDateTimesDecodeAcrossAllPublicTypes(t *testing.T) {
+	const fromWire = "2026-07-01T12:30:00Z"
+	const toWire = "2026-07-02T08:45:00Z"
+	wantFrom, _ := time.Parse(time.RFC3339, fromWire)
+	wantTo, _ := time.Parse(time.RFC3339, toWire)
+	rangeBody := `{"range":{"from":"` + fromWire + `","to":"` + toWire + `"}}`
+
+	for _, tc := range []struct {
+		name string
+		body string
+		read func([]byte) (time.Time, time.Time, error)
+	}{
+		{
+			name: "counter series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response SeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "member series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response MemberSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "member group series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response MemberGroupSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "derived series range",
+			body: rangeBody,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response DerivedSeriesResponse
+				err := json.Unmarshal(body, &response)
+				return response.Range.From, response.Range.To, err
+			},
+		},
+		{
+			name: "window leaderboard bounds",
+			body: `{"effectiveStart":"` + fromWire + `","effectiveEnd":"` + toWire + `"}`,
+			read: func(body []byte) (time.Time, time.Time, error) {
+				var response WindowLeaderboard
+				err := json.Unmarshal(body, &response)
+				return response.EffectiveStart, response.EffectiveEnd, err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFrom, gotTo, err := tc.read([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gotFrom.Equal(wantFrom) || !gotTo.Equal(wantTo) {
+				t.Fatalf("date-times=%v..%v, want %v..%v", gotFrom, gotTo, wantFrom, wantTo)
+			}
+		})
+	}
+
+	var usage Usage
+	if err := json.Unmarshal([]byte(`{"ops":{"resetsAt":"`+toWire+`"}}`), &usage); err != nil {
+		t.Fatal(err)
+	}
+	if !usage.Operations.ResetsAt.Equal(wantTo) {
+		t.Fatalf("usage reset=%v, want %v", usage.Operations.ResetsAt, wantTo)
+	}
+}
+
+func TestDerivedSeriesPointPreservesNullValueOnErgonomicFields(t *testing.T) {
+	const wire = `{"t":"2026-07-01T12:30:00Z","v":null}`
+	var point DerivedSeriesPoint
+	if err := json.Unmarshal([]byte(wire), &point); err != nil {
+		t.Fatal(err)
+	}
+	wantTimestamp := time.Date(2026, 7, 1, 12, 30, 0, 0, time.UTC)
+	if !point.Timestamp.Equal(wantTimestamp) || point.Value != nil {
+		t.Fatalf("derived point=%+v, want timestamp %v and nil value", point, wantTimestamp)
+	}
+	roundTripped, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(roundTripped) != wire {
+		t.Fatalf("derived point wire=%s, want %s", roundTripped, wire)
+	}
+}
+
+func TestPublishablePublicMethodSets(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  reflect.Type
+		want []string
+	}{
+		{"PublishableClient", reflect.TypeOf((*PublishableClient)(nil)), []string{"Close", "Counter"}},
+		{"PublishableCounterHandle", reflect.TypeOf((*PublishableCounterHandle)(nil)), []string{
+			"GroupSeries", "Leaderboard", "Member", "MemberSeries", "Series", "Value", "WindowLeaderboard",
+		}},
+		{"PublishableMemberHandle", reflect.TypeOf((*PublishableMemberHandle)(nil)), []string{"Get"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make([]string, tt.typ.NumMethod())
+			for i := 0; i < tt.typ.NumMethod(); i++ {
+				got[i] = tt.typ.Method(i).Name
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("exported methods=%v, want exactly %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPublishableHandleIdentityFields(t *testing.T) {
+	client, err := NewPublishableClient(PublishableOptions{APIKey: "pk_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := client.Counter("visible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counter.Key != "visible" {
+		t.Fatalf("counter Key=%q, want visible", counter.Key)
+	}
+	member, err := counter.Member("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member.CounterKey != "visible" || member.Member != "alice" {
+		t.Fatalf("member identity=(%q, %q), want (visible, alice)", member.CounterKey, member.Member)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		typ  reflect.Type
+		want []string
+	}{
+		{"PublishableCounterHandle", reflect.TypeOf(PublishableCounterHandle{}), []string{"Key"}},
+		{"PublishableMemberHandle", reflect.TypeOf(PublishableMemberHandle{}), []string{"CounterKey", "Member"}},
+	} {
+		var got []string
+		for i := 0; i < tt.typ.NumField(); i++ {
+			field := tt.typ.Field(i)
+			if field.IsExported() {
+				got = append(got, field.Name)
+				if field.Type.Kind() != reflect.String {
+					t.Fatalf("%s.%s type=%v, want string", tt.name, field.Name, field.Type)
+				}
+			}
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Fatalf("%s exported fields=%v, want exactly %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestBatchOnErrorPublicShapeIsTyped(t *testing.T) {
+	field, ok := reflect.TypeOf(BatchOptions{}).FieldByName("OnError")
+	if !ok {
+		t.Fatal("BatchOptions.OnError is missing")
+	}
+	want := reflect.TypeOf((func(WriteFailure))(nil))
+	if field.Type != want {
+		t.Fatalf("BatchOptions.OnError type=%v, want %v", field.Type, want)
+	}
+	failureType := reflect.TypeOf(WriteFailure{})
+	wantFields := []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"CounterKey", reflect.TypeOf("")},
+		{"Delta", reflect.TypeOf("")},
+		{"Member", reflect.TypeOf("")},
+		{"IdempotencyKey", reflect.TypeOf("")},
+		{"Err", reflect.TypeOf((*Error)(nil)).Elem()},
+	}
+	if failureType.NumField() != len(wantFields) {
+		t.Fatalf("WriteFailure has %d fields, want exactly %d", failureType.NumField(), len(wantFields))
+	}
+	for i, wantField := range wantFields {
+		got := failureType.Field(i)
+		if got.Name != wantField.name || got.Type != wantField.typ {
+			t.Errorf("WriteFailure field %d=%s %v, want %s %v", i, got.Name, got.Type, wantField.name, wantField.typ)
+		}
+	}
+}
+
+func TestPublishableClientUsesScopedReadPaths(t *testing.T) {
+	var gotAuth, gotPath string
+	client, err := NewPublishableClient(PublishableOptions{
+		APIKey:  "pk_test",
+		BaseURL: "https://unit.test/v1",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+			return jsonLoopbackResponse(200, `{"key":"visible","value":"7","epoch":0}`), nil
+		})},
+		MaxRetries: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := client.Counter("visible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := handle.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Value != "7" || gotAuth != "Bearer pk_test" || gotPath != "/v1/counters/visible/value" {
+		t.Fatalf("value=%+v auth=%q path=%q", value, gotAuth, gotPath)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -394,7 +832,9 @@ func TestBufferedCoalesceOverHTTP(t *testing.T) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		bodies = append(bodies, b)
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+			map[string]any{"counterKey": "registrations", "status": "applied", "value": "6"},
+		}})
 	}))
 	defer srv.Close()
 
@@ -516,7 +956,10 @@ func TestUsageMethod(t *testing.T) {
 	if idem != "" {
 		t.Errorf("usage must not carry idempotency key, got %q", idem)
 	}
-	if u.Month != "2026-07" || u.Ops.Used != 42 || u.Ops.Quota != nil || u.Limits.MonthlyOpsQuota != nil || u.Ops.ResetsAt == "" {
+	wantReset := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if u.Month != "2026-07" || u.Operations.Used != 42 || u.Operations.Quota != nil ||
+		u.Limits.RateLimitRequestsPerSecond != 50 || u.Limits.MaxCounters != 1000 ||
+		u.Limits.MonthlyOperationsQuota != nil || !u.Operations.ResetsAt.Equal(wantReset) {
 		t.Errorf("usage=%+v", u)
 	}
 }
@@ -569,7 +1012,7 @@ func TestMemberHandleMethodsLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := m.Add(context.Background(), huge, MemberWriteOpts{Metadata: "room1:500", OccurredAt: at})
+	added, err := m.Add(context.Background(), huge, MemberWriteOpts{Metadata: "room1:500", OccurredAt: &at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +1169,7 @@ func TestSeriesQueryEncodingAndPoints(t *testing.T) {
 		params SeriesParams
 		want   map[string]string // "" means the key must be absent
 	}{
-		{"all params", SeriesParams{From: from, To: to, Bucket: "1h", Mode: "delta", Tz: "Europe/Amsterdam", Gapfill: true},
+		{"all params", SeriesParams{From: from, To: to, Bucket: "1h", Mode: "delta", TimeZone: "Europe/Amsterdam", Gapfill: true},
 			map[string]string{"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "1h", "mode": "delta", "tz": "Europe/Amsterdam", "gapfill": "true"}},
 		{"minimal", SeriesParams{From: from, To: to, Bucket: "1d"},
 			map[string]string{"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "1d", "mode": "", "tz": "", "gapfill": ""}},
@@ -764,8 +1207,14 @@ func TestSeriesQueryEncodingAndPoints(t *testing.T) {
 			if s.CounterKey != "c" || s.Bucket != tc.params.Bucket {
 				t.Errorf("series=%+v", s)
 			}
-			if len(s.Points) != 2 || s.Points[0].V != "1" || s.Points[1].V != "100000000000000000000000000000000" {
+			if s.TimeZone != "UTC" || !s.Range.From.Equal(from) || !s.Range.To.Equal(to) {
+				t.Errorf("series timezone/range=%q %v..%v", s.TimeZone, s.Range.From, s.Range.To)
+			}
+			if len(s.Points) != 2 || s.Points[0].Value != "1" || s.Points[1].Value != "100000000000000000000000000000000" {
 				t.Errorf("points=%+v", s.Points)
+			}
+			if !s.Points[0].Timestamp.Equal(from) || !s.Points[1].Timestamp.Equal(from.Add(time.Hour)) {
+				t.Errorf("point timestamps=%v, want %v and %v", s.Points, from, from.Add(time.Hour))
 			}
 		})
 	}
@@ -798,7 +1247,7 @@ func TestSeriesConformance(t *testing.T) {
 			}
 			params := SeriesParams{From: from, To: to, Bucket: p["bucket"].(string)}
 			if tz, ok := p["tz"].(string); ok {
-				params.Tz = tz
+				params.TimeZone = tz
 			}
 			if gf, ok := p["gapfill"].(bool); ok {
 				params.Gapfill = gf
@@ -810,7 +1259,7 @@ func TestSeriesConformance(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotQuery = r.URL.Query()
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"counterKey":"c","bucket":"` + params.Bucket + `","mode":"delta","range":{"from":"","to":""},"points":[]}`))
+				_, _ = w.Write([]byte(`{"counterKey":"c","bucket":"` + params.Bucket + `","mode":"delta","range":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"points":[]}`))
 			}))
 			defer srv.Close()
 			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
@@ -867,6 +1316,7 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Member != exp["member"].(string) || s.Bucket != exp["bucket"].(string) || s.Mode != exp["mode"].(string) {
 					t.Errorf("member series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				assertSeriesPoints(t, s.Points, exp["points"].([]any))
 			case "memberGroupSeries":
 				s, err := h.GroupSeries(context.Background(), params)
@@ -876,6 +1326,7 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Bucket != exp["bucket"].(string) {
 					t.Errorf("member group series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				expSeries := exp["series"].([]any)
 				if len(s.Series) != len(expSeries) {
 					t.Fatalf("series len=%d, want %d", len(s.Series), len(expSeries))
@@ -895,9 +1346,25 @@ func TestSeriesConformance(t *testing.T) {
 				if s.CounterKey != exp["counterKey"].(string) || s.Bucket != exp["bucket"].(string) || s.Mode != exp["mode"].(string) {
 					t.Errorf("series=%+v", s)
 				}
+				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				assertSeriesPoints(t, s.Points, exp["points"].([]any))
 			}
 		})
+	}
+}
+
+func assertTimeRange(t *testing.T, gotFrom, gotTo time.Time, want map[string]any) {
+	t.Helper()
+	wantFrom, err := time.Parse(time.RFC3339, want["from"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTo, err := time.Parse(time.RFC3339, want["to"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotFrom.Equal(wantFrom) || !gotTo.Equal(wantTo) {
+		t.Errorf("range=%v..%v, want %v..%v", gotFrom, gotTo, wantFrom, wantTo)
 	}
 }
 
@@ -908,7 +1375,11 @@ func assertSeriesPoints(t *testing.T, got []SeriesPoint, want []any) {
 	}
 	for i, ep := range want {
 		epm := ep.(map[string]any)
-		if got[i].T != epm["t"].(string) || got[i].V != epm["v"].(string) {
+		wantTimestamp, err := time.Parse(time.RFC3339, epm["t"].(string))
+		if err != nil {
+			t.Fatalf("point %d has invalid expected timestamp: %v", i, err)
+		}
+		if !got[i].Timestamp.Equal(wantTimestamp) || got[i].Value != epm["v"].(string) {
 			t.Errorf("point %d = %+v, want %v", i, got[i], epm)
 		}
 	}
@@ -974,7 +1445,7 @@ func TestLeaderboardConformance(t *testing.T) {
 			cl := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
 				got = r.URL.Query()
 				if w, ok := params["window"].(string); ok {
-					return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","window":"`+w+`","order":"desc","total":"0","memberCount":0,"limit":100,"offset":0,"effectiveStart":"","effectiveEnd":"","entries":[]}`), nil
+					return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","window":"`+w+`","order":"desc","total":"0","memberCount":0,"limit":100,"offset":0,"effectiveStart":"2026-01-01T00:00:00Z","effectiveEnd":"2026-01-02T00:00:00Z","entries":[]}`), nil
 				}
 				return jsonLoopbackResponse(200, `{"key":"k","mode":"sum","epoch":0,"order":"desc","memberCount":0,"limit":100,"offset":0,"entries":[]}`), nil
 			})
@@ -1131,7 +1602,7 @@ func memberWriteOptsFromInput(t *testing.T, input map[string]any) MemberWriteOpt
 		if err != nil {
 			t.Fatal(err)
 		}
-		opts.OccurredAt = parsed
+		opts.OccurredAt = &parsed
 	}
 	return opts
 }
@@ -1174,12 +1645,58 @@ func assertLeaderboardEntries(t *testing.T, got []LeaderboardEntry, want []any) 
 	}
 }
 
+func TestWindowLeaderboardOnScoreBoardHasBoardModeAndNoTotal(t *testing.T) {
+	// A windowed board follows the board mode; score boards omit `total` entirely on the wire.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"best-lap","mode":"min","window":"7d","order":"asc",` +
+			`"memberCount":2,"limit":100,"offset":0,` +
+			`"effectiveStart":"2026-06-27T00:00:00Z","effectiveEnd":"2026-07-04T09:30:00Z",` +
+			`"entries":[{"rank":1,"member":"alice","value":"1417"}]}`))
+	}))
+	defer srv.Close()
+	client, err := NewClient(Options{APIKey: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	h, err := client.Counter("best-lap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lb, err := h.WindowLeaderboard(context.Background(), WindowLeaderboardParams{Window: "7d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lb.Mode != "min" {
+		t.Errorf("mode=%q, want min", lb.Mode)
+	}
+	if lb.Total != nil {
+		t.Errorf("total must be nil on score-board windows, got %q", *lb.Total)
+	}
+	if len(lb.Entries) != 1 || lb.Entries[0].Value != "1417" {
+		t.Errorf("entries=%+v", lb.Entries)
+	}
+}
+
 func assertWindowLeaderboard(t *testing.T, got *WindowLeaderboard, exp map[string]any) {
 	t.Helper()
-	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) || got.Total != exp["total"].(string) {
+	if got.Key != exp["key"].(string) || got.Mode != exp["mode"].(string) || got.Window != exp["window"].(string) || got.Order != exp["order"].(string) {
 		t.Errorf("window leaderboard=%+v, expect=%v", got, exp)
 	}
-	if got.EffectiveStart != exp["effectiveStart"].(string) || got.EffectiveEnd != exp["effectiveEnd"].(string) {
+	// The window group total is non-nil only on sum boards; the conformance vectors carry sum boards.
+	if got.Total == nil || *got.Total != exp["total"].(string) {
+		t.Errorf("window total=%v, want %q", got.Total, exp["total"])
+	}
+	wantStart, err := time.Parse(time.RFC3339, exp["effectiveStart"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd, err := time.Parse(time.RFC3339, exp["effectiveEnd"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.EffectiveStart.Equal(wantStart) || !got.EffectiveEnd.Equal(wantEnd) {
 		t.Errorf("effective range=%s..%s", got.EffectiveStart, got.EffectiveEnd)
 	}
 	want := exp["entries"].([]any)
@@ -1247,7 +1764,7 @@ func TestDerivedConformance(t *testing.T) {
 				if r.URL.Path != "/v1/derived/conversion/series" {
 					t.Errorf("path=%s", r.URL.Path)
 				}
-				return jsonLoopbackResponse(200, `{"key":"conversion","bucket":"`+params["bucket"].(string)+`","scale":6,"range":{"from":"","to":""},"points":[]}`), nil
+				return jsonLoopbackResponse(200, `{"key":"conversion","bucket":"`+params["bucket"].(string)+`","scale":6,"range":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"points":[]}`), nil
 			})
 			d, err := cl.Derived("conversion")
 			if err != nil {
@@ -1256,10 +1773,10 @@ func TestDerivedConformance(t *testing.T) {
 			from, _ := time.Parse(time.RFC3339, params["from"].(string))
 			to, _ := time.Parse(time.RFC3339, params["to"].(string))
 			_, err = d.Series(context.Background(), DerivedSeriesParams{
-				From:   from,
-				To:     to,
-				Bucket: params["bucket"].(string),
-				Tz:     stringFromAny(params["tz"]),
+				From:     from,
+				To:       to,
+				Bucket:   params["bucket"].(string),
+				TimeZone: stringFromAny(params["tz"]),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1315,8 +1832,9 @@ func TestDerivedConformance(t *testing.T) {
 					}
 				}
 			case "derivedSeries":
-				from, _ := time.Parse(time.RFC3339, body["range"].(map[string]any)["from"].(string))
-				to, _ := time.Parse(time.RFC3339, body["range"].(map[string]any)["to"].(string))
+				rng := body["range"].(map[string]any)
+				from, _ := time.Parse(time.RFC3339, rng["from"].(string))
+				to, _ := time.Parse(time.RFC3339, rng["to"].(string))
 				got, err := d.Series(context.Background(), DerivedSeriesParams{From: from, To: to, Bucket: body["bucket"].(string)})
 				if err != nil {
 					t.Fatal(err)
@@ -1324,21 +1842,26 @@ func TestDerivedConformance(t *testing.T) {
 				if got.Key != exp["key"].(string) || got.Bucket != exp["bucket"].(string) || got.Scale != intFromAny(exp["scale"]) {
 					t.Errorf("derived series=%+v, expect=%v", got, exp)
 				}
+				assertTimeRange(t, got.Range.From, got.Range.To, rng)
 				wantPoints := exp["points"].([]any)
 				if len(got.Points) != len(wantPoints) {
 					t.Fatalf("points len=%d, want %d", len(got.Points), len(wantPoints))
 				}
 				for i, rawPoint := range wantPoints {
 					wantPoint := rawPoint.(map[string]any)
-					if got.Points[i].T != wantPoint["t"].(string) {
-						t.Errorf("point %d t=%q, want %q", i, got.Points[i].T, wantPoint["t"])
+					wantTimestamp, err := time.Parse(time.RFC3339, wantPoint["t"].(string))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !got.Points[i].Timestamp.Equal(wantTimestamp) {
+						t.Errorf("point %d timestamp=%v, want %v", i, got.Points[i].Timestamp, wantTimestamp)
 					}
 					if wantPoint["v"] == nil {
-						if got.Points[i].V != nil {
-							t.Errorf("point %d v=%q, want nil", i, *got.Points[i].V)
+						if got.Points[i].Value != nil {
+							t.Errorf("point %d value=%q, want nil", i, *got.Points[i].Value)
 						}
-					} else if got.Points[i].V == nil || *got.Points[i].V != wantPoint["v"].(string) {
-						t.Errorf("point %d v=%v, want %q", i, got.Points[i].V, wantPoint["v"])
+					} else if got.Points[i].Value == nil || *got.Points[i].Value != wantPoint["v"].(string) {
+						t.Errorf("point %d value=%v, want %q", i, got.Points[i].Value, wantPoint["v"])
 					}
 				}
 			default:
@@ -1414,7 +1937,7 @@ func TestEnqueueAfterCloseIsRejected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"results":[]}`))
+		_, _ = w.Write([]byte(`{"results":[{"counterKey":"c","status":"applied","value":"1"}]}`))
 	}))
 	defer srv.Close()
 
@@ -1551,7 +2074,7 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: 0})
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
 			h, _ := cl.Counter("c")
 			_, err := h.AddNow(context.Background(), 1)
 			var apiErr *APIError
@@ -1577,7 +2100,7 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 			closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			base := closed.URL
 			closed.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: base + "/v1", MaxRetries: 0, Backoff: 0})
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: base + "/v1", MaxRetries: -1, Backoff: 0})
 			h, _ := cl.Counter("c")
 			_, err := h.AddNow(context.Background(), 1)
 			var transportErr *TransportError
@@ -1631,9 +2154,13 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(resp["body"])
 			}))
 			defer srv.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: 0})
-			h, _ := cl.Counter("a")
-			if err := h.Add(1); err != nil {
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
+			signups, _ := cl.Counter("signups")
+			capped, _ := cl.Counter("capped")
+			if err := signups.Add(1); err != nil {
+				t.Fatal(err)
+			}
+			if err := capped.Add(1); err != nil {
 				t.Fatal(err)
 			}
 			err := cl.Flush()
@@ -1669,4 +2196,677 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImmediateModeRoutesWriteIdentityToOnError(t *testing.T) {
+	failureCh := make(chan WriteFailure, 1)
+	c, _ := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(403, `{"title":"quota exceeded","status":403}`), nil
+		})},
+		Batch: &BatchOptions{Disabled: true, OnError: func(failure WriteFailure) { failureCh <- failure }},
+	})
+	h, _ := c.Counter("c")
+	if err := h.Add(1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case failure := <-failureCh:
+		if failure.CounterKey != "c" || failure.Delta != "1" || failure.Member != "" || failure.IdempotencyKey == "" {
+			t.Fatalf("OnError identity = %+v, want counter c, delta 1, no member, and an idempotency key", failure)
+		}
+		var apiErr *APIError
+		if !errors.As(failure.Err, &apiErr) || apiErr.Status != 403 {
+			t.Fatalf("OnError got %v, want *APIError with status 403", failure.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("immediate-mode write failure never reached OnError")
+	}
+}
+
+func TestImmediateModeRejectsWritesAfterClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"results":[{"counterKey":"c","status":"applied","value":"1"}]}`)
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", Batch: &BatchOptions{Disabled: true}})
+	h, _ := c.Counter("c")
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Add(1); !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("Add after Close = %v, want ErrClientClosed", err)
+	}
+}
+
+func TestMaxRetriesMinusOneDisablesRetries(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		_, _ = io.WriteString(w, `{"title":"boom","status":500}`)
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
+	h, _ := c.Counter("c")
+	_, err := h.AddNow(context.Background(), 1)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 500 {
+		t.Fatalf("got %v, want *APIError 500", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (retries disabled)", attempts)
+	}
+}
+
+func TestBatchIntervalZeroUsesDefaultAndMinusOneDisablesTimer(t *testing.T) {
+	withDefault, err := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withDefault.batcher.ticker == nil {
+		t.Fatal("BatchOptions.Interval=0 disabled the timer; zero must select the 1s default")
+	}
+	if err := withDefault.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	withoutTimer, err := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutTimer.batcher.ticker != nil {
+		t.Fatal("BatchOptions.Interval=-1 started a timer; -1 must disable timed flushing")
+	}
+	if err := withoutTimer.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatchOnErrorReportsOnlyFailedWriteIdentities(t *testing.T) {
+	var failures []WriteFailure
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[`+
+				`{"counterKey":"accepted","status":"applied","value":"2"},`+
+				`{"counterKey":"rejected","status":"error","error":{"title":"quota exceeded","status":403}}]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, _ := c.Counter("accepted")
+	rejected, _ := c.Counter("rejected")
+	if err := accepted.Add(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejected.Subtract(3); err != nil {
+		t.Fatal(err)
+	}
+	c.batcher.flushSafe()
+
+	if len(failures) != 1 {
+		t.Fatalf("OnError calls=%d, want only the one failed result: %+v", len(failures), failures)
+	}
+	failure := failures[0]
+	if failure.CounterKey != "rejected" || failure.Delta != "-3" || failure.Member != "" || failure.IdempotencyKey == "" {
+		t.Fatalf("failure identity=%+v, want rejected/-3/no-member/non-empty-idempotency-key", failure)
+	}
+	var apiErr *APIError
+	if !errors.As(failure.Err, &apiErr) || apiErr.Status != 403 {
+		t.Fatalf("failure.Err=%v, want *APIError status 403", failure.Err)
+	}
+}
+
+func TestBatchOnErrorReportsEveryUnknownWriteOnOuterFailure(t *testing.T) {
+	var failures []WriteFailure
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("network unavailable")
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := c.Counter("a")
+	b, _ := c.Counter("b")
+	_ = a.Add(4)
+	_ = b.Subtract(7)
+	c.batcher.flushSafe()
+
+	if len(failures) != 2 {
+		t.Fatalf("OnError calls=%d, want one for each unknown write: %+v", len(failures), failures)
+	}
+	got := map[string]string{}
+	for _, failure := range failures {
+		got[failure.CounterKey] = failure.Delta
+		if failure.IdempotencyKey == "" {
+			t.Errorf("failure for %s omitted its idempotency key", failure.CounterKey)
+		}
+		var transportErr *TransportError
+		if !errors.As(failure.Err, &transportErr) {
+			t.Errorf("failure for %s has %T, want *TransportError", failure.CounterKey, failure.Err)
+		}
+	}
+	if got["a"] != "4" || got["b"] != "-7" {
+		t.Fatalf("reported deltas=%v, want a=4 and b=-7", got)
+	}
+}
+
+func TestBatchResultsCorrelateByUniqueCounterKey(t *testing.T) {
+	client, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[`+
+				`{"counterKey":"beta","status":"deduplicated"},`+
+				`{"counterKey":"alpha","status":"applied"}]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := []operation{
+		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
+		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
+	}
+	failures, err := client.submitBatch(context.Background(), ops)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("valid out-of-order results returned failures=%+v err=%v", failures, err)
+	}
+}
+
+func TestBatchPerOperationProblemStatusMustBeHTTPCode(t *testing.T) {
+	ops := []operation{{
+		CounterKey: "alpha", Operation: "add", Amount: "2",
+		IdempotencyKey: "idem-alpha",
+	}}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"negative", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":-1}}]}`},
+		{"zero", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":0}}]}`},
+		{"below-http-range", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":99}}]}`},
+		{"above-http-range", `{"results":[{"counterKey":"alpha","status":"error","error":{"title":"bad","status":600}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(Options{
+				APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return jsonLoopbackResponse(200, tc.body), nil
+				})},
+				Batch: &BatchOptions{Interval: -1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failures, err := client.submitBatch(context.Background(), ops)
+			assertExactlyOneTaxonomyKind(t, err, "validation")
+			if len(failures) != 1 {
+				t.Fatalf("failures=%d, want 1: %+v", len(failures), failures)
+			}
+			assertExactlyOneTaxonomyKind(t, failures[0].Err, "validation")
+			if failures[0].CounterKey != "alpha" || failures[0].Delta != "2" ||
+				failures[0].Member != "" || failures[0].IdempotencyKey != "idem-alpha" {
+				t.Fatalf("failure identity=%+v, want alpha/2/no-member/idem-alpha", failures[0])
+			}
+		})
+	}
+}
+
+func TestMalformedBatchResultsFanOutValidationIdentity(t *testing.T) {
+	ops := []operation{
+		{CounterKey: "alpha", Operation: "add", Amount: "2", IdempotencyKey: "idem-alpha"},
+		{CounterKey: "beta", Operation: "subtract", Amount: "3", IdempotencyKey: "idem-beta"},
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing-results", `{}`},
+		{"null-results", `{"results":null}`},
+		{"empty-results", `{"results":[]}`},
+		{"short-results", `{"results":[{"counterKey":"alpha","status":"applied"}]}`},
+		{"duplicate-key-omits-submitted-key", `{"results":[` +
+			`{"counterKey":"alpha","status":"applied"},` +
+			`{"counterKey":"alpha","status":"deduplicated"}]}`},
+		{"unknown-key", `{"results":[` +
+			`{"counterKey":"alpha","status":"applied"},` +
+			`{"counterKey":"ghost","status":"applied"}]}`},
+		{"unknown-status", `{"results":[` +
+			`{"counterKey":"alpha","status":"queued"},` +
+			`{"counterKey":"beta","status":"applied"}]}`},
+		{"missing-status", `{"results":[` +
+			`{"counterKey":"alpha"},` +
+			`{"counterKey":"beta","status":"applied"}]}`},
+		{"wrong-results-shape", `{"results":{}}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewClient(Options{
+				APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return jsonLoopbackResponse(200, tc.body), nil
+				})},
+				Batch: &BatchOptions{Interval: -1},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failures, err := client.submitBatch(context.Background(), ops)
+			assertExactlyOneTaxonomyKind(t, err, "validation")
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("error=%T, want *ValidationError", err)
+			}
+			if len(failures) != len(ops) {
+				t.Fatalf("failures=%d, want one for every submitted operation (%d): %+v", len(failures), len(ops), failures)
+			}
+			wantDeltas := []string{"2", "-3"}
+			for i, failure := range failures {
+				if failure.CounterKey != ops[i].CounterKey || failure.Delta != wantDeltas[i] ||
+					failure.Member != "" || failure.IdempotencyKey != ops[i].IdempotencyKey {
+					t.Errorf("failure[%d]=%+v, want identity %s/%s/no-member/%s",
+						i, failure, ops[i].CounterKey, wantDeltas[i], ops[i].IdempotencyKey)
+				}
+				if failure.Err != validationErr {
+					t.Errorf("failure[%d].Err=%v, want the shared validation error %v", i, failure.Err, validationErr)
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedBatchResponseOnErrorFansOutIdentities(t *testing.T) {
+	var failures []WriteFailure
+	client, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonLoopbackResponse(200, `{"results":[]}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1, OnError: func(failure WriteFailure) {
+			failures = append(failures, failure)
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha, _ := client.Counter("alpha")
+	beta, _ := client.Counter("beta")
+	if err := alpha.Add(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := beta.Subtract(3); err != nil {
+		t.Fatal(err)
+	}
+	client.batcher.flushSafe()
+
+	if len(failures) != 2 {
+		t.Fatalf("OnError calls=%d, want one per submitted operation: %+v", len(failures), failures)
+	}
+	got := make(map[string]string, len(failures))
+	for _, failure := range failures {
+		got[failure.CounterKey] = failure.Delta
+		if failure.Member != "" || failure.IdempotencyKey == "" {
+			t.Errorf("failure omitted reconciliation identity: %+v", failure)
+		}
+		assertExactlyOneTaxonomyKind(t, failure.Err, "validation")
+	}
+	if got["alpha"] != "2" || got["beta"] != "-3" {
+		t.Fatalf("OnError identities=%v, want alpha=2 and beta=-3", got)
+	}
+}
+
+func TestCallerCanReuseIdempotencyKeyAfterTransportFailure(t *testing.T) {
+	var keys []string
+	attempt := 0
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			attempt++
+			if attempt == 1 {
+				return nil, errors.New("connection reset after send")
+			}
+			return jsonLoopbackResponse(200, `{"key":"c","value":"5","epoch":0}`), nil
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := c.Counter("c")
+	opts := WriteOptions{IdempotencyKey: "retry-safe-1"}
+	if _, err := h.AddNow(context.Background(), 5, opts); err == nil {
+		t.Fatal("first write unexpectedly succeeded")
+	} else {
+		var transportErr *TransportError
+		if !errors.As(err, &transportErr) {
+			t.Fatalf("first write error=%T, want *TransportError", err)
+		}
+	}
+	result, err := h.AddNow(context.Background(), 5, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value != "5" {
+		t.Fatalf("retry result=%+v", result)
+	}
+	if !slices.Equal(keys, []string{"retry-safe-1", "retry-safe-1"}) {
+		t.Fatalf("idempotency keys=%v, want the caller key reused exactly", keys)
+	}
+}
+
+func TestEveryConfirmedWriteAcceptsCallerIdempotencyKey(t *testing.T) {
+	var keys []string
+	c, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			switch {
+			case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/members/"):
+				return jsonLoopbackResponse(200, `{"key":"c","member":"alice","removed":true,"epoch":0,"value":"0"}`), nil
+			case r.Method == http.MethodDelete:
+				return jsonLoopbackResponse(204, ""), nil
+			case strings.Contains(r.URL.Path, "/members/"):
+				return jsonLoopbackResponse(200, `{"key":"c","member":"alice","memberValue":"1","memberAccepted":true,"mode":"sum","epoch":0,"value":"1"}`), nil
+			default:
+				return jsonLoopbackResponse(200, `{"key":"c","value":"1","epoch":0}`), nil
+			}
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := c.Counter("c")
+	m, _ := h.Member("alice")
+	at := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: "counter-add"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SubtractNow(context.Background(), 1, WriteOptions{IdempotencyKey: "counter-subtract"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.AddNowAt(context.Background(), 1, at, WriteOptions{IdempotencyKey: "counter-add-at"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SubtractNowAt(context.Background(), 1, at, WriteOptions{IdempotencyKey: "counter-subtract-at"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Clear(context.Background(), WriteOptions{IdempotencyKey: "counter-clear"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Delete(context.Background(), WriteOptions{IdempotencyKey: "counter-delete"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Add(context.Background(), 1, MemberWriteOpts{IdempotencyKey: "member-add"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Subtract(context.Background(), 1, MemberWriteOpts{IdempotencyKey: "member-subtract"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Submit(context.Background(), 1, SubmitOpts{Mode: "max", IdempotencyKey: "member-submit"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Remove(context.Background(), WriteOptions{IdempotencyKey: "member-remove"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"counter-add", "counter-subtract", "counter-add-at", "counter-subtract-at", "counter-clear", "counter-delete",
+		"member-add", "member-subtract", "member-submit", "member-remove",
+	}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("idempotency keys=%v, want %v", keys, want)
+	}
+}
+
+func TestEveryProducibleErrorCategoryHasExactlyOneTaxonomyKind(t *testing.T) {
+	assert := func(name string, err error, want string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			assertExactlyOneTaxonomyKind(t, err, want)
+		})
+	}
+
+	_, err := NewClient(Options{})
+	assert("construction/missing-api-key", err, "validation")
+	_, err = NewPublishableClient(PublishableOptions{})
+	assert("construction/publishable-missing-api-key", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", BaseURL: "://not-a-url"})
+	assert("construction/invalid-base-url", err, "validation")
+	_, err = NewClient(Options{APIKey: "bad\nkey"})
+	assert("construction/invalid-auth-header", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", MaxRetries: -2})
+	assert("construction/invalid-max-retries", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Backoff: -1})
+	assert("construction/invalid-backoff", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Batch: &BatchOptions{MaxBatchSize: -1}})
+	assert("construction/invalid-batch-size", err, "validation")
+	_, err = NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -2}})
+	assert("construction/invalid-batch-interval", err, "validation")
+
+	local, err := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("validation unexpectedly issued a request")
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = local.Counter("has space")
+	assert("input/counter-key", err, "validation")
+	_, err = local.Derived("has space")
+	assert("input/derived-key", err, "validation")
+	h, _ := local.Counter("c")
+	_, err = h.Member("has space")
+	assert("input/member-key", err, "validation")
+	_, err = ToAmount(-1)
+	assert("input/amount", err, "validation")
+	var nilBigInt *big.Int
+	_, err = ToAmount(nilBigInt)
+	assert("input/typed-nil-amount", err, "validation")
+	_, err = ToValue("1.5")
+	assert("input/value", err, "validation")
+	_, err = ToValue(nilBigInt)
+	assert("input/typed-nil-value", err, "validation")
+	m, _ := h.Member("alice")
+	_, err = m.Add(context.Background(), 1, MemberWriteOpts{Metadata: strings.Repeat("x", metadataMaxBytes+1)})
+	assert("input/metadata", err, "validation")
+	_, err = h.Series(context.Background(), SeriesParams{Bucket: "2m"})
+	assert("input/series-bucket", err, "validation")
+	_, err = h.Series(context.Background(), SeriesParams{Bucket: "1h", Mode: "sum"})
+	assert("input/series-mode", err, "validation")
+	_, err = (&DerivedHandle{client: local, Key: "d"}).Series(context.Background(), DerivedSeriesParams{Bucket: "2m"})
+	assert("input/derived-series-bucket", err, "validation")
+	_, err = h.WindowLeaderboard(context.Background(), WindowLeaderboardParams{Window: "2h"})
+	assert("input/window", err, "validation")
+	_, err = m.Add(context.Background(), 1, MemberWriteOpts{}, MemberWriteOpts{})
+	assert("input/multiple-member-options", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{}, WriteOptions{})
+	assert("input/multiple-write-options", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: strings.Repeat("k", idempotencyKeyMaxLength+1)})
+	assert("input/overlong-idempotency-key", err, "validation")
+	_, err = h.AddNow(context.Background(), 1, WriteOptions{IdempotencyKey: "bad\nkey"})
+	assert("input/invalid-idempotency-header", err, "validation")
+	originalReader := idempotencyReader
+	idempotencyReader = errorReader{err: errors.New("entropy unavailable")}
+	_, err = h.AddNow(context.Background(), 1)
+	idempotencyReader = originalReader
+	assert("local/idempotency-generation", err, "transport")
+	_, err = h.Value(nil)
+	assert("input/nil-context", err, "validation")
+	err = local.do(context.Background(), "POST", "/test", make(chan int), "", nil, nil)
+	assert("request/body-encoding", err, "validation")
+
+	badRequestClient, _ := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	badRequestClient.baseURL = "http://[::1"
+	badRequestHandle, _ := badRequestClient.Counter("c")
+	_, err = badRequestHandle.Value(context.Background())
+	assert("request/construction", err, "validation")
+
+	closed, _ := NewClient(Options{APIKey: "k", Batch: &BatchOptions{Interval: -1}})
+	closedHandle, _ := closed.Counter("c")
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = closedHandle.Add(1)
+	if !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("closed error %v no longer matches ErrClientClosed", err)
+	}
+	assert("lifecycle/client-closed", err, "validation")
+
+	requestError := func(response *http.Response, transportErr error) error {
+		client, clientErr := NewClient(Options{
+			APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return response, transportErr
+			})},
+			Batch: &BatchOptions{Interval: -1},
+		})
+		if clientErr != nil {
+			t.Fatal(clientErr)
+		}
+		handle, _ := client.Counter("c")
+		_, callErr := handle.Value(context.Background())
+		return callErr
+	}
+	assert("response/http-error", requestError(jsonLoopbackResponse(404, `{"title":"missing"}`), nil), "api")
+	assert("response/unparseable-2xx", requestError(jsonLoopbackResponse(200, "{bad"), nil), "api")
+	bodyReadError := jsonLoopbackResponse(200, "")
+	bodyReadError.Body = io.NopCloser(errorReader{err: errors.New("body read failed")})
+	assert("response/body-read-error", requestError(bodyReadError, nil), "api")
+	assert("transport/no-response", requestError(nil, errors.New("network down")), "transport")
+	assert("transport/round-tripper-nil-response-and-error", requestError(nil, nil), "transport")
+	assert("transport/round-tripper-invalid-nil-body", requestError(&http.Response{
+		StatusCode: 200, ContentLength: 1,
+	}, nil), "transport")
+	assert("transport/round-tripper-invalid-status", requestError(&http.Response{
+		StatusCode: 0, Body: io.NopCloser(strings.NewReader(`{}`)),
+	}, nil), "transport")
+	redirectResponse := jsonLoopbackResponse(302, "")
+	redirectResponse.Header.Set("Location", "https://unit.test/redirected")
+	redirectClient, _ := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return redirectResponse, nil
+			}),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("redirect rejected")
+			},
+		},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	redirectHandle, _ := redirectClient.Counter("c")
+	_, err = redirectHandle.Value(context.Background())
+	assert("response/redirect-policy-error", err, "api")
+
+	attempts := 0
+	mixed, _ := NewClient(Options{
+		APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: 1,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return jsonLoopbackResponse(503, `{"title":"unavailable"}`), nil
+			}
+			return nil, errors.New("network then failed")
+		})},
+		Batch: &BatchOptions{Interval: -1},
+	})
+	mixed.sleepFn = func(time.Duration) {}
+	mixedHandle, _ := mixed.Counter("c")
+	_, err = mixedHandle.Value(context.Background())
+	assert("response/http-then-no-response", err, "api")
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"response/batch-problem-with-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota","status":403}}]}`, "api"},
+		{"response/batch-problem-without-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota"}}]}`, "validation"},
+		{"response/batch-problem-invalid-status", `{"results":[{"counterKey":"c","status":"error","error":{"title":"quota","status":600}}]}`, "validation"},
+	} {
+		batchClient, batchErr := NewClient(Options{
+			APIKey: "k", BaseURL: "https://unit.test/v1", MaxRetries: -1,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonLoopbackResponse(200, tc.body), nil
+			})},
+			Batch: &BatchOptions{Interval: -1},
+		})
+		if batchErr != nil {
+			t.Fatal(batchErr)
+		}
+		batchHandle, _ := batchClient.Counter("c")
+		_ = batchHandle.Add(1)
+		assert(tc.name, batchClient.Flush(), tc.want)
+	}
+}
+
+func assertExactlyOneTaxonomyKind(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var root Error
+	if !errors.As(err, &root) {
+		t.Fatalf("%T is not caught by counters.Error: %v", err, err)
+	}
+	matched := make([]string, 0, 3)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		matched = append(matched, "api")
+	}
+	var transportErr *TransportError
+	if errors.As(err, &transportErr) {
+		matched = append(matched, "transport")
+	}
+	var validationErr *ValidationError
+	if errors.As(err, &validationErr) {
+		matched = append(matched, "validation")
+	}
+	if len(matched) != 1 || matched[0] != want {
+		t.Fatalf("%T matched taxonomy kinds %v, want exactly [%s]: %v", err, matched, want, err)
+	}
+}
+
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestNewIdempotencyKeyFailsClosedWithTypedTransportPanic(t *testing.T) {
+	originalReader := idempotencyReader
+	idempotencyReader = errorReader{err: errors.New("entropy unavailable")}
+	defer func() { idempotencyReader = originalReader }()
+	defer func() {
+		recovered := recover()
+		err, ok := recovered.(error)
+		if !ok {
+			t.Fatalf("panic=%T %v, want an error", recovered, recovered)
+		}
+		assertExactlyOneTaxonomyKind(t, err, "transport")
+	}()
+
+	NewIdempotencyKey()
+	t.Fatal("NewIdempotencyKey returned a partial key instead of failing closed")
 }

@@ -1,14 +1,14 @@
 package dev.counters.sdk;
 
 import java.math.BigInteger;
-import java.time.OffsetDateTime;
+import java.time.Instant;
 
 /**
  * A typed handle to a single counter, obtained from {@link CountersClient#counter(String)} (which validates
  * the key). Amount arguments accept {@code long}, decimal-digit {@code String}, or {@link BigInteger} and are
  * normalised to a non-negative {@link BigInteger}; invalid amounts throw {@link CountersValidationException}.
  */
-public final class CounterHandle {
+public final class CounterHandle implements ReadOnlyCounterHandle {
 
     private final CountersClient client;
     private final String key;
@@ -63,8 +63,13 @@ public final class CounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time (series bucket lands at {@code occurredAt}). */
-    public Counter addNow(long amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+    public Counter addNow(long amount, Instant occurredAt) {
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(long amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply an increment immediately and return the new counter state. */
@@ -73,8 +78,13 @@ public final class CounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time. */
-    public Counter addNow(String amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+    public Counter addNow(String amount, Instant occurredAt) {
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(String amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply an increment immediately and return the new counter state. */
@@ -83,8 +93,13 @@ public final class CounterHandle {
     }
 
     /** Apply an increment immediately, stamped with an event time. */
-    public Counter addNow(BigInteger amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt);
+    public Counter addNow(BigInteger amount, Instant occurredAt) {
+        return addNow(amount, occurredAt, null);
+    }
+
+    /** Apply an increment with an optional event time and caller-supplied idempotency key. */
+    public Counter addNow(BigInteger amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "add", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -93,8 +108,13 @@ public final class CounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(long amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+    public Counter subtractNow(long amount, Instant occurredAt) {
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(long amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -103,8 +123,13 @@ public final class CounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(String amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+    public Counter subtractNow(String amount, Instant occurredAt) {
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(String amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     /** Apply a decrement immediately and return the new counter state. */
@@ -113,20 +138,35 @@ public final class CounterHandle {
     }
 
     /** Apply a decrement immediately, stamped with an event time. */
-    public Counter subtractNow(BigInteger amount, OffsetDateTime occurredAt) {
-        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt);
+    public Counter subtractNow(BigInteger amount, Instant occurredAt) {
+        return subtractNow(amount, occurredAt, null);
+    }
+
+    /** Apply a decrement with an optional event time and caller-supplied idempotency key. */
+    public Counter subtractNow(BigInteger amount, Instant occurredAt, String idempotencyKey) {
+        return client.applyNow(key, "subtract", Validation.toAmount(amount), occurredAt, idempotencyKey);
     }
 
     // ---- lifecycle & reads ----
 
     /** Reset the counter to zero (starts a new epoch; history retained). */
     public Counter clear() {
-        return client.clearCounter(key);
+        return clear(null);
+    }
+
+    /** Reset the counter using a caller-supplied idempotency key. */
+    public Counter clear(String idempotencyKey) {
+        return client.clearCounter(key, idempotencyKey);
     }
 
     /** Delete (tombstone) the counter. */
     public void delete() {
-        client.deleteCounter(key);
+        delete(null);
+    }
+
+    /** Delete (tombstone) the counter using a caller-supplied idempotency key. */
+    public void delete(String idempotencyKey) {
+        client.deleteCounter(key, idempotencyKey);
     }
 
     /** Current value. */
@@ -139,13 +179,19 @@ public final class CounterHandle {
         return client.getSeries(key, params);
     }
 
-    /** One member's time series (delta per bucket). Requires member series enabled on the counter. */
+    /**
+     * One member's time series (delta per bucket on a sum board; sparse best/latest scores on a
+     * score board). Requires member series enabled on the counter.
+     */
     public MemberSeriesResponse memberSeries(String member, SeriesParams params) {
         Validation.assertMemberKey(member);
         return client.getMemberSeries(key, member, params);
     }
 
-    /** Dense per-member multi-series. Requires member series enabled on the counter. */
+    /**
+     * The per-member multi-series (dense on a sum board, sparse per member on a score board).
+     * Requires member series enabled on the counter.
+     */
     public MemberGroupSeriesResponse groupSeries(SeriesParams params) {
         return client.getGroupSeries(key, params);
     }
@@ -160,7 +206,7 @@ public final class CounterHandle {
         return client.getLeaderboard(key, params);
     }
 
-    /** The windowed leaderboard: members ranked by summed activity over the trailing window. */
+    /** The windowed leaderboard: members ranked by their activity over the trailing window. */
     public WindowLeaderboard windowLeaderboard(WindowLeaderboardParams params) {
         return client.getWindowLeaderboard(key, params);
     }

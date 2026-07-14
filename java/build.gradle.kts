@@ -68,7 +68,7 @@ publishing {
             from(components["java"])
             pom {
                 name.set("Counters Java SDK")
-                description.set("Official Java SDK for counters.dev — multi-tenant arbitrary-precision counters.")
+                description.set("Official Java SDK for counters.dev — arbitrary-precision counters.")
                 url.set("https://counters.dev")
                 licenses {
                     license {

@@ -88,6 +88,39 @@ describe("Http transport", () => {
     expect(calls).toHaveBeenCalledTimes(3); // initial + 2 retries
   });
 
+  it("normalises hostile fetch failures and invalid resolved values as transport errors", async () => {
+    const unprintable = Object.create(null) as unknown;
+    const rejecting = (() => Promise.reject(unprintable)) as unknown as typeof fetch;
+    const rejected = await new Http(cfg(rejecting, { maxRetries: 0 }))
+      .request("GET", "/x")
+      .then(() => null)
+      .catch((error) => error);
+    expect(rejected).toBeInstanceOf(CountersTransportError);
+    expect(rejected).toBeInstanceOf(CountersError);
+
+    const resolvingNull = (() => Promise.resolve(null)) as unknown as typeof fetch;
+    const invalidResponse = await new Http(cfg(resolvingNull, { maxRetries: 0 }))
+      .request("GET", "/x")
+      .then(() => null)
+      .catch((error) => error);
+    expect(invalidResponse).toBeInstanceOf(CountersTransportError);
+    expect(invalidResponse).toBeInstanceOf(CountersError);
+
+    const resolvingInvalidStatus = (() => Promise.resolve({
+      ok: false,
+      status: 0,
+      text: async () => "",
+      json: async () => ({}),
+      headers: new Headers(),
+    })) as unknown as typeof fetch;
+    const invalidStatus = await new Http(cfg(resolvingInvalidStatus, { maxRetries: 0 }))
+      .request("GET", "/x")
+      .then(() => null)
+      .catch((error) => error);
+    expect(invalidStatus).toBeInstanceOf(CountersTransportError);
+    expect(invalidStatus).toBeInstanceOf(CountersError);
+  });
+
   it("wraps a malformed or empty 2xx body in a CountersApiError carrying the real status", async () => {
     for (const body of ["", "{bad json", "<html>nope</html>"]) {
       const f = mockFetch(

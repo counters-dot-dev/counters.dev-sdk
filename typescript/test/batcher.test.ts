@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Batcher } from "../src/batcher.js";
-import { CountersError } from "../src/errors.js";
+import { CountersTransportError, CountersValidationError } from "../src/errors.js";
 import type { Operation } from "../src/types.js";
 
 function collector() {
@@ -21,7 +21,7 @@ describe("Batcher coalescing", () => {
     await b.flush();
     expect(batches).toHaveLength(1);
     expect(batches[0]).toHaveLength(1);
-    expect(batches[0]![0]).toMatchObject({ counterKey: "c", op: "add", amount: "6" });
+    expect(batches[0]![0]).toMatchObject({ counterKey: "c", operation: "add", amount: "6" });
     expect(batches[0]![0]!.idempotencyKey).toBeTruthy();
   });
 
@@ -31,7 +31,7 @@ describe("Batcher coalescing", () => {
     b.enqueue("c", 10n);
     b.enqueue("c", -3n);
     await b.flush();
-    expect(batches[0]![0]).toMatchObject({ op: "add", amount: "7" });
+    expect(batches[0]![0]).toMatchObject({ operation: "add", amount: "7" });
   });
 
   it("emits a subtract when the net is negative", async () => {
@@ -40,7 +40,7 @@ describe("Batcher coalescing", () => {
     b.enqueue("c", 2n);
     b.enqueue("c", -9n);
     await b.flush();
-    expect(batches[0]![0]).toMatchObject({ op: "subtract", amount: "7" });
+    expect(batches[0]![0]).toMatchObject({ operation: "subtract", amount: "7" });
   });
 
   it("skips net-zero counters entirely", async () => {
@@ -85,6 +85,36 @@ describe("Batcher coalescing", () => {
     }
   });
 
+  it("treats an explicit zero interval as no background timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const { submit } = collector();
+      const b = new Batcher(submit, { maxBatchSize: 1000, intervalMs: 0 });
+      b.enqueue("a", 1n);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(submit).not.toHaveBeenCalled();
+      await b.flush();
+      expect(submit).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects synchronously with a typed error if an idempotency key cannot be generated", () => {
+    const { submit } = collector();
+    const randomUUID = vi.spyOn(globalThis.crypto, "randomUUID").mockImplementationOnce(() => {
+      throw new Error("random source unavailable");
+    });
+    try {
+      const b = new Batcher(submit, { maxBatchSize: 1000, intervalMs: 1000 });
+      expect(() => b.enqueue("a", 1n)).toThrow(CountersTransportError);
+      expect(b.pending()).toBe(0);
+      expect(submit).not.toHaveBeenCalled();
+    } finally {
+      randomUUID.mockRestore();
+    }
+  });
+
   it("close() flushes remaining work and stops the timer", async () => {
     const { batches, submit } = collector();
     const b = new Batcher(submit, { maxBatchSize: 1000, intervalMs: 1000 });
@@ -101,13 +131,19 @@ describe("Batcher coalescing", () => {
     const b = new Batcher(submit, { maxBatchSize: 1, intervalMs: 0, onError });
     b.enqueue("a", 1n); // triggers a background flush that rejects
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(onError).toHaveBeenCalledWith({
+      counterKey: "a",
+      delta: "1",
+      idempotencyKey: expect.any(String),
+      error: expect.any(CountersTransportError),
+    });
   });
 
   it("throws on enqueue after close (no timer resurrection, no stranded write)", async () => {
     const { submit } = collector();
     const b = new Batcher(submit, { maxBatchSize: 1000, intervalMs: 1000 });
     await b.close();
-    expect(() => b.enqueue("a", 1n)).toThrow(CountersError);
+    expect(() => b.enqueue("a", 1n)).toThrow(CountersValidationError);
     expect(b.pending()).toBe(0); // the rejected write did not land in the buffer
   });
 });

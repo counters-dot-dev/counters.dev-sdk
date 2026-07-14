@@ -1,11 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { CountersClient } from "../src/client.js";
-import { CountersApiError, CountersValidationError } from "../src/errors.js";
+import { describe, expect, it, vi } from "vitest";
+import { CountersClient, PublishableCountersClient } from "../src/client.js";
+import {
+  CountersApiError,
+  CountersError,
+  CountersTransportError,
+  CountersValidationError,
+} from "../src/errors.js";
+import type { Operation } from "../src/types.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
 describe("CountersClient", () => {
   it("rejects construction without an apiKey", () => {
-    expect(() => new CountersClient({ apiKey: "" })).toThrow();
+    expect(() => new CountersClient({ apiKey: "" })).toThrow(CountersValidationError);
   });
 
   it("validates counter keys at counter()", () => {
@@ -14,11 +20,71 @@ describe("CountersClient", () => {
     expect(() => c.counter("ok.key")).not.toThrow();
   });
 
+  it("publishable client sends its bearer and exposes only scoped read handles", async () => {
+    const seenAuth: string[] = [];
+    const client = new PublishableCountersClient({
+      apiKey: "pk_browser",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch((url, init) => {
+        seenAuth.push((init.headers as Record<string, string>).authorization);
+        if (url.pathname.endsWith("/series")) {
+          return jsonResponse(200, {
+            counterKey: "views",
+            bucket: "1h",
+            mode: "delta",
+            range: { from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z" },
+            points: [{ t: "2026-01-01T00:00:00Z", v: "7" }],
+          });
+        }
+        if (url.pathname.includes("/members/")) {
+          return jsonResponse(200, {
+            key: "views",
+            member: "alice",
+            value: "7",
+            rank: 1,
+            percentile: "100.00",
+            memberCount: 1,
+            mode: "sum",
+            epoch: 0,
+            updatedAt: "2026-01-01T00:00:00Z",
+          });
+        }
+        return jsonResponse(200, { key: "views", value: "7", epoch: 0 });
+      }),
+    });
+
+    const counter = client.counter("views");
+    expect(counter.key).toBe("views");
+    expect((await counter.value()).value).toBe("7");
+    const series = await counter.series({
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-01T01:00:00Z"),
+      bucket: "1h",
+    });
+    expect(series.points[0]).toEqual({
+      timestamp: new Date("2026-01-01T00:00:00Z"),
+      value: "7",
+    });
+    const member = counter.member("alice");
+    expect(member.counterKey).toBe("views");
+    expect(member.member).toBe("alice");
+    expect((await member.get()).updatedAt).toBeInstanceOf(Date);
+    expect(seenAuth).toEqual(["Bearer pk_browser", "Bearer pk_browser", "Bearer pk_browser"]);
+
+    expect((client as unknown as Record<string, unknown>).list).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).flush).toBeUndefined();
+    expect((counter as unknown as Record<string, unknown>).add).toBeUndefined();
+    expect((member as unknown as Record<string, unknown>).remove).toBeUndefined();
+    await client.close();
+  });
+
   it("buffers adds and flushes one coalesced batch", async () => {
     const seen: { path: string; body: any }[] = [];
     const f = mockFetch((url, init) => {
       seen.push({ path: url.pathname, body: JSON.parse((init.body as string) ?? "null") });
-      return jsonResponse(200, { results: [] });
+      return jsonResponse(200, {
+        results: [{ counterKey: "registrations", status: "applied", value: "6" }],
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { intervalMs: 0 } });
     const reg = c.counter("registrations");
@@ -33,6 +99,37 @@ describe("CountersClient", () => {
       op: "add",
       amount: "6",
     });
+  });
+
+  it("maps ergonomic batch operation fields to the compact wire shape", async () => {
+    let body!: { operations: Record<string, unknown>[] };
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch((_url, init) => {
+        body = JSON.parse(init.body as string) as typeof body;
+        return jsonResponse(200, {
+          results: [{ counterKey: "registrations", status: "applied", value: "1" }],
+        });
+      }),
+      batch: { intervalMs: 0 },
+    });
+    const operation: Operation = {
+      counterKey: "registrations",
+      operation: "add",
+      amount: "1",
+      occurredAt: new Date("2026-07-01T12:00:00Z"),
+    };
+    await (
+      c as unknown as { submitBatch(operations: Operation[]): Promise<void> }
+    ).submitBatch([operation]);
+    expect(body.operations[0]).toEqual({
+      counterKey: "registrations",
+      op: "add",
+      amount: "1",
+      occurredAt: "2026-07-01T12:00:00.000Z",
+    });
+    expect(body.operations[0]).not.toHaveProperty("operation");
   });
 
   it("addNow forwards occurredAt for event-time bucketing", async () => {
@@ -52,12 +149,75 @@ describe("CountersClient", () => {
     const seen: string[] = [];
     const f = mockFetch((url) => {
       seen.push(url.pathname);
-      return jsonResponse(200, { key: "c", value: "1", epoch: 0 });
+      return jsonResponse(200, {
+        key: "c",
+        value: "1",
+        epoch: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:01Z",
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     const r = await c.counter("c").addNow(1);
     expect(seen[0]).toBe("/v1/counters/c/add");
     expect(r.value).toBe("1");
+    expect(r.createdAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    expect(r.updatedAt?.toISOString()).toBe("2026-01-01T00:00:01.000Z");
+  });
+
+  it("lets a caller reuse the exact idempotency key after a transport failure", async () => {
+    const keys: string[] = [];
+    let attempts = 0;
+    const f = mockFetch((_url, init) => {
+      keys.push((init.headers as Record<string, string>)["idempotency-key"]!);
+      if (attempts++ === 0) throw new TypeError("connection reset");
+      return jsonResponse(200, { key: "c", value: "5", epoch: 0 });
+    });
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: f,
+      maxRetries: 0,
+    });
+    const options = { idempotencyKey: "raid-write-1" };
+    await expect(c.counter("c").addNow(5, options)).rejects.toBeInstanceOf(
+      CountersTransportError,
+    );
+    await expect(c.counter("c").addNow(5, options)).resolves.toMatchObject({ value: "5" });
+    expect(keys).toEqual(["raid-write-1", "raid-write-1"]);
+  });
+
+  it("rejects an invalid caller idempotency key before making a request", () => {
+    const fetchFn = vi.fn(() => jsonResponse(200, {}));
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: fetchFn as unknown as typeof fetch,
+    });
+    expect(() => c.counter("c").addNow(1, { idempotencyKey: "" })).toThrow(
+      CountersValidationError,
+    );
+    expect(() => c.counter("c").clear({ idempotencyKey: "x".repeat(256) })).toThrow(
+      CountersValidationError,
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("subtractNow parses counter timestamps into Dates", async () => {
+    const f = mockFetch(() =>
+      jsonResponse(200, {
+        key: "c",
+        value: "-1",
+        epoch: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:02Z",
+      }),
+    );
+    const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
+    const r = await c.counter("c").subtractNow(1);
+    expect(r.createdAt).toBeInstanceOf(Date);
+    expect(r.updatedAt).toBeInstanceOf(Date);
+    expect(r.updatedAt?.toISOString()).toBe("2026-01-01T00:00:02.000Z");
   });
 
   it("value() GETs the value endpoint", async () => {
@@ -74,31 +234,45 @@ describe("CountersClient", () => {
         counterKey: "c",
         bucket: "1h",
         mode: "delta",
-        range: { from: "", to: "" },
+        tz: "Europe/London",
+        range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" },
         points: [],
       });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     await c.counter("c").series({
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-02T00:00:00Z",
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
       bucket: "1h",
-      tz: "Europe/London",
+      timeZone: "Europe/London",
     });
     expect(url.pathname).toBe("/v1/counters/c/series");
     expect(url.searchParams.get("bucket")).toBe("1h");
-    expect(url.searchParams.get("from")).toBe("2026-01-01T00:00:00Z");
+    expect(url.searchParams.get("from")).toBe("2026-01-01T00:00:00.000Z");
     expect(url.searchParams.get("tz")).toBe("Europe/London");
+    const result = await c.counter("c").series({
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
+      bucket: "1h",
+    });
+    expect(result.timeZone).toBe("Europe/London");
+    expect(result.range.from).toBeInstanceOf(Date);
+    expect(result.range.to.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+    expect(result).not.toHaveProperty("tz");
   });
 
   it("omits gapfill when false, sends it only when true", async () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" }, points: [] });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
-    const base = { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z", bucket: "1d" } as const;
+    const base = {
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
+      bucket: "1d",
+    } as const;
 
     // omit-when-false: an explicit gapfill:false must not put gapfill=false on the wire.
     await c.counter("c").series({ ...base, gapfill: false });
@@ -111,11 +285,11 @@ describe("CountersClient", () => {
     expect(url.searchParams.get("gapfill")).toBe("true");
   });
 
-  it("accepts a Date for series bounds", async () => {
+  it("serializes native Date series bounds", async () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, { counterKey: "c", bucket: "1d", mode: "delta", range: { from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" }, points: [] });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     await c.counter("c").series({ from: new Date("2026-01-01T00:00:00Z"), to: new Date("2026-01-02T00:00:00Z"), bucket: "1d" });
@@ -126,12 +300,107 @@ describe("CountersClient", () => {
     const seen: string[] = [];
     const f = mockFetch((url) => {
       seen.push(url.pathname);
-      return jsonResponse(200, { results: [] });
+      return jsonResponse(200, {
+        results: [{ counterKey: "c", status: "applied", value: "1" }],
+      });
     });
     const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { enabled: false } });
     c.counter("c").add(1);
     await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget submit run
     expect(seen[0]).toBe("/v1/batch");
+  });
+
+  it("immediate mode routes write failures to batch.onError instead of swallowing them", async () => {
+    const failures: import("../src/types.js").WriteFailure[] = [];
+    const f = mockFetch(() => jsonResponse(403, { title: "quota exceeded", status: 403 }));
+    const c = new CountersClient({
+      apiKey: "k",
+      fetch: f,
+      baseUrl: "https://x/v1",
+      maxRetries: 0,
+      batch: { enabled: false, onError: (failure) => failures.push(failure) },
+    });
+    c.counter("c").add(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ counterKey: "c", delta: "1" });
+    expect(failures[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(failures[0]!.error).toBeInstanceOf(CountersApiError);
+    expect((failures[0]!.error as CountersApiError).status).toBe(403);
+  });
+
+  it("reports only the failed operation from a partially rejected background batch", async () => {
+    const failures: import("../src/types.js").WriteFailure[] = [];
+    const f = mockFetch(() =>
+      jsonResponse(200, {
+        results: [
+          { counterKey: "ok", status: "applied", value: "1" },
+          { counterKey: "lost", status: "error", error: { title: "quota", status: 403 } },
+        ],
+      }),
+    );
+    const c = new CountersClient({
+      apiKey: "k",
+      fetch: f,
+      baseUrl: "https://x/v1",
+      batch: { maxBatchSize: 2, intervalMs: 0, onError: (failure) => failures.push(failure) },
+    });
+    c.counter("ok").add(1);
+    c.counter("lost").subtract(7);
+    await vi.waitFor(() => expect(failures).toHaveLength(1));
+    expect(failures[0]).toMatchObject({
+      counterKey: "lost",
+      delta: "-7",
+      idempotencyKey: expect.any(String),
+      error: expect.any(CountersApiError),
+    });
+  });
+
+  it.each([
+    ["missing results", {}],
+    ["missing operation", { results: [{ counterKey: "a", status: "applied" }] }],
+    ["duplicate key", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "a", status: "deduplicated" },
+    ] }],
+    ["unknown key", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "other", status: "applied" },
+    ] }],
+    ["unknown status", { results: [
+      { counterKey: "a", status: "applied" },
+      { counterKey: "b", status: "maybe" },
+    ] }],
+  ])("reports every uncertain write when a batch response has %s", async (_name, body) => {
+    const failures: import("../src/types.js").WriteFailure[] = [];
+    const c = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() => jsonResponse(200, body)),
+      batch: {
+        maxBatchSize: 2,
+        intervalMs: 0,
+        onError: (failure) => failures.push(failure),
+      },
+    });
+    c.counter("a").add(2);
+    c.counter("b").subtract(3);
+    await vi.waitFor(() => expect(failures).toHaveLength(2));
+    expect(failures.map(({ counterKey, delta }) => ({ counterKey, delta }))).toEqual([
+      { counterKey: "a", delta: "2" },
+      { counterKey: "b", delta: "-3" },
+    ]);
+    for (const failure of failures) {
+      expect(failure.idempotencyKey).not.toBe("");
+      expect(failure.error).toBeInstanceOf(CountersValidationError);
+    }
+  });
+
+  it("immediate mode rejects writes after close, like the buffered path", async () => {
+    const f = mockFetch(() => jsonResponse(200, { results: [] }));
+    const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { enabled: false } });
+    await c.close();
+    expect(() => c.counter("c").add(1)).toThrow(CountersValidationError);
   });
 
   it("surfaces a per-operation batch error instead of silently dropping it", async () => {

@@ -1,13 +1,56 @@
-# Counters Java SDK
+# counters.dev — Java SDK
 
-Official Java SDK for [counters.dev](https://counters.dev) — the multi-tenant **arbitrary-precision** counter
-service. Pure JDK 17 standard library, zero runtime dependencies.
+Official Java SDK for [counters.dev](https://counters.dev) — the **arbitrary-precision** counter service. Pure JDK 17 standard library, zero runtime dependencies.
+
+## The mental model
+
+A **counter** is a named, signed integer that lives on the server. You address it by a key you
+choose (`signups`, `api.requests`, `eu:orders`), add to it, subtract from it, read it, and roll it
+up into a time series. It can go negative. `clear()` resets it to zero by starting a new **epoch**
+(think: season) — history is retained, and leaderboard reads can address past epochs.
+
+The defining property is **arbitrary precision**. A JSON number is an IEEE-754 double, and above
+2<sup>53</sup> (9,007,199,254,740,992 — a number a busy event counter *will* reach) doubles
+silently round. counters.dev therefore puts every amount and value on the wire as a **decimal
+string**, and this SDK keeps it that way: response values are `String` fields, amount arguments
+accept `long`, decimal `String`, or `BigInteger`, and nothing is ever routed through a `double`.
+The one thing you must not do is undo that: parse values with `new BigInteger(value)` (or
+`new BigDecimal(value)` for derived values), never `Double.parseDouble` or `Long.parseLong` unless
+you know the magnitude fits.
+
+Every machine-SDK date-time is a native `java.time.Instant`: request bounds and optional `occurredAt`
+values, series ranges and point timestamps, usage reset time, window-leaderboard boundaries, and
+the `createdAt`/`updatedAt` response fields. Optional date-times remain `null` when absent.
+`Counter.createdAt()` and `Counter.updatedAt()` are nullable because those fields are optional;
+`LeaderboardEntry.updatedAt()` and `MemberSnapshot.updatedAt()` are required instants.
+
+### Counter or leaderboard?
+
+A leaderboard is not a separate product — it is the same counter with **per-member sub-values**.
+Ask one question: *do I only care about the total, or do I care who contributed?*
+
+- **Only the total** → a plain counter. `signups.add(1)` and you are done.
+- **Per-contributor values, ranked** → the member surface of the same counter. Give each
+  contributor a member key (`alice`, `tenant-42`, `page:/pricing`) and the counter becomes a board:
+  every member holds its own value, the server ranks them, and `leaderboard()` returns the top-N
+  with ranks and (on sum boards) the group total.
+
+If you catch yourself creating one counter per user and sorting client-side, you wanted a
+leaderboard.
+
+Boards come in two flavours, fixed by the **first member write** and immutable afterwards:
+
+- **Sum boards** (`member(...).add/subtract`) accumulate deltas per member — per-player damage,
+  per-tenant API calls. The board keeps a group `total`.
+- **Score boards** (`member(...).submit` with mode `latest`, `min`, or `max`) rank submitted
+  scores — best lap time (`min`), high score (`max`). A worse-than-standing submit still succeeds
+  and returns the standing value with `memberAccepted() == false`.
 
 ## Install
 
-> **Not yet published.** Maven Central coordinates will be `dev.counters:counters-sdk:0.1.0`. Until then,
-> build the jar locally (`gradle build` → `build/libs/counters-sdk-0.1.0.jar`) or consume this directory as a
-> Gradle [composite build](https://docs.gradle.org/current/userguide/composite_builds.html).
+> **Not yet published.** Maven Central coordinates will be `dev.counters:counters-sdk:0.1.0`. Until
+> then, build the jar locally (`gradle build` → `build/libs/counters-sdk-0.1.0.jar`) or consume this
+> directory as a Gradle [composite build](https://docs.gradle.org/current/userguide/composite_builds.html).
 
 ```kotlin
 // build.gradle.kts — once published
@@ -20,7 +63,6 @@ dependencies {
 
 ```java
 import dev.counters.sdk.*;
-import java.time.OffsetDateTime;
 
 try (CountersClient client = CountersClient.builder()
         .apiKey(System.getenv("COUNTERS_API_KEY"))
@@ -28,74 +70,193 @@ try (CountersClient client = CountersClient.builder()
 
     CounterHandle registrations = client.counter("registrations");
 
-    // Buffered: coalesced per counter, flushed in the background (default: every 1s or at 100 counters).
-    registrations.add(1);
-    registrations.subtract(1);
+    registrations.add(1); // buffered + coalesced, flushed in the background
 
-    // Immediate: applies now and returns the new state. Values are arbitrary-precision strings.
-    Counter c = registrations.addNow("100000000000000000000000000000000");
-    System.out.println(c.value()); // exact — parse with new BigInteger(c.value()) if you need math
+    // Immediate, confirmed: applies now and returns the new state.
+    Counter c = registrations.addNow("18446744073709551616"); // larger than a u64
+    System.out.println(c.value()); // a decimal string, always
 
-    // Reads.
     ValueResponse v = registrations.value();
-    SeriesResponse s = registrations.series(new SeriesParams(
-            OffsetDateTime.now().minusDays(1), OffsetDateTime.now(), "1h"));
-
-    Usage usage = client.usage();
-
-    MemberHandle alice = registrations.member("alice");
-    alice.add(new BigInteger("170141183460469231731687303715884105728"),
-            new MemberWriteOptions("room1:500", OffsetDateTime.now()));
-    Leaderboard board = registrations.leaderboard();
-    System.out.println(board.entries().get(0).value()); // exact string, even past u64
-
-    DerivedValueResponse conversion = client.derived("conversion").value();
-    if (conversion.value() == null) {
-        System.out.println(conversion.reason()); // e.g. division by zero
-    }
 } // close() flushes buffered writes and stops the background timer
 ```
 
-## API summary
+Two kinds of write, deliberately:
 
-| Call | Effect |
-|------|--------|
-| `CountersClient.builder()` | `apiKey` (required), `baseUrl`, `maxRetries` (3), `backoffMillis` (200), `batchEnabled` (true), `maxBatchSize` (100), `batchIntervalMillis` (1000), `onBatchError`, `httpClient` (injectable) |
-| `client.counter(key)` | Validated handle (throws `CountersValidationException` on a bad key) |
-| `handle.add / subtract` | Buffered write, coalesced per counter into one net op per flush |
-| `handle.addNow / subtractNow` | Immediate write; optional `OffsetDateTime occurredAt` buckets the op at event time; returns `Counter` |
-| `handle.clear()` | Reset to zero (new epoch; history retained) |
-| `handle.delete()` | Tombstone the counter |
-| `handle.value()` | Current value (`String`, arbitrary precision) |
-| `handle.series(SeriesParams)` | Delta per bucket; bucket ∈ `1m 5m 1h 1d 1w 1mo`, optional `mode`, `tz`, `gapfill` |
-| `handle.memberSeries(member, SeriesParams)` | One member's delta series; requires member series enabled on the counter |
-| `handle.groupSeries(SeriesParams)` | Dense per-member multi-series; requires member series enabled on the counter |
-| `handle.leaderboard()` / `handle.leaderboard(LeaderboardParams)` | Ranked member leaderboard |
-| `handle.windowLeaderboard(WindowLeaderboardParams)` | Trailing-window leaderboard; local window validation |
-| `handle.member(member)` | Member handle with immediate `get`, `remove`, `add`, `subtract`, `submit` |
-| `client.usage()` | Organization quota/usage state |
-| `client.derived(key).value()` / `.series(DerivedSeriesParams)` | Read-only derived counter value/series; decimal strings, nullable value with reason |
-| `client.list(cursor, limit)` | Page through counters |
-| `client.flush()` / `client.close()` | Drain the buffer now / drain + stop the timer (also via try-with-resources) |
+- **Buffered** — `add`/`subtract`. Coalesced per counter client-side and flushed as one batch
+  (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
+  coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
+  give `onBatchError` a sink or they are silent. Its `WriteFailure` identifies the counter, signed
+  coalesced delta, nullable member, actual idempotency key, and typed error, so the write can be
+  reconciled. The flush thread is a daemon — it never keeps the JVM alive, which also means you must `close()`
+  (try-with-resources) before exit.
+- **Immediate** — `addNow`/`subtractNow` (pass an `Instant occurredAt` to stamp an event
+  time for late-arriving data). One request now, returning the new state. The SDK generates a fresh
+  idempotency key unless you supply one.
 
-## Semantics worth knowing
+For a caller-managed retry, generate the key once and reuse it with the exact same operation and
+payload:
 
-- **Arbitrary precision, always.** Amounts accept `long`, decimal `String`, or `BigInteger`; values travel as
-  JSON strings. Leaderboard totals/entries and derived decimal values also stay strings. Nothing is ever
-  routed through a `double`.
-- **Retries are safe.** Connect errors and HTTP 429/500/502/503/504 are retried with exponential backoff
-  (`backoffMillis * 2^attempt`); every write carries an `Idempotency-Key` (random v4 UUID) that is reused
-  across retries, so the server de-duplicates. Terminal failures throw `CountersApiException(status, title)`.
-- **Member writes are immediate.** `counter.member("m").add/subtract/submit/remove` send one request now
-  with a fresh idempotency key; they are intentionally separate from buffered counter writes.
-- **Validation is local where the contract is local.** Counter keys, member keys, metadata byte length
-  (1024 UTF-8 bytes), series buckets, and window values are rejected before network I/O.
-- **Derived nulls are data.** A divide-by-zero derived value is `null` with `reason()`, not an exception and
-  not coerced to `"0"`.
-- **Buffering loses no meaningful detail.** The finest series bucket is one minute, so summing add/subtract
-  per counter between flushes is invisible in the data — and net-zero ops are dropped entirely.
-- **The batcher thread is a daemon.** It will never keep your JVM alive, which also means you must `close()`
-  (or `flush()`) before exit to push out the last buffered writes.
+```java
+String key = Idempotency.newKey();
+try {
+    registrations.addNow(5, null, key);
+} catch (CountersTransportException firstAttempt) {
+    registrations.addNow(5, null, key);
+}
+```
+
+The service de-duplicates that retry within its deduplication window. Reusing the key for a different
+operation is rejected with `409`; retrying after the unspecified window is not guaranteed to
+de-duplicate. The contract does not specify same-operation reuse with a changed payload, so do not
+rely on it. `clear(String)`, `delete(String)`, and `MemberHandle.remove(String)` accept keys too;
+member add/subtract/submit use the `idempotencyKey` component of their option records.
+
+The runnable example app at [`examples/e2e/`](./examples/e2e/) drives **every public method** of
+this SDK against a live server — it is the fastest way to see the whole surface in use.
+
+## Reading a time series
+
+A series is the **per-bucket delta**: how much the counter changed in each bucket of `[from, to)`,
+not a running total. The bucket is one of `1m`, `5m`, `1h`, `1d`, `1w`, `1mo` (finer buckets are
+plan-gated server-side). Empty buckets are omitted unless gapfill is requested — treat a missing
+bucket as zero. `SeriesParams.timeZone()` sets an IANA timezone so calendar buckets (`1d`, `1w`,
+`1mo`) break on local boundaries (the SDK maps it to the compact `tz` wire key).
+
+```java
+Instant to = Instant.now();
+SeriesResponse s = registrations.series(new SeriesParams(
+        to.minusSeconds(86_400), to, "1h"));
+Instant coveredFrom = s.range().from();
+for (SeriesPoint point : s.points()) {
+    Instant bucketStart = point.timestamp();
+    BigInteger delta = new BigInteger(point.value());
+}
+```
+
+On a board you can slice by member: `memberSeries(member, params)` for one member's series,
+`groupSeries(params)` for the dense per-member multi-series (both require member series enabled on
+the counter).
+
+## Members and leaderboards
+
+```java
+CounterHandle board = client.counter("raid-dps");
+
+// Sum board: accumulate deltas per member. Member writes are immediate — never buffered.
+MemberHandle alice = board.member("alice");
+alice.add(10);
+MemberSnapshot snap = alice.get(); // rank, percentile ("83.33" — a string), value
+
+// Leaderboard (top-N, ranked). total() is non-null only on sum boards.
+Leaderboard top = board.leaderboard(new LeaderboardParams(25, null, "desc", null));
+for (LeaderboardEntry e : top.entries()) {
+    System.out.println(e.rank() + " " + e.member() + " " + e.value()); // value is a string
+}
+
+// Score board: submit a signed score. Mode is required on the first submit to a board.
+MemberValue r = client.counter("best-lap").member("alice")
+        .submit(1417, new SubmitOptions("min"));
+System.out.println(r.memberAccepted()); // false when the standing best was better
+
+// Windowed leaderboard: rank trailing-window activity, not all-time standing.
+WindowLeaderboard recent = board.windowLeaderboard(new WindowLeaderboardParams("7d"));
+```
+
+A windowed board follows the board's mode: a sum board ranks the window-sum and carries a non-null
+`total()`; a score board ranks the window-best (`min`/`max`) or window-latest (`latest`) value and
+its `total()` is null. The same rule drives member series: on a score board `memberSeries` returns
+sparse best/latest points (`mode()` tells you which), and a missing bucket means "no submission",
+not zero.
+
+Member writes carry optional `metadata` (≤ 1024 **UTF-8 bytes** — byte-counted, validated
+client-side), `occurredAt`, and a caller-supplied `idempotencyKey` via
+`MemberWriteOptions` / `SubmitOptions`.
+
+## Derived counters
+
+A **derived counter** is a server-defined, read-only expression over your counters (for example
+`conversion = signups / visits`), evaluated at read time. Two things make it different from
+everything above:
+
+- It is **decimal**, not integer — the result is rounded to a fixed `scale()`.
+- Its value can be **null**. Division by zero does not throw and is not `"0"`; the SDK gives you
+  `value() == null` with a human-readable `reason()`. Handle the null. In a series, a bucket that
+  divided by zero is a null `value()` hole preserved in place; its `timestamp()` remains an
+  `Instant`.
+
+```java
+DerivedValueResponse conversion = client.derived("conversion").value();
+if (conversion.value() == null) {
+    System.out.println("no value: " + conversion.reason()); // e.g. "division by zero"
+} else {
+    BigDecimal exact = new BigDecimal(conversion.value()); // never Double.parseDouble
+}
+```
+
+## Errors: exactly three kinds
+
+Every failure from this SDK is one of three unchecked exceptions, and the distinction tells you
+what to do:
+
+| Exception | Meaning | Typical handling |
+|---|---|---|
+| `CountersValidationException` | Rejected client-side (bad key, negative amount, invalid configuration, write after close), or a parsed response cannot be represented faithfully | Fix the input/configuration; report an invalid response payload |
+| `CountersApiException` | The server answered with an HTTP error, or a 2xx body was not valid JSON; `status()` is always the real response status | Branch on `status()` (403 quota, 404 missing, 409 conflict…); report malformed success bodies |
+| `CountersTransportException` | **No response was ever obtained** — network failure or timeout, retries exhausted; carries no status | Infrastructure problem; back off and retry later |
+
+All three are the only permitted subclasses of the abstract `CountersException` root (itself a
+`RuntimeException`), so one
+`catch (CountersException e)` catches anything originating in this SDK.
+`onBatchError` receives a `WriteFailure`; its `error()` is one of those same three subtypes.
+
+Retries are built in: connect errors and HTTP 429/5xx retry with exponential backoff
+(`maxRetries`, default 3), honouring `Retry-After`; `requestTimeoutMillis` bounds each attempt
+(default 30s). One key is reused throughout those built-in attempts. Caller-managed retries are safe
+only with the same key and exact operation/payload, within the service's deduplication window.
+
+## Builder reference
+
+`CountersClient.builder()` — only `apiKey` is required:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `apiKey` | — | Full-access organization API key, sent as `Authorization: Bearer` |
+| `baseUrl` | production | API endpoint override |
+| `httpClient` | JDK default | Inject a custom `java.net.http.HttpClient` |
+| `maxRetries` | 3 | Retries after the first attempt on connect errors and 429/5xx |
+| `backoffMillis` | 200 | Base backoff, doubled per retry |
+| `requestTimeoutMillis` | 30000 | Per-attempt request timeout |
+| `batchEnabled` | true | Buffer + coalesce `add`/`subtract`; when false each write fires immediately |
+| `maxBatchSize` | 100 | Distinct-counter count that triggers an early flush |
+| `batchIntervalMillis` | 1000 | Background flush cadence; `<= 0` disables the timer |
+| `onBatchError` | — | Sink receiving one `WriteFailure` per failed/unknown coalesced fire-and-forget write |
+
+For a scoped publishable (`pk_`) token, use the separate transport-only builder. Its result exposes
+only the operations that publishable tokens can perform:
+
+```java
+try (ReadOnlyCountersClient publicViews = CountersClient.publishableBuilder()
+        .apiKey(System.getenv("COUNTERS_PUBLISHABLE_TOKEN"))
+        .build()) {
+    ValueResponse value = publicViews.counter("signups").value();
+    Leaderboard leaders = publicViews.counter("raid-dps").leaderboard();
+}
+```
+
+`ReadOnlyCountersClient` supports scoped counter values, counter/member series, leaderboards
+(including windowed leaderboards), and member snapshots. Writes are not methods on its counter or
+member handles, so attempting one is a compile error. Organization-wide `list`/`usage` reads and
+derived counters require the full client and are absent too. The publishable builder retains the
+transport options (`baseUrl`, `httpClient`, retries, backoff, and request timeout) but deliberately
+has no batching options.
+
+## Odds and ends
+
+- **Usage**: `client.usage()` returns month-to-date operations, quota, reset instant, and counter
+  headroom. The reset is `usage.operations().resetsAt()`—an `Instant`. Poll it periodically, not
+  per write. Quota fields are null on unlimited plans.
+- **Validation helpers**: `Validation.isValidCounterKey`, `isValidMemberKey`, `isValidMetadata`,
+  and the `BUCKETS`/`WINDOWS`/`MODES` sets are public so you can pre-check user-supplied names.
 
 ## Development
 
@@ -104,5 +265,5 @@ try (CountersClient client = CountersClient.builder()
 gradle test
 ```
 
-Validation and bignum behaviour are pinned by the shared vectors in [`../conformance/`](../conformance/),
-and the wire contract by [`../openapi/openapi.yaml`](../openapi/openapi.yaml).
+The behaviour is pinned by the shared vectors in [`../conformance/`](../conformance/) and the wire
+contract by [`../openapi/openapi.yaml`](../openapi/); the suite replays both.

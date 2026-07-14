@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultBaseURL = "https://api.counters.dev/v1"
@@ -44,7 +45,8 @@ type Error interface {
 	isCountersError()
 }
 
-// ValidationError is returned for client-side validation failures (bad counter key or amount).
+// ValidationError is returned for client-side validation failures (bad counter key or amount), or
+// when a parsed response shape cannot be represented faithfully by the SDK.
 type ValidationError struct{ Msg string }
 
 func (e *ValidationError) Error() string    { return e.Msg }
@@ -76,9 +78,23 @@ func (e *TransportError) Error() string {
 func (e *TransportError) Unwrap() error    { return e.Cause }
 func (e *TransportError) isCountersError() {}
 
+func asSDKError(err error) Error {
+	if err == nil {
+		return nil
+	}
+	var sdkErr Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr
+	}
+	// Asynchronous writes have no caller to receive an implementation-level failure. Keep the
+	// callback's public contract inside the SDK taxonomy: no HTTP response means transport failure.
+	return &TransportError{Cause: err}
+}
+
 // ErrClientClosed is returned by Add/Subtract when a write is attempted after Close(); the write is
-// rejected rather than silently stranded in a buffer whose worker has already stopped.
-var ErrClientClosed = errors.New("counters: client is closed")
+// rejected rather than silently stranded in a buffer whose worker has already stopped. It is a
+// ValidationError, and remains a sentinel so callers can use either errors.As or errors.Is.
+var ErrClientClosed = &ValidationError{Msg: "counters: client is closed"}
 
 // IsValidCounterKey reports whether key matches the server's allowed shape.
 func IsValidCounterKey(key string) bool { return counterKeyRe.MatchString(key) }
@@ -146,6 +162,9 @@ func validateWindow(window string) error {
 func ToAmount(v any) (*big.Int, error) {
 	switch x := v.(type) {
 	case *big.Int:
+		if x == nil {
+			return nil, &ValidationError{"amount must be non-nil"}
+		}
 		if x.Sign() < 0 {
 			return nil, &ValidationError{"amount must be non-negative"}
 		}
@@ -175,6 +194,9 @@ func ToAmount(v any) (*big.Int, error) {
 func ToValue(v any) (*big.Int, error) {
 	switch x := v.(type) {
 	case *big.Int:
+		if x == nil {
+			return nil, &ValidationError{"value must be non-nil"}
+		}
 		return new(big.Int).Set(x), nil
 	case int:
 		return big.NewInt(int64(x)), nil
@@ -194,17 +216,36 @@ func ToValue(v any) (*big.Int, error) {
 	}
 }
 
-// NewIdempotencyKey returns a random v4-style UUID string.
-func NewIdempotencyKey() string {
+var idempotencyReader io.Reader = rand.Reader
+
+func newIdempotencyKey() (string, error) {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := io.ReadFull(idempotencyReader, b[:]); err != nil {
+		return "", &TransportError{Cause: fmt.Errorf("could not generate idempotency key: %w", err)}
+	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
+
+// NewIdempotencyKey returns a random v4-style UUID string. Its frozen string-only signature cannot
+// return an entropy failure; in that exceptional case it panics with *TransportError rather than
+// returning a partial key. SDK write methods use the error-returning internal form and never panic.
+func NewIdempotencyKey() string {
+	key, err := newIdempotencyKey()
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+const idempotencyKeyMaxLength = 255
 
 // --- wire types (mirror openapi/openapi.yaml) ---
 
+// Counter is a counter's metadata and current value. Value is a signed arbitrary-precision
+// integer as a decimal string — parse with new(big.Int).SetString(v, 10), never a float.
+// Epoch is incremented by Clear; the value sums deltas within the current epoch.
 type Counter struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
@@ -215,84 +256,109 @@ type Counter struct {
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 }
 
+// ValueResponse is a counter's current value. Value is a signed arbitrary-precision integer
+// as a decimal string.
 type ValueResponse struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Epoch int64  `json:"epoch"`
 }
 
+// CounterPage is one page of counters. NextCursor is non-empty when more results exist;
+// pass it to the next List call.
 type CounterPage struct {
 	Data       []Counter `json:"data"`
 	NextCursor string    `json:"nextCursor,omitempty"`
 }
 
+// SeriesPoint is one time-series bucket. Timestamp is the bucket start and Value is the delta in
+// that bucket as an arbitrary-precision decimal string.
 type SeriesPoint struct {
-	T string `json:"t"`
-	V string `json:"v"`
+	Timestamp time.Time `json:"t"`
+	Value     string    `json:"v"`
 }
 
+// SeriesResponse is a counter's time series (delta per bucket). Empty buckets are omitted
+// unless gapfill was requested; treat a missing bucket as zero.
 type SeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
 	Mode       string `json:"mode"`
-	Tz         string `json:"tz"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []SeriesPoint `json:"points"`
 }
 
+// SeriesParams are the read parameters for a counter time series over [From, To).
 type SeriesParams struct {
-	From    time.Time
-	To      time.Time
-	Bucket  string
-	Mode    string
-	Tz      string
+	From time.Time
+	To   time.Time
+	// Bucket is the bucket size: one of Buckets ("1m", "5m", "1h", "1d", "1w", "1mo").
+	// Finer buckets may require a higher plan server-side.
+	Bucket string
+	// Mode is optional; "delta" (per-bucket change) is the only supported mode today.
+	Mode string
+	// TimeZone is an optional IANA timezone for calendar bucket boundaries (e.g. "Europe/London").
+	TimeZone string
+	// Gapfill emits zero-valued points for empty buckets instead of omitting them.
 	Gapfill bool
 }
 
+// Usage is the organization's current quota state (GET /usage). Poll it periodically, not
+// per-write. Quota pointers are nil on unlimited plans.
 type Usage struct {
-	Month string `json:"month"`
-	Ops   struct {
-		Used     int64  `json:"used"`
-		Quota    *int64 `json:"quota"`
-		ResetsAt string `json:"resetsAt"`
+	Month      string `json:"month"`
+	Operations struct {
+		Used     int64     `json:"used"`
+		Quota    *int64    `json:"quota"`
+		ResetsAt time.Time `json:"resetsAt"`
 	} `json:"ops"`
 	Counters struct {
 		Used int64 `json:"used"`
 		Max  int64 `json:"max"`
 	} `json:"counters"`
 	Limits struct {
-		RateLimitRps    int64  `json:"rateLimitRps"`
-		MaxCounters     int64  `json:"maxCounters"`
-		MonthlyOpsQuota *int64 `json:"monthlyOpsQuota"`
+		RateLimitRequestsPerSecond int64  `json:"rateLimitRps"`
+		MaxCounters                int64  `json:"maxCounters"`
+		MonthlyOperationsQuota     *int64 `json:"monthlyOpsQuota"`
 	} `json:"limits"`
 }
 
+// LeaderboardParams are the read parameters for a leaderboard page. Zero values are omitted
+// so the server applies its defaults; Epoch selects a past season (nil = current epoch).
 type LeaderboardParams struct {
 	Limit  int
 	Offset int
-	Order  string
+	Order  string // "asc" or "desc"
 	Epoch  *int64
 }
 
+// WindowLeaderboardParams are the read parameters for a windowed leaderboard. Window is
+// required: one of Windows ("1h", "6h", "12h", "1d", "7d", "30d"). Epoch is accepted for
+// parameter-struct symmetry but ignored by windowed reads (member rollups are epoch-agnostic).
 type WindowLeaderboardParams struct {
 	Limit  int
 	Offset int
-	Order  string
+	Order  string // "asc" or "desc"
 	Epoch  *int64
 	Window string
 }
 
+// LeaderboardEntry is one ranked member. Value is an arbitrary-precision integer string;
+// Metadata is nil when the entry carries none.
 type LeaderboardEntry struct {
-	Rank      int     `json:"rank"`
-	Member    string  `json:"member"`
-	Value     string  `json:"value"`
-	Metadata  *string `json:"metadata,omitempty"`
-	UpdatedAt string  `json:"updatedAt"`
+	Rank      int       `json:"rank"`
+	Member    string    `json:"member"`
+	Value     string    `json:"value"`
+	Metadata  *string   `json:"metadata,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Leaderboard is a ranked page of a counter's members. Total (the group total) is non-nil
+// only on "sum" boards.
 type Leaderboard struct {
 	Key         string             `json:"key"`
 	Mode        string             `json:"mode"`
@@ -305,42 +371,68 @@ type Leaderboard struct {
 	Entries     []LeaderboardEntry `json:"entries"`
 }
 
+// WindowEntry is one ranked member in a trailing-window leaderboard.
 type WindowEntry struct {
 	Rank   int    `json:"rank"`
 	Member string `json:"member"`
 	Value  string `json:"value"`
 }
 
+// WindowLeaderboard ranks members by their activity over a trailing window: the window-sum on a
+// "sum" board, the window-best ("min"/"max") or window-latest ("latest") value on a score board.
+// Total is the window group total, non-nil only on "sum" boards (a sum of best times is nonsense).
+// EffectiveStart and EffectiveEnd are the bounds actually covered (the start is floored to a
+// rollup boundary).
 type WindowLeaderboard struct {
 	Key            string        `json:"key"`
 	Mode           string        `json:"mode"`
 	Window         string        `json:"window"`
 	Order          string        `json:"order"`
-	Total          string        `json:"total"`
+	Total          *string       `json:"total,omitempty"`
 	MemberCount    int           `json:"memberCount"`
 	Limit          int           `json:"limit"`
 	Offset         int           `json:"offset"`
-	EffectiveStart string        `json:"effectiveStart"`
-	EffectiveEnd   string        `json:"effectiveEnd"`
+	EffectiveStart time.Time     `json:"effectiveStart"`
+	EffectiveEnd   time.Time     `json:"effectiveEnd"`
 	Entries        []WindowEntry `json:"entries"`
 }
 
+// WriteOptions are the optional fields shared by confirmed counter writes. An empty
+// IdempotencyKey asks the SDK to generate one. Supplying a key lets the same operation and payload
+// reuse it after a transport failure, within the server's deduplication window.
+type WriteOptions struct {
+	IdempotencyKey string
+}
+
+// MemberWriteOpts are the optional fields of an immediate member delta write. Metadata is an
+// opaque payload of at most 1024 UTF-8 bytes, stored and returned verbatim; OccurredAt stamps
+// the write with an event time for series bucketing (nil = ingest time). An empty IdempotencyKey
+// asks the SDK to generate one.
 type MemberWriteOpts struct {
-	Metadata   string
-	OccurredAt time.Time
+	Metadata       string
+	OccurredAt     *time.Time
+	IdempotencyKey string
 }
 
+// SubmitOpts are the optional fields of a member score submit. Mode ("sum", "latest", "min",
+// "max") is required on the first submit to an unconfigured board and immutable afterwards. An
+// empty IdempotencyKey asks the SDK to generate one.
 type SubmitOpts struct {
-	Mode       string
-	Metadata   string
-	OccurredAt time.Time
+	Mode           string
+	Metadata       string
+	OccurredAt     *time.Time
+	IdempotencyKey string
 }
 
+// MemberGetParams are the read parameters for a member snapshot. Epoch selects a past season
+// (nil = current epoch).
 type MemberGetParams struct {
 	Epoch *int64
 	Order string
 }
 
+// MemberValue is a member's standing value after a write. MemberAccepted is false when a
+// min/max submit kept the standing best. Value is the board total, non-nil on "sum" boards.
 type MemberValue struct {
 	Key            string  `json:"key"`
 	Member         string  `json:"member"`
@@ -351,6 +443,8 @@ type MemberValue struct {
 	Value          *string `json:"value,omitempty"`
 }
 
+// MemberRemoved is the result of removing a member. Value is the board total after removal,
+// non-nil on "sum" boards.
 type MemberRemoved struct {
 	Key    string  `json:"key"`
 	Member string  `json:"member"`
@@ -358,55 +452,72 @@ type MemberRemoved struct {
 	Value  *string `json:"value,omitempty"`
 }
 
+// MemberSnapshot is a member's rank, percentile, and standing value within its board.
+// Percentile is a scale-2 decimal string such as "83.33" — never a float.
 type MemberSnapshot struct {
-	Key         string  `json:"key"`
-	Member      string  `json:"member"`
-	Value       string  `json:"value"`
-	Metadata    *string `json:"metadata,omitempty"`
-	Rank        int     `json:"rank"`
-	Percentile  string  `json:"percentile"`
-	MemberCount int     `json:"memberCount"`
-	Mode        string  `json:"mode"`
-	Epoch       int64   `json:"epoch"`
-	UpdatedAt   string  `json:"updatedAt"`
+	Key         string    `json:"key"`
+	Member      string    `json:"member"`
+	Value       string    `json:"value"`
+	Metadata    *string   `json:"metadata,omitempty"`
+	Rank        int       `json:"rank"`
+	Percentile  string    `json:"percentile"`
+	MemberCount int       `json:"memberCount"`
+	Mode        string    `json:"mode"`
+	Epoch       int64     `json:"epoch"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+// MemberSeriesResponse is one member's per-bucket series (series?member=). Mode tells you how to
+// read each point: "delta" (the bucket's signed delta sum) on a sum board, or the board mode
+// ("min"/"max"/"latest" — bucket-best or bucket-latest) on a score board, where points are sparse
+// (a missing bucket means "no submission", not zero).
 type MemberSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Member     string `json:"member"`
 	Bucket     string `json:"bucket"`
 	Mode       string `json:"mode"`
-	Tz         string `json:"tz"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []SeriesPoint `json:"points"`
 }
 
+// MemberSeriesEntry is one member's point list within a grouped member series.
 type MemberSeriesEntry struct {
 	Member string        `json:"member"`
 	Points []SeriesPoint `json:"points"`
 }
 
+// MemberGroupSeriesResponse is the per-member multi-series (series?groupBy=member): dense
+// (gapfilled) on a sum board, sparse per member on a score board. Mode reads as in
+// MemberSeriesResponse: "delta" on a sum board, else the board mode.
 type MemberGroupSeriesResponse struct {
 	CounterKey string `json:"counterKey"`
 	Bucket     string `json:"bucket"`
-	Tz         string `json:"tz"`
+	Mode       string `json:"mode"`
+	TimeZone   string `json:"tz"`
 	Range      struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Series []MemberSeriesEntry `json:"series"`
 }
 
+// DerivedSeriesParams are the read parameters for a derived series over [From, To). Only
+// From/To/Bucket/TimeZone — a derived series has no gapfill, mode, or member dimension.
 type DerivedSeriesParams struct {
-	From   time.Time
-	To     time.Time
-	Bucket string
-	Tz     string
+	From     time.Time
+	To       time.Time
+	Bucket   string
+	TimeZone string
 }
 
+// DerivedValueResponse is the evaluated value of a derived counter. Value is a signed decimal
+// string, or nil when the expression divided by zero (see Reason) — never coerced to "0" and
+// never parsed into a float. Inputs holds each referenced counter's current integer value;
+// a missing or deleted counter reads as "0".
 type DerivedValueResponse struct {
 	Key    string            `json:"key"`
 	Value  *string           `json:"value"`
@@ -415,51 +526,90 @@ type DerivedValueResponse struct {
 	Reason *string           `json:"reason,omitempty"`
 }
 
+// DerivedSeriesPoint is one derived-series bucket. Value is a decimal string, or nil for a
+// bucket whose evaluation divided by zero (a hole preserved in place).
 type DerivedSeriesPoint struct {
-	T string  `json:"t"`
-	V *string `json:"v"`
+	Timestamp time.Time `json:"t"`
+	Value     *string   `json:"v"`
 }
 
+// DerivedSeriesResponse is a derived counter evaluated per bucket over [from, to). The series
+// is always dense; Scale is the fixed number of decimal places (rounded HALF_UP).
 type DerivedSeriesResponse struct {
-	Key    string `json:"key"`
-	Bucket string `json:"bucket"`
-	Tz     string `json:"tz"`
-	Scale  int    `json:"scale"`
-	Range  struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+	Key      string `json:"key"`
+	Bucket   string `json:"bucket"`
+	TimeZone string `json:"tz"`
+	Scale    int    `json:"scale"`
+	Range    struct {
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
 	} `json:"range"`
 	Points []DerivedSeriesPoint `json:"points"`
 }
 
-// Operation is one entry in a batch.
-type Operation struct {
+// operation is one entry in a POST /batch request. Deliberately unexported: no public SDK method
+// accepts or returns a batch operation, and exporting it would freeze a dead-end shape (the spec's
+// Operation also carries member-write fields this SDK never sends). Export deliberately if a
+// public batch API ever ships.
+type operation struct {
 	CounterKey     string `json:"counterKey"`
-	Op             string `json:"op"`
+	Operation      string `json:"op"`
 	Amount         string `json:"amount,omitempty"`
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
-	// OccurredAt (RFC 3339) buckets the op at event time instead of ingest time (offline spools).
-	OccurredAt string `json:"occurredAt,omitempty"`
+	// OccurredAt buckets the operation at event time instead of ingest time (offline spools).
+	OccurredAt *time.Time `json:"occurredAt,omitempty"`
+}
+
+// WriteFailure describes one coalesced fire-and-forget write whose outcome failed or is unknown.
+// Delta is a signed arbitrary-precision decimal string: positive for add and negative for
+// subtract. Member is empty for counter writes. IdempotencyKey is the actual per-operation key
+// sent to the service, and Err is exactly one of APIError, TransportError, or ValidationError.
+type WriteFailure struct {
+	CounterKey     string
+	Delta          string
+	Member         string
+	IdempotencyKey string
+	Err            Error
 }
 
 // --- client ---
 
+// Options configures a Client. Only APIKey is required; every zero value means "use the default".
 type Options struct {
-	APIKey     string
-	BaseURL    string
+	// APIKey is the organization API key, sent as "Authorization: Bearer <key>". Required.
+	APIKey string
+	// BaseURL overrides the production endpoint (default https://api.counters.dev/v1).
+	BaseURL string
+	// HTTPClient overrides the transport (default: net/http client with a 30s overall timeout).
 	HTTPClient *http.Client
+	// MaxRetries is the number of retries after the first attempt on connect errors and
+	// HTTP 429/5xx (default 3). Set -1 to disable retries entirely.
 	MaxRetries int
-	Backoff    time.Duration
-	Batch      *BatchOptions
+	// Backoff is the base delay between retries, doubled per attempt (default 200ms). A server
+	// Retry-After header, when present, takes precedence.
+	Backoff time.Duration
+	// Batch tunes the client-side write buffer; nil keeps every default (buffering enabled).
+	Batch *BatchOptions
 }
 
+// BatchOptions tunes the buffering of CounterHandle.Add/Subtract writes.
 type BatchOptions struct {
-	Disabled     bool
+	// Disabled turns buffering off: each Add/Subtract fires one immediate batch call instead.
+	Disabled bool
+	// MaxBatchSize is the buffered distinct-counter count that triggers an early flush (default 100).
 	MaxBatchSize int
-	Interval     time.Duration
-	OnError      func(error)
+	// Interval is the background flush cadence. Zero uses the 1s default; set -1 to disable the
+	// timer and flush manually with Client.Flush or rely on MaxBatchSize.
+	Interval time.Duration
+	// OnError receives one identity-bearing event per coalesced fire-and-forget write that failed
+	// or whose outcome is unknown. Inspect failure.Err with errors.As to distinguish *APIError,
+	// *TransportError, and *ValidationError. Without this hook asynchronous failures are silent.
+	OnError func(WriteFailure)
 }
 
+// Client is the entry point: obtain per-counter handles with Counter and Derived, page the
+// registry with List, and read quota state with Usage. A Client is safe for concurrent use.
+// Call Close before exit to flush buffered writes.
 type Client struct {
 	apiKey       string
 	baseURL      string
@@ -468,36 +618,125 @@ type Client struct {
 	backoff      time.Duration
 	batchEnabled bool
 	batcher      *batcher
+	onWriteError func(WriteFailure)  // BatchOptions.OnError; also the sink for immediate-mode write failures
 	sleepFn      func(time.Duration) // nil => time.Sleep; overridden in tests to record backoff
 }
 
+// NewClient builds a Client from opts. Only opts.APIKey is required.
 func NewClient(opts Options) (*Client, error) {
 	if opts.APIKey == "" {
-		return nil, errors.New("counters: APIKey is required")
+		return nil, &ValidationError{Msg: "counters: APIKey is required"}
+	}
+	if !isValidHeaderValue(opts.APIKey) {
+		return nil, &ValidationError{Msg: "counters: APIKey contains characters that are not valid in an HTTP header"}
+	}
+	baseURL := orString(opts.BaseURL, defaultBaseURL)
+	parsedBaseURL, err := url.Parse(baseURL)
+	if err != nil || (parsedBaseURL.Scheme != "http" && parsedBaseURL.Scheme != "https") || parsedBaseURL.Host == "" || parsedBaseURL.RawQuery != "" || parsedBaseURL.Fragment != "" {
+		return nil, &ValidationError{Msg: "counters: BaseURL must be an absolute http(s) URL without a query or fragment: " + strconv.Quote(baseURL)}
+	}
+	maxRetries := opts.MaxRetries
+	switch {
+	case maxRetries == 0:
+		maxRetries = 3 // zero value => default
+	case maxRetries == -1:
+		maxRetries = 0 // -1 => retries disabled
+	case maxRetries < -1:
+		return nil, &ValidationError{Msg: "counters: MaxRetries must be -1 or non-negative"}
+	}
+	if opts.Backoff < 0 {
+		return nil, &ValidationError{Msg: "counters: Backoff must be non-negative"}
 	}
 	c := &Client{
 		apiKey:     opts.APIKey,
-		baseURL:    orString(opts.BaseURL, defaultBaseURL),
+		baseURL:    baseURL,
 		httpClient: orHTTP(opts.HTTPClient),
-		maxRetries: orInt(opts.MaxRetries, 3),
+		maxRetries: maxRetries,
 		backoff:    orDur(opts.Backoff, 200*time.Millisecond),
 	}
 	enabled := true
 	maxSize := 100
 	interval := time.Second
-	var onErr func(error)
+	var onErr func(WriteFailure)
 	if opts.Batch != nil {
 		enabled = !opts.Batch.Disabled
+		if opts.Batch.MaxBatchSize < 0 {
+			return nil, &ValidationError{Msg: "counters: Batch.MaxBatchSize must be non-negative"}
+		}
 		maxSize = orInt(opts.Batch.MaxBatchSize, 100)
-		interval = orDur(opts.Batch.Interval, time.Second)
+		switch {
+		case opts.Batch.Interval == 0:
+			interval = time.Second
+		case opts.Batch.Interval == -1:
+			interval = 0
+		case opts.Batch.Interval < -1:
+			return nil, &ValidationError{Msg: "counters: Batch.Interval must be -1 or non-negative"}
+		default:
+			interval = opts.Batch.Interval
+		}
 		onErr = opts.Batch.OnError
 	}
 	c.batchEnabled = enabled
-	c.batcher = newBatcher(func(ops []Operation) error {
+	c.onWriteError = onErr
+	c.batcher = newBatcher(func(ops []operation) ([]WriteFailure, error) {
 		return c.submitBatch(context.Background(), ops)
 	}, maxSize, interval, onErr)
 	return c, nil
 }
+
+// PublishableOptions configures a PublishableClient. It intentionally has no batch settings:
+// publishable tokens expose only scoped reads. Only APIKey is required.
+type PublishableOptions struct {
+	// APIKey is the publishable token, sent as "Authorization: Bearer <key>". Required.
+	APIKey string
+	// BaseURL overrides the production endpoint (default https://api.counters.dev/v1).
+	BaseURL string
+	// HTTPClient overrides the transport (default: net/http client with a 30s overall timeout).
+	HTTPClient *http.Client
+	// MaxRetries is the number of retries after the first attempt on connect errors and
+	// HTTP 429/5xx (default 3). Set -1 to disable retries entirely.
+	MaxRetries int
+	// Backoff is the base delay between retries, doubled per attempt (default 200ms). A server
+	// Retry-After header, when present, takes precedence.
+	Backoff time.Duration
+}
+
+// PublishableClient is the read-only entry point for a counter-scoped publishable token. Its
+// deliberately narrow method set makes writes, organization-wide reads, and derived reads
+// unavailable at compile time.
+type PublishableClient struct {
+	client *Client
+}
+
+// NewPublishableClient builds a read-only client from opts.
+func NewPublishableClient(opts PublishableOptions) (*PublishableClient, error) {
+	client, err := NewClient(Options{
+		APIKey:     opts.APIKey,
+		BaseURL:    opts.BaseURL,
+		HTTPClient: opts.HTTPClient,
+		MaxRetries: opts.MaxRetries,
+		Backoff:    opts.Backoff,
+		// No publishable method can enqueue a write. Disable the worker as well so Close is a
+		// lifecycle operation only and never has buffered work to submit.
+		Batch: &BatchOptions{Disabled: true, Interval: -1},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableClient{client: client}, nil
+}
+
+// Counter returns a read-only handle to one scoped counter, validating the key.
+func (c *PublishableClient) Counter(key string) (*PublishableCounterHandle, error) {
+	handle, err := c.client.Counter(key)
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableCounterHandle{handle: handle, Key: handle.Key}, nil
+}
+
+// Close releases the publishable client's lifecycle resources. It never submits a write.
+func (c *PublishableClient) Close() error { return c.client.Close() }
 
 // CounterHandle is a typed handle to a single counter.
 type CounterHandle struct {
@@ -539,27 +778,35 @@ func (h *CounterHandle) Subtract(amount any) error {
 	return h.client.enqueue(h.Key, new(big.Int).Neg(n))
 }
 
-func (h *CounterHandle) AddNow(ctx context.Context, amount any) (*Counter, error) {
-	return h.applyNow(ctx, "add", amount, time.Time{})
+// AddNow applies an increment immediately and returns the new counter state. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) AddNow(ctx context.Context, amount any, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "add", amount, time.Time{}, opts...)
 }
 
-func (h *CounterHandle) SubtractNow(ctx context.Context, amount any) (*Counter, error) {
-	return h.applyNow(ctx, "subtract", amount, time.Time{})
+// SubtractNow applies a decrement immediately and returns the new counter state. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) SubtractNow(ctx context.Context, amount any, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "subtract", amount, time.Time{}, opts...)
 }
 
 // AddNowAt applies an increment stamped with an event time (series bucket lands at occurredAt;
 // bounded server-side to the plan's retention window). For offline spools flushing late.
-func (h *CounterHandle) AddNowAt(ctx context.Context, amount any, occurredAt time.Time) (*Counter, error) {
-	return h.applyNow(ctx, "add", amount, occurredAt)
+func (h *CounterHandle) AddNowAt(ctx context.Context, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "add", amount, occurredAt, opts...)
 }
 
 // SubtractNowAt is AddNowAt for decrements.
-func (h *CounterHandle) SubtractNowAt(ctx context.Context, amount any, occurredAt time.Time) (*Counter, error) {
-	return h.applyNow(ctx, "subtract", amount, occurredAt)
+func (h *CounterHandle) SubtractNowAt(ctx context.Context, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
+	return h.applyNow(ctx, "subtract", amount, occurredAt, opts...)
 }
 
-func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occurredAt time.Time) (*Counter, error) {
+func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occurredAt time.Time, opts ...WriteOptions) (*Counter, error) {
 	n, err := ToAmount(amount)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey, err := writeIdempotencyKey(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -569,26 +816,38 @@ func (h *CounterHandle) applyNow(ctx context.Context, op string, amount any, occ
 	}
 	var out Counter
 	err = h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/"+op,
-		body, NewIdempotencyKey(), nil, &out)
+		body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (h *CounterHandle) Clear(ctx context.Context) (*Counter, error) {
+// Clear resets the counter to zero by starting a new epoch; history is retained. At most one
+// WriteOptions value may be supplied.
+func (h *CounterHandle) Clear(ctx context.Context, opts ...WriteOptions) (*Counter, error) {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return nil, err
+	}
 	var out Counter
-	err := h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/clear", nil, NewIdempotencyKey(), nil, &out)
+	err = h.client.do(ctx, "POST", "/counters/"+url.PathEscape(h.Key)+"/clear", nil, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (h *CounterHandle) Delete(ctx context.Context) error {
-	return h.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(h.Key), nil, NewIdempotencyKey(), nil, nil)
+// Delete tombstones the counter. At most one WriteOptions value may be supplied.
+func (h *CounterHandle) Delete(ctx context.Context, opts ...WriteOptions) error {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return err
+	}
+	return h.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(h.Key), nil, idempotencyKey, nil, nil)
 }
 
+// Value reads the counter's current value.
 func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	var out ValueResponse
 	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key)+"/value", nil, "", nil, &out)
@@ -598,6 +857,7 @@ func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	return &out, nil
 }
 
+// Series reads the counter's time series (delta per bucket) over [p.From, p.To).
 func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
 	q, err := seriesQuery(p)
 	if err != nil {
@@ -611,6 +871,8 @@ func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResp
 	return &out, nil
 }
 
+// MemberSeries reads one member's time series (delta per bucket on a sum board; sparse
+// best/latest scores on a score board). Requires member series enabled on the counter.
 func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p SeriesParams) (*MemberSeriesResponse, error) {
 	if err := validateMemberKey(member); err != nil {
 		return nil, err
@@ -628,6 +890,8 @@ func (h *CounterHandle) MemberSeries(ctx context.Context, member string, p Serie
 	return &out, nil
 }
 
+// GroupSeries reads the per-member multi-series (dense on a sum board, sparse per member on a
+// score board). Requires member series enabled on the counter.
 func (h *CounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*MemberGroupSeriesResponse, error) {
 	q, err := seriesQuery(p)
 	if err != nil {
@@ -642,6 +906,7 @@ func (h *CounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*Membe
 	return &out, nil
 }
 
+// Leaderboard reads the counter's ranked member leaderboard (top-N).
 func (h *CounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*Leaderboard, error) {
 	var out Leaderboard
 	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key)+"/leaderboard", nil, "", leaderboardQuery(p), &out)
@@ -651,6 +916,7 @@ func (h *CounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*
 	return &out, nil
 }
 
+// WindowLeaderboard ranks members by their activity over the trailing p.Window.
 func (h *CounterHandle) WindowLeaderboard(ctx context.Context, p WindowLeaderboardParams) (*WindowLeaderboard, error) {
 	if err := validateWindow(p.Window); err != nil {
 		return nil, err
@@ -680,6 +946,7 @@ type MemberHandle struct {
 	Member     string
 }
 
+// Get reads this member's rank, percentile, and standing value.
 func (m *MemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnapshot, error) {
 	q := url.Values{}
 	if p.Epoch != nil {
@@ -696,23 +963,36 @@ func (m *MemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnaps
 	return &out, nil
 }
 
-func (m *MemberHandle) Remove(ctx context.Context) (*MemberRemoved, error) {
+// Remove removes this member from the current board. On "sum" boards the member's value is
+// compensated into the group total. At most one WriteOptions value may be supplied.
+func (m *MemberHandle) Remove(ctx context.Context, opts ...WriteOptions) (*MemberRemoved, error) {
+	idempotencyKey, err := writeIdempotencyKey(opts)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberRemoved
-	err := m.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member), nil, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "DELETE", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member), nil, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
+// Add accumulates a non-negative delta onto this member ("sum" board). Immediate — member
+// writes are never buffered. At most one MemberWriteOpts value may be supplied.
 func (m *MemberHandle) Add(ctx context.Context, amount any, opts ...MemberWriteOpts) (*MemberValue, error) {
 	return m.applyDelta(ctx, "add", amount, opts...)
 }
 
+// Subtract subtracts a non-negative delta from this member ("sum" board; the member may go
+// negative). Immediate — member writes are never buffered.
 func (m *MemberHandle) Subtract(ctx context.Context, amount any, opts ...MemberWriteOpts) (*MemberValue, error) {
 	return m.applyDelta(ctx, "subtract", amount, opts...)
 }
 
+// Submit submits a signed score to a score board ("latest" overwrites, "min"/"max" keep the
+// best). opts.Mode is required on the first submit to an unconfigured board. A worse-than-
+// standing submit still succeeds, returning the standing value with MemberAccepted false.
 func (m *MemberHandle) Submit(ctx context.Context, value any, opts SubmitOpts) (*MemberValue, error) {
 	n, err := ToValue(value)
 	if err != nil {
@@ -728,11 +1008,15 @@ func (m *MemberHandle) Submit(ctx context.Context, value any, opts SubmitOpts) (
 		}
 		body["metadata"] = opts.Metadata
 	}
-	if !opts.OccurredAt.IsZero() {
+	if opts.OccurredAt != nil {
 		body["occurredAt"] = opts.OccurredAt.UTC().Format(time.RFC3339)
 	}
+	idempotencyKey, err := resolveIdempotencyKey(opts.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberValue
-	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/submit", body, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/submit", body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -755,15 +1039,81 @@ func (m *MemberHandle) applyDelta(ctx context.Context, op string, amount any, op
 		}
 		body["metadata"] = o.Metadata
 	}
-	if !o.OccurredAt.IsZero() {
+	if o.OccurredAt != nil {
 		body["occurredAt"] = o.OccurredAt.UTC().Format(time.RFC3339)
 	}
+	idempotencyKey, err := resolveIdempotencyKey(o.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
 	var out MemberValue
-	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/"+op, body, NewIdempotencyKey(), nil, &out)
+	err = m.client.do(ctx, "POST", "/counters/"+url.PathEscape(m.CounterKey)+"/members/"+url.PathEscape(m.Member)+"/"+op, body, idempotencyKey, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// PublishableCounterHandle is a read-only handle to one counter in a publishable token's scope.
+// It intentionally exposes no mutation methods.
+type PublishableCounterHandle struct {
+	handle *CounterHandle
+	// Key is the scoped counter key represented by this handle.
+	Key string
+}
+
+// Value reads the counter's current value.
+func (h *PublishableCounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
+	return h.handle.Value(ctx)
+}
+
+// Series reads the counter's time series over [p.From, p.To).
+func (h *PublishableCounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
+	return h.handle.Series(ctx, p)
+}
+
+// MemberSeries reads one member's time series.
+func (h *PublishableCounterHandle) MemberSeries(ctx context.Context, member string, p SeriesParams) (*MemberSeriesResponse, error) {
+	return h.handle.MemberSeries(ctx, member, p)
+}
+
+// GroupSeries reads the dense per-member multi-series.
+func (h *PublishableCounterHandle) GroupSeries(ctx context.Context, p SeriesParams) (*MemberGroupSeriesResponse, error) {
+	return h.handle.GroupSeries(ctx, p)
+}
+
+// Leaderboard reads the counter's ranked member leaderboard.
+func (h *PublishableCounterHandle) Leaderboard(ctx context.Context, p LeaderboardParams) (*Leaderboard, error) {
+	return h.handle.Leaderboard(ctx, p)
+}
+
+// WindowLeaderboard ranks members by activity over the trailing p.Window.
+func (h *PublishableCounterHandle) WindowLeaderboard(ctx context.Context, p WindowLeaderboardParams) (*WindowLeaderboard, error) {
+	return h.handle.WindowLeaderboard(ctx, p)
+}
+
+// Member returns a read-only handle to one member, validating the member key.
+func (h *PublishableCounterHandle) Member(member string) (*PublishableMemberHandle, error) {
+	handle, err := h.handle.Member(member)
+	if err != nil {
+		return nil, err
+	}
+	return &PublishableMemberHandle{handle: handle, CounterKey: handle.CounterKey, Member: handle.Member}, nil
+}
+
+// PublishableMemberHandle is a read-only handle to one leaderboard member in a publishable token's
+// counter scope.
+type PublishableMemberHandle struct {
+	handle *MemberHandle
+	// CounterKey is the scoped counter containing this member.
+	CounterKey string
+	// Member is the member key represented by this handle.
+	Member string
+}
+
+// Get reads this member's rank, percentile, and standing value.
+func (m *PublishableMemberHandle) Get(ctx context.Context, p MemberGetParams) (*MemberSnapshot, error) {
+	return m.handle.Get(ctx, p)
 }
 
 // DerivedHandle is a typed handle to a server-defined derived counter.
@@ -772,6 +1122,8 @@ type DerivedHandle struct {
 	Key    string
 }
 
+// Value evaluates the derived expression now. The result's Value is nil (with a Reason) when
+// the expression divided by zero.
 func (d *DerivedHandle) Value(ctx context.Context) (*DerivedValueResponse, error) {
 	var out DerivedValueResponse
 	err := d.client.do(ctx, "GET", "/derived/"+url.PathEscape(d.Key)+"/value", nil, "", nil, &out)
@@ -781,6 +1133,8 @@ func (d *DerivedHandle) Value(ctx context.Context) (*DerivedValueResponse, error
 	return &out, nil
 }
 
+// Series evaluates the derived expression per bucket over [p.From, p.To). The series is
+// always dense; a bucket that divided by zero has a nil Value preserved in place.
 func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*DerivedSeriesResponse, error) {
 	if !IsValidBucket(p.Bucket) {
 		return nil, &ValidationError{"invalid bucket " + strconv.Quote(p.Bucket) + "; expected one of " + strings.Join(Buckets, ", ")}
@@ -789,8 +1143,8 @@ func (d *DerivedHandle) Series(ctx context.Context, p DerivedSeriesParams) (*Der
 	q.Set("from", p.From.UTC().Format(time.RFC3339))
 	q.Set("to", p.To.UTC().Format(time.RFC3339))
 	q.Set("bucket", p.Bucket)
-	if p.Tz != "" {
-		q.Set("tz", p.Tz)
+	if p.TimeZone != "" {
+		q.Set("tz", p.TimeZone)
 	}
 	var out DerivedSeriesResponse
 	err := d.client.do(ctx, "GET", "/derived/"+url.PathEscape(d.Key)+"/series", nil, "", q, &out)
@@ -804,6 +1158,11 @@ func seriesQuery(p SeriesParams) (url.Values, error) {
 	if !IsValidBucket(p.Bucket) {
 		return nil, &ValidationError{"invalid bucket " + strconv.Quote(p.Bucket) + "; expected one of " + strings.Join(Buckets, ", ")}
 	}
+	// Only delta-per-bucket exists today; reject other modes client-side (parity with the
+	// TS/Java SDKs) instead of letting the server 400.
+	if p.Mode != "" && p.Mode != "delta" {
+		return nil, &ValidationError{"invalid mode " + strconv.Quote(p.Mode) + `; only "delta" is supported`}
+	}
 	q := url.Values{}
 	q.Set("from", p.From.UTC().Format(time.RFC3339))
 	q.Set("to", p.To.UTC().Format(time.RFC3339))
@@ -811,8 +1170,8 @@ func seriesQuery(p SeriesParams) (url.Values, error) {
 	if p.Mode != "" {
 		q.Set("mode", p.Mode)
 	}
-	if p.Tz != "" {
-		q.Set("tz", p.Tz)
+	if p.TimeZone != "" {
+		q.Set("tz", p.TimeZone)
 	}
 	if p.Gapfill {
 		q.Set("gapfill", "true")
@@ -849,6 +1208,31 @@ func singleMemberWriteOpts(opts []MemberWriteOpts) (MemberWriteOpts, error) {
 	return opts[0], nil
 }
 
+func writeIdempotencyKey(opts []WriteOptions) (string, error) {
+	if len(opts) > 1 {
+		return "", &ValidationError{Msg: "at most one WriteOptions value may be supplied"}
+	}
+	if len(opts) == 0 {
+		return newIdempotencyKey()
+	}
+	return resolveIdempotencyKey(opts[0].IdempotencyKey)
+}
+
+func resolveIdempotencyKey(key string) (string, error) {
+	// Go cannot distinguish an omitted string field from one explicitly set to "". Both request a
+	// generated key; any non-empty caller-supplied value is validated before a request is made.
+	if key == "" {
+		return newIdempotencyKey()
+	}
+	if !utf8.ValidString(key) || utf8.RuneCountInString(key) > idempotencyKeyMaxLength {
+		return "", &ValidationError{Msg: fmt.Sprintf("idempotency key must be valid UTF-8 and at most %d characters", idempotencyKeyMaxLength)}
+	}
+	if !isValidHeaderValue(key) {
+		return "", &ValidationError{Msg: "idempotency key contains characters that are not valid in an HTTP header"}
+	}
+	return key, nil
+}
+
 // List returns a page of counters.
 func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPage, error) {
 	q := url.Values{}
@@ -866,6 +1250,8 @@ func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPa
 	return &out, nil
 }
 
+// Usage reads the organization's current quota state. Intended for periodic polling, not
+// per-write interrogation.
 func (c *Client) Usage(ctx context.Context) (*Usage, error) {
 	var out Usage
 	err := c.do(ctx, "GET", "/usage", nil, "", nil, &out)
@@ -888,13 +1274,27 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	if c.batcher.isClosed() {
 		return ErrClientClosed
 	}
-	op := Operation{CounterKey: key, IdempotencyKey: NewIdempotencyKey()}
-	if delta.Sign() >= 0 {
-		op.Op, op.Amount = "add", delta.String()
-	} else {
-		op.Op, op.Amount = "subtract", new(big.Int).Neg(delta).String()
+	idempotencyKey, err := newIdempotencyKey()
+	if err != nil {
+		return err
 	}
-	go func() { _ = c.submitBatch(context.Background(), []Operation{op}) }()
+	op := operation{CounterKey: key, IdempotencyKey: idempotencyKey}
+	if delta.Sign() >= 0 {
+		op.Operation, op.Amount = "add", delta.String()
+	} else {
+		op.Operation, op.Amount = "subtract", new(big.Int).Neg(delta).String()
+	}
+	// Fire-and-forget, like a background flush — so failures route to the same OnError sink
+	// (previously they were dropped, which silently lost counted writes).
+	go func() {
+		failures, err := c.submitBatch(context.Background(), []operation{op})
+		if err == nil || c.onWriteError == nil {
+			return
+		}
+		for _, failure := range failures {
+			c.onWriteError(failure)
+		}
+	}()
 	return nil
 }
 
@@ -903,48 +1303,122 @@ type batchResult struct {
 	Status     string `json:"status"`
 	Error      *struct {
 		Title  string `json:"title"`
-		Status int    `json:"status"`
+		Status *int   `json:"status"`
 	} `json:"error"`
 }
 
 type batchResponse struct {
-	Results []batchResult `json:"results"`
+	Results *[]batchResult `json:"results"`
 }
 
-func (c *Client) submitBatch(ctx context.Context, ops []Operation) error {
+func (c *Client) submitBatch(ctx context.Context, ops []operation) ([]WriteFailure, error) {
 	// A 200 only means the batch was accepted; each op carries its own status. Surface a per-op
 	// "error" (e.g. a counter/quota cap) instead of silently dropping the buffered write.
-	var resp batchResponse
-	if err := c.do(ctx, "POST", "/batch", map[string]any{"operations": ops}, "", nil, &resp); err != nil {
-		return err
+	var raw json.RawMessage
+	if err := c.do(ctx, "POST", "/batch", map[string]any{"operations": ops}, "", nil, &raw); err != nil {
+		sdkErr := asSDKError(err)
+		failures := make([]WriteFailure, 0, len(ops))
+		for _, op := range ops {
+			failures = append(failures, writeFailure(op, sdkErr))
+		}
+		return failures, sdkErr
 	}
+	var resp batchResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return invalidBatchResponse(ops, "cannot decode response shape: %v", err)
+	}
+	if resp.Results == nil {
+		return invalidBatchResponse(ops, "results must be present")
+	}
+	results := *resp.Results
+	if len(results) != len(ops) {
+		return invalidBatchResponse(ops, "got %d results for %d submitted operations", len(results), len(ops))
+	}
+
+	opsByCounter := make(map[string]operation, len(ops))
+	for _, op := range ops {
+		opsByCounter[op.CounterKey] = op
+	}
+	seen := make(map[string]struct{}, len(results))
 	failed := 0
-	var first *batchResult
-	for i := range resp.Results {
-		if resp.Results[i].Status == "error" {
+	for i, result := range results {
+		if _, ok := opsByCounter[result.CounterKey]; !ok {
+			return invalidBatchResponse(ops, "result %d has unknown counter %q", i, result.CounterKey)
+		}
+		if _, duplicate := seen[result.CounterKey]; duplicate {
+			return invalidBatchResponse(ops, "result %d duplicates counter %q", i, result.CounterKey)
+		}
+		seen[result.CounterKey] = struct{}{}
+		switch result.Status {
+		case "applied", "deduplicated":
+		case "error":
 			failed++
-			if first == nil {
-				first = &resp.Results[i]
-			}
+		default:
+			return invalidBatchResponse(ops,
+				"result %d for counter %q has invalid status %q", i, result.CounterKey, result.Status)
 		}
 	}
-	if first == nil {
-		return nil
+	for _, op := range ops {
+		if _, ok := seen[op.CounterKey]; !ok {
+			return invalidBatchResponse(ops, "results omit submitted counter %q", op.CounterKey)
+		}
 	}
-	// a per-op problem carrying a status surfaces as an
-	// *APIError with that status, exactly as if the operation had failed standalone. A per-op
-	// problem with no status (or no problem object at all) has no failing HTTP status to carry —
-	// never fabricate one (no Status 0): the problem the SDK cannot faithfully represent is
-	// rejected client-side as a *ValidationError.
-	title := "error"
-	if first.Error != nil {
-		title = first.Error.Title
+
+	if failed == 0 {
+		return nil, nil
 	}
-	msg := fmt.Sprintf("batch: %d operation(s) failed (%s: %s)", failed, first.CounterKey, title)
-	if first.Error != nil && first.Error.Status != 0 {
-		return &APIError{Status: first.Error.Status, Title: msg}
+	failures := make([]WriteFailure, 0, failed)
+	var firstErr Error
+	for i := range results {
+		result := &results[i]
+		if result.Status == "error" {
+			op := opsByCounter[result.CounterKey]
+			title := "error"
+			if result.Error != nil {
+				title = result.Error.Title
+			}
+			msg := fmt.Sprintf("batch: %d operation(s) failed (%s: %s)", failed, result.CounterKey, title)
+			var resultErr Error
+			if result.Error == nil || result.Error.Status == nil {
+				// A status-less problem cannot be represented as an APIError without fabricating a
+				// status. The conformance contract classifies this malformed response as validation.
+				resultErr = &ValidationError{Msg: msg + "; per-op problem carries no status"}
+			} else if status := *result.Error.Status; status < 100 || status > 599 {
+				// A Problem status must be a real HTTP status code. In particular, do not turn a
+				// malformed explicit status into an APIError whose Status could never come from HTTP.
+				resultErr = &ValidationError{Msg: fmt.Sprintf("%s; per-op problem carries invalid HTTP status %d", msg, status)}
+			} else {
+				resultErr = &APIError{Status: *result.Error.Status, Title: msg}
+			}
+			if firstErr == nil {
+				firstErr = resultErr
+			}
+			failures = append(failures, writeFailure(op, resultErr))
+		}
 	}
-	return &ValidationError{Msg: msg + "; per-op problem carries no status"}
+	return failures, firstErr
+}
+
+func invalidBatchResponse(ops []operation, format string, args ...any) ([]WriteFailure, error) {
+	err := &ValidationError{Msg: "invalid batch response: " + fmt.Sprintf(format, args...)}
+	failures := make([]WriteFailure, 0, len(ops))
+	for _, op := range ops {
+		failures = append(failures, writeFailure(op, err))
+	}
+	return failures, err
+}
+
+func writeFailure(op operation, err Error) WriteFailure {
+	delta := op.Amount
+	if op.Operation == "subtract" && delta != "" && delta != "0" {
+		delta = "-" + delta
+	}
+	return WriteFailure{
+		CounterKey:     op.CounterKey,
+		Delta:          delta,
+		IdempotencyKey: op.IdempotencyKey,
+		Err:            err,
+	}
 }
 
 var retryableStatus = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
@@ -960,6 +1434,9 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, idempotencyKey string, query url.Values, out any) error {
+	if ctx == nil {
+		return &ValidationError{Msg: "counters: context must not be nil"}
+	}
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -968,7 +1445,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 	if body != nil {
 		var err error
 		if reqBody, err = json.Marshal(body); err != nil {
-			return err
+			return &ValidationError{Msg: fmt.Sprintf("counters: could not encode request body: %v", err)}
 		}
 	}
 
@@ -977,6 +1454,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		sleepFn = time.Sleep
 	}
 	var lastErr error
+	var lastResponseErr *APIError
 	var retryAfter time.Duration // 0 => use exponential backoff
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -989,7 +1467,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		retryAfter = 0
 		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(reqBody))
 		if err != nil {
-			return err
+			return &ValidationError{Msg: fmt.Sprintf("counters: could not construct request: %v", err)}
 		}
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		if body != nil {
@@ -1001,10 +1479,41 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if resp != nil {
+				status := resp.StatusCode
+				if resp.Body != nil {
+					resp.Body.Close()
+				}
+				if status < 100 || status > 599 {
+					lastErr = fmt.Errorf("transport returned invalid HTTP status %d: %w", status, err)
+					continue
+				}
+				// net/http may return both a response and an error when redirect policy rejects a
+				// response. A response was obtained, so this is never a transport failure.
+				apiErr := &APIError{Status: status, Title: err.Error()}
+				lastResponseErr = apiErr
+				if retryableStatus[status] && attempt < c.maxRetries {
+					retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+					lastErr = apiErr
+					continue
+				}
+				return apiErr
+			}
 			lastErr = err // network — retry
 			continue
 		}
+		if resp == nil {
+			lastErr = errors.New("transport returned no response")
+			continue
+		}
 		status := resp.StatusCode
+		if status < 100 || status > 599 {
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+			lastErr = fmt.Errorf("transport returned invalid HTTP status %d", status)
+			continue
+		}
 		if status >= 200 && status < 300 {
 			if out != nil && status != 204 {
 				err := json.NewDecoder(resp.Body).Decode(out)
@@ -1023,7 +1532,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			lastErr = &APIError{Status: status}
+			lastResponseErr = &APIError{Status: status}
+			lastErr = lastResponseErr
 			continue
 		}
 		var p struct {
@@ -1032,6 +1542,11 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		json.NewDecoder(resp.Body).Decode(&p)
 		resp.Body.Close()
 		return &APIError{Status: status, Title: p.Title}
+	}
+	if lastResponseErr != nil {
+		// At least one HTTP response arrived. Later transport failures cannot turn the terminal
+		// outcome into TransportError, whose contract requires that no response was ever obtained.
+		return lastResponseErr
 	}
 	// B2: retries exhausted with no HTTP response -> transport error (never a status-0 APIError).
 	return &TransportError{Cause: fmt.Errorf("request failed after %d attempts: %w", c.maxRetries+1, lastErr)}
@@ -1060,4 +1575,14 @@ func orHTTP(v *http.Client) *http.Client {
 		return &http.Client{Timeout: 30 * time.Second}
 	}
 	return v
+}
+
+func isValidHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }

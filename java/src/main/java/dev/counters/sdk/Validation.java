@@ -1,6 +1,7 @@
 package dev.counters.sdk;
 
 import java.math.BigInteger;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -33,6 +34,51 @@ public final class Validation {
     private static final Pattern VALUE_PATTERN = Pattern.compile("^-?[0-9]+$");
 
     private Validation() {}
+
+    /** Validates a required API key before it is used as an HTTP header value. */
+    public static void assertApiKey(String apiKey) {
+        if (apiKey == null || apiKey.isEmpty()) {
+            throw new CountersValidationException("CountersClient: apiKey is required");
+        }
+        assertHeaderValue("apiKey", apiKey);
+    }
+
+    /** Validates the configured absolute HTTP(S) API endpoint. */
+    public static void assertBaseUrl(String baseUrl) {
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new CountersValidationException("baseUrl is required");
+        }
+        try {
+            URI uri = URI.create(baseUrl);
+            String scheme = uri.getScheme();
+            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    || uri.getRawAuthority() == null) {
+                throw new CountersValidationException("baseUrl must be an absolute HTTP(S) URL: " + baseUrl);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new CountersValidationException("invalid baseUrl: " + baseUrl, e);
+        }
+    }
+
+    /** Validates a caller-supplied idempotency key. */
+    public static void assertIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isEmpty()) {
+            throw new CountersValidationException("idempotency key must not be empty");
+        }
+        if (idempotencyKey.length() > 255) {
+            throw new CountersValidationException("idempotency key must be at most 255 characters");
+        }
+        assertHeaderValue("idempotency key", idempotencyKey);
+    }
+
+    private static void assertHeaderValue(String name, String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\r' || c == '\n' || c == 0x7f || (c < 0x20 && c != '\t')) {
+                throw new CountersValidationException(name + " contains an invalid HTTP header character");
+            }
+        }
+    }
 
     /** Reports whether {@code key} matches the server's allowed shape. */
     public static boolean isValidCounterKey(String key) {

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.math.BigInteger;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +25,16 @@ class JsonTest {
                 List.of(new Operation("a", "add", "6", "k1", null).toJson()));
         assertEquals("{\"operations\":[{\"counterKey\":\"a\",\"op\":\"add\",\"amount\":\"6\",\"idempotencyKey\":\"k1\"}]}",
                 Json.write(batch));
+
+        Operation timestamped = new Operation(
+                "a", "subtract", "2", "k2", Instant.parse("2026-07-01T12:00:00Z"));
+        assertEquals("{\"counterKey\":\"a\",\"op\":\"subtract\",\"amount\":\"2\","
+                        + "\"idempotencyKey\":\"k2\",\"occurredAt\":\"2026-07-01T12:00:00Z\"}",
+                Json.write(timestamped.toJson()));
+        assertEquals("subtract", timestamped.operation());
+        assertEquals(Instant.parse("2026-07-01T12:00:00Z"), timestamped.occurredAt());
+        assertNull(new Operation("a", "add", "1", null, null).occurredAt(),
+                "absent optional occurredAt stays null");
     }
 
     @Test

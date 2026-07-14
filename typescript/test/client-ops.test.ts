@@ -14,7 +14,13 @@ describe("list", () => {
         url = u;
         return jsonResponse(200, {
           data: [
-            { key: "a", value: "1", epoch: 0 },
+            {
+              key: "a",
+              value: "1",
+              epoch: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:01Z",
+            },
             { key: "b", value: "18446744073709551616", epoch: 2 },
           ],
           nextCursor: "b",
@@ -26,6 +32,13 @@ describe("list", () => {
     expect(url.searchParams.get("cursor")).toBe("prev");
     expect(url.searchParams.get("limit")).toBe("2");
     expect(page.data.map((c) => c.key)).toEqual(["a", "b"]);
+    expect(page.data[0]?.createdAt).toBeInstanceOf(Date);
+    expect(page.data[0]?.createdAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    expect(page.data[0]?.updatedAt).toBeInstanceOf(Date);
+    expect(page.data[0]?.updatedAt?.toISOString()).toBe("2026-01-01T00:00:01.000Z");
+    // Optional timestamps absent on the wire stay absent, rather than becoming epoch-zero/Invalid Date.
+    expect(page.data[1]?.createdAt).toBeUndefined();
+    expect(page.data[1]?.updatedAt).toBeUndefined();
     expect(page.data[1]?.value).toBe("18446744073709551616"); // >u64 stays a string
     expect(page.nextCursor).toBe("b");
     await client.close();
@@ -42,13 +55,25 @@ describe("clear", () => {
       fetch: mockFetch((u, i) => {
         url = u;
         init = i;
-        return jsonResponse(200, { key: "c", value: "0", epoch: 3 });
+        return jsonResponse(200, {
+          key: "c",
+          value: "0",
+          epoch: 3,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-02T00:00:00Z",
+        });
       }),
     });
     const counter = await client.counter("c").clear();
     expect(url.pathname).toBe("/v1/counters/c/clear");
     expect((init.headers as Record<string, string>)["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
-    expect(counter).toEqual({ key: "c", value: "0", epoch: 3 });
+    expect(counter).toEqual({
+      key: "c",
+      value: "0",
+      epoch: 3,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      updatedAt: new Date("2026-01-02T00:00:00Z"),
+    });
     await client.close();
   });
 });

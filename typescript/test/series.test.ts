@@ -5,6 +5,7 @@ import type {
   MemberGroupSeriesResponse,
   MemberSeriesResponse,
   SeriesParams,
+  SeriesPoint,
   SeriesResponse,
 } from "../src/types.js";
 import { jsonResponse, loadVectors, mockFetch } from "./helpers.js";
@@ -35,6 +36,13 @@ type AnySeriesParams = SeriesParams & { member?: string; groupBy?: "member" };
 
 describe("series conformance (conformance/series)", () => {
   it.each(vectors.query)("query: $name", async (c) => {
+    const params = {
+      ...c.params,
+      from: new Date(c.params.from as string),
+      to: new Date(c.params.to as string),
+      timeZone: c.params.tz as string | undefined,
+    };
+    delete (params as { tz?: unknown }).tz;
     // An error case carries `expect.taxonomy` and NO `query`: the encoding must raise a validation
     // error BEFORE any request is sent (member + groupBy set together).
     if (c.expect?.taxonomy === "validation") {
@@ -46,7 +54,7 @@ describe("series conformance (conformance/series)", () => {
       });
       // Local validation throws synchronously (before the request promise is created — same contract
       // as assertBucket / a bad counter key), so no request is ever issued.
-      expect(() => client.counter("c").series(c.params as AnySeriesParams)).toThrow(
+      expect(() => client.counter("c").series(params as AnySeriesParams)).toThrow(
         CountersValidationError,
       );
       expect(fetchFn).not.toHaveBeenCalled();
@@ -56,16 +64,25 @@ describe("series conformance (conformance/series)", () => {
     let url!: URL;
     const f = mockFetch((u) => {
       url = u;
-      return jsonResponse(200, { counterKey: "c", bucket: "1h", mode: "delta", range: { from: "", to: "" }, points: [] });
+      return jsonResponse(200, {
+        counterKey: "c",
+        bucket: "1h",
+        mode: "delta",
+        range: { from: params.from.toISOString(), to: params.to.toISOString() },
+        points: [],
+      });
     });
     const client = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
-    await client.counter("c").series(c.params as AnySeriesParams);
+    await client.counter("c").series(params as AnySeriesParams);
 
     // presence-exact: every listed key present with that value, and nothing else on the wire.
     const got = new Map<string, string>();
     url.searchParams.forEach((v, k) => got.set(k, v));
     expect(new Set(got.keys())).toEqual(new Set(Object.keys(c.query!)));
-    for (const [k, v] of Object.entries(c.query!)) expect(got.get(k)).toBe(v);
+    for (const [k, v] of Object.entries(c.query!)) {
+      const expected = k === "from" || k === "to" ? new Date(v).toISOString() : v;
+      expect(got.get(k)).toBe(expected);
+    }
   });
 
   it.each(vectors.parse)("parse: $name", async (c) => {
@@ -73,7 +90,7 @@ describe("series conformance (conformance/series)", () => {
     const client = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1" });
     const range = c.body.range as { from: string; to: string };
     const bucket = c.body.bucket as SeriesParams["bucket"];
-    const base = { from: range.from, to: range.to, bucket };
+    const base = { from: new Date(range.from), to: new Date(range.to), bucket };
 
     if (c.kind === "memberGroupSeries") {
       const r = (await client
@@ -82,17 +99,14 @@ describe("series conformance (conformance/series)", () => {
       const ex = c.expect as { counterKey: string; bucket: string; series: { member: string; points: Point[] }[] };
       expect(r.counterKey).toBe(ex.counterKey);
       expect(r.bucket).toBe(ex.bucket);
-      // No top-level mode on a group series (openapi MemberGroupSeriesResponse).
-      expect((r as unknown as { mode?: unknown }).mode).toBeUndefined();
+      // The spec requires a top-level `mode` on a group series; the current conformance vector
+      // predates it (flagged upstream), so assert exact passthrough of whatever the body carried.
+      expect((r as unknown as { mode?: unknown }).mode).toBe((c.body as { mode?: string }).mode);
+      assertRange(r.range, range);
       expect(r.series).toHaveLength(ex.series.length);
       r.series.forEach((s, i) => {
         expect(s.member).toBe(ex.series[i]!.member);
-        expect(s.points).toHaveLength(ex.series[i]!.points.length);
-        s.points.forEach((pt, j) => {
-          expect(typeof pt.v).toBe("string");
-          expect(pt.v).toBe(ex.series[i]!.points[j]!.v);
-          expect(pt.t).toBe(ex.series[i]!.points[j]!.t);
-        });
+        assertPoints(s.points, ex.series[i]!.points);
       });
       return;
     }
@@ -106,6 +120,7 @@ describe("series conformance (conformance/series)", () => {
       expect(r.member).toBe(ex.member);
       expect(r.bucket).toBe(ex.bucket);
       expect(r.mode).toBe(ex.mode);
+      assertRange(r.range, range);
       assertPoints(r.points, ex.points);
       return;
     }
@@ -115,16 +130,67 @@ describe("series conformance (conformance/series)", () => {
     expect(r.counterKey).toBe(ex.counterKey);
     expect(r.bucket).toBe(ex.bucket);
     expect(r.mode).toBe(ex.mode);
+    assertRange(r.range, range);
     assertPoints(r.points, ex.points);
+  });
+
+  it("parses score-board member series (mode follows the board; grouped series carries mode)", async () => {
+    const from = new Date("2026-07-01T00:00:00Z");
+    const to = new Date("2026-07-02T00:00:00Z");
+    const range = { from: from.toISOString(), to: to.toISOString() };
+
+    const single = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() =>
+        jsonResponse(200, {
+          counterKey: "best-lap",
+          member: "alice",
+          bucket: "1h",
+          mode: "min", // score board: each point is the bucket-best, sparse
+          range,
+          points: [{ t: "2026-07-01T09:00:00Z", v: "1417" }],
+        }),
+      ),
+    });
+    const memberSeries = await single.counter("best-lap").series({ from, to, bucket: "1h", member: "alice" });
+    expect(memberSeries.mode).toBe("min");
+
+    const grouped = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch(() =>
+        jsonResponse(200, {
+          counterKey: "best-lap",
+          bucket: "1h",
+          mode: "min",
+          range,
+          series: [{ member: "alice", points: [{ t: "2026-07-01T09:00:00Z", v: "1417" }] }],
+        }),
+      ),
+    });
+    const groupSeries = await grouped.counter("best-lap").series({ from, to, bucket: "1h", groupBy: "member" });
+    expect(groupSeries.mode).toBe("min");
   });
 });
 
-function assertPoints(actual: Point[], expected: Point[]): void {
+function assertPoints(actual: SeriesPoint[], expected: Point[]): void {
   expect(actual).toHaveLength(expected.length);
   actual.forEach((pt, i) => {
-    expect(pt.t).toBe(expected[i]!.t);
+    expect(pt.timestamp).toBeInstanceOf(Date);
+    expect(pt.timestamp.toISOString()).toBe(new Date(expected[i]!.t).toISOString());
     // Delta stays a string (arbitrary precision; never a JS number).
-    expect(typeof pt.v).toBe("string");
-    expect(pt.v).toBe(expected[i]!.v);
+    expect(typeof pt.value).toBe("string");
+    expect(pt.value).toBe(expected[i]!.v);
+    // The compact wire keys do not leak into the ergonomic public object.
+    expect(pt).not.toHaveProperty("t");
+    expect(pt).not.toHaveProperty("v");
   });
+}
+
+function assertRange(actual: { from: Date; to: Date }, expected: { from: string; to: string }): void {
+  expect(actual.from).toBeInstanceOf(Date);
+  expect(actual.to).toBeInstanceOf(Date);
+  expect(actual.from.toISOString()).toBe(new Date(expected.from).toISOString());
+  expect(actual.to.toISOString()).toBe(new Date(expected.to).toISOString());
 }

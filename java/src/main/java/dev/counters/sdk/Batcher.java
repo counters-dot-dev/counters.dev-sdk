@@ -21,18 +21,27 @@ import java.util.function.Consumer;
  */
 final class Batcher {
 
-    private final Consumer<List<Operation>> submit;
+    @FunctionalInterface
+    interface SubmitFn {
+        List<WriteFailure> submit(List<Operation> operations);
+    }
+
+    private final SubmitFn submit;
     private final int maxBatchSize;
     private final long intervalMillis;
-    private final Consumer<Throwable> onError;
+    private final Consumer<WriteFailure> onError;
 
     private final Object lock = new Object();
-    private final Map<String, BigInteger> buf = new LinkedHashMap<>();
+    private final Map<String, BufferedWrite> buf = new LinkedHashMap<>();
     private ScheduledExecutorService executor; // lazily created; daemon thread
     private boolean timerStarted;
     private boolean closed;
 
-    Batcher(Consumer<List<Operation>> submit, int maxBatchSize, long intervalMillis, Consumer<Throwable> onError) {
+    Batcher(
+            SubmitFn submit,
+            int maxBatchSize,
+            long intervalMillis,
+            Consumer<WriteFailure> onError) {
         this.submit = submit;
         this.maxBatchSize = maxBatchSize;
         this.intervalMillis = intervalMillis;
@@ -44,8 +53,16 @@ final class Batcher {
         synchronized (lock) {
             // A write after close() would re-arm the timer on a fresh executor and strand in a buffer
             // no one drains — reject it instead.
-            if (closed) throw new CountersException("cannot enqueue on a closed client");
-            buf.merge(counterKey, delta, BigInteger::add);
+            if (closed) throw new CountersValidationException("cannot enqueue on a closed client");
+            BufferedWrite buffered = buf.get(counterKey);
+            if (buffered == null) {
+                // Generate before accepting the write. If the runtime cannot obtain randomness,
+                // enqueue fails synchronously with the transport taxonomy instead of a timer task
+                // failing later after the caller has lost the write's identity.
+                buf.put(counterKey, new BufferedWrite(delta, Idempotency.newKey()));
+            } else {
+                buf.put(counterKey, new BufferedWrite(buffered.delta().add(delta), buffered.idempotencyKey()));
+            }
             if (intervalMillis > 0 && !timerStarted) {
                 timerStarted = true;
                 executor().scheduleAtFixedRate(this::flushSafe, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
@@ -56,6 +73,13 @@ final class Batcher {
         }
     }
 
+    /** Whether close() has been called (used by the client's immediate-mode path to reject late writes). */
+    boolean isClosed() {
+        synchronized (lock) {
+            return closed;
+        }
+    }
+
     /** Number of distinct counters currently buffered. */
     int pending() {
         synchronized (lock) {
@@ -63,11 +87,19 @@ final class Batcher {
         }
     }
 
-    /** Drain the current buffer into one batch and submit it (throws whatever the submit fn throws). */
+    /** Whether a periodic timer has been armed (package-private test seam). */
+    boolean isTimerStarted() {
+        synchronized (lock) {
+            return timerStarted;
+        }
+    }
+
+    /** Drain the current buffer into one batch and submit it, throwing the first typed failure. */
     void flush() {
         List<Operation> ops = drain();
         if (ops.isEmpty()) return;
-        submit.accept(ops);
+        List<WriteFailure> failures = submitFailures(ops);
+        if (!failures.isEmpty()) throw failures.get(0).error();
     }
 
     /** Stop the timer and flush everything (looping in case items arrived mid-flush). */
@@ -93,24 +125,38 @@ final class Batcher {
     private List<Operation> drain() {
         synchronized (lock) {
             List<Operation> ops = new ArrayList<>(buf.size());
-            for (Map.Entry<String, BigInteger> e : buf.entrySet()) {
-                BigInteger delta = e.getValue();
+            for (Map.Entry<String, BufferedWrite> e : buf.entrySet()) {
+                BufferedWrite buffered = e.getValue();
+                BigInteger delta = buffered.delta();
                 int sign = delta.signum();
                 if (sign == 0) continue; // add then equal subtract -> net no-op
                 ops.add(sign > 0
-                        ? new Operation(e.getKey(), "add", delta.toString(), Idempotency.newKey(), null)
-                        : new Operation(e.getKey(), "subtract", delta.negate().toString(), Idempotency.newKey(), null));
+                        ? new Operation(e.getKey(), "add", delta.toString(), buffered.idempotencyKey(), null)
+                        : new Operation(e.getKey(), "subtract", delta.negate().toString(), buffered.idempotencyKey(), null));
             }
             buf.clear();
             return ops;
         }
     }
 
+    private record BufferedWrite(BigInteger delta, String idempotencyKey) {}
+
     private void flushSafe() {
+        List<Operation> ops = drain();
+        if (ops.isEmpty()) return;
+        List<WriteFailure> failures = submitFailures(ops);
+        if (onError != null) failures.forEach(onError);
+    }
+
+    private List<WriteFailure> submitFailures(List<Operation> ops) {
         try {
-            flush();
-        } catch (Throwable t) {
-            if (onError != null) onError.accept(t);
+            List<WriteFailure> failures = submit.submit(ops);
+            return failures == null ? List.of() : failures;
+        } catch (Throwable failure) {
+            CountersException error = CountersException.normalizeBatchFailure(failure);
+            List<WriteFailure> failures = new ArrayList<>(ops.size());
+            for (Operation op : ops) failures.add(WriteFailure.from(op, error));
+            return List.copyOf(failures);
         }
     }
 

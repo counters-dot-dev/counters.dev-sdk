@@ -30,6 +30,7 @@ import dev.counters.sdk.MemberRemoved;
 import dev.counters.sdk.MemberSnapshot;
 import dev.counters.sdk.MemberValue;
 import dev.counters.sdk.MemberWriteOptions;
+import dev.counters.sdk.ReadOnlyCountersClient;
 import dev.counters.sdk.SeriesParams;
 import dev.counters.sdk.SeriesPoint;
 import dev.counters.sdk.SeriesResponse;
@@ -46,8 +47,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -66,7 +66,7 @@ public final class E2e {
     /** Run-unique namespace: fresh counters, stable epochs. */
     private static final String NS = "e2e-java-" + Long.toString(System.currentTimeMillis(), 36) + "-";
     /** Captured once per run, UTC, truncated to seconds; all relative times resolve against it. */
-    private static final OffsetDateTime T0 = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS);
+    private static final Instant T0 = Instant.now().truncatedTo(ChronoUnit.SECONDS);
 
     private static final Set<String> INVOKED = new HashSet<>();
     private static int checks = 0;
@@ -126,15 +126,15 @@ public final class E2e {
         throw new AssertionError(what + ": expected CountersApiException(" + status + "), but the call succeeded");
     }
 
-    private static OffsetDateTime minutes(long n) {
-        return T0.plusMinutes(n);
+    private static Instant minutes(long n) {
+        return T0.plus(n, ChronoUnit.MINUTES);
     }
 
     // ── 1. The grand tour: every public method, the way an integrator would use it ──────────────
 
     private static void tour() {
-        OffsetDateTime from = T0.minusHours(24);
-        OffsetDateTime to = T0.plusHours(24);
+        Instant from = T0.minus(24, ChronoUnit.HOURS);
+        Instant to = T0.plus(24, ChronoUnit.HOURS);
 
         // Every builder knob in one place; try-with-resources flushes buffered writes on the way out.
         try (CountersClient client = CountersClient.builder()
@@ -146,7 +146,9 @@ public final class E2e {
                 .batchEnabled(true)
                 .maxBatchSize(100)
                 .batchIntervalMillis(200)
-                .onBatchError(e -> System.err.println("batch flush failed: " + e))
+                .onBatchError(failure -> System.err.printf(
+                        "batch write failed: counter=%s delta=%s idempotencyKey=%s error=%s%n",
+                        failure.counterKey(), failure.delta(), failure.idempotencyKey(), failure.error()))
                 .build()) {
             INVOKED.add("CountersClient.builder().build()");
 
@@ -179,14 +181,17 @@ public final class E2e {
             checkEq(current.value(), "6", "value after confirmed + buffered writes (5-2+4-1)");
 
             // Event-time writes: occurredAt buckets the op into the past; totals are unaffected.
-            signups.addNow(10, T0.minusHours(2));
+            signups.addNow(10, T0.minus(2, ChronoUnit.HOURS));
             checkEq(signups.value().value(), "16", "total after an event-time write");
 
             // Series at every granularity the plan allows (pro: down to 1m). Sum == total delta.
             for (String bucket : List.of("1m", "5m", "1h", "1d", "1w", "1mo")) {
                 SeriesResponse series = signups.series(new SeriesParams(from, to, bucket));
                 BigInteger sum = BigInteger.ZERO;
-                for (SeriesPoint p : series.points()) sum = sum.add(new BigInteger(p.v()));
+                for (SeriesPoint p : series.points()) {
+                    check(p.timestamp() != null, "series point exposes its bucket timestamp as an Instant");
+                    sum = sum.add(new BigInteger(p.value()));
+                }
                 checkEq(sum.toString(), "16", "series(" + bucket + ") sums to the total delta");
             }
             INVOKED.add("CounterHandle.series");
@@ -240,22 +245,25 @@ public final class E2e {
             pkDemo.addNow(1); // ensure it exists before clearing (first run on a fresh DB)
             pkDemo.clear();
             pkDemo.addNow(7);
-            try (CountersClient pkClient = CountersClient.builder().apiKey(pkToken).baseUrl(baseUrl).build()) {
+            // publishableBuilder() returns a read-only static type: writes, list, usage, and derived
+            // operations are absent rather than calls that fail later with 403.
+            try (ReadOnlyCountersClient pkClient = CountersClient.publishableBuilder()
+                    .apiKey(pkToken)
+                    .baseUrl(baseUrl)
+                    .build()) {
+                INVOKED.add("CountersClient.publishableBuilder");
                 checkEq(pkClient.counter("pk-demo").value().value(), "7", "pk token reads its scoped counter");
                 pkClient.counter("pk-demo").series(new SeriesParams(from, to, "1h")); // read surface also includes series
-                expectStatus(() -> pkClient.counter("pk-demo").addNow(1), 403, "pk token cannot write");
                 expectStatus(() -> pkClient.counter(NS + "signups").value(), 403, "pk token cannot leave its scope");
-                expectStatus(() -> pkClient.list(), 403, "pk token cannot list");
             }
 
             // Usage: org-wide quota state. Assertions are lower-bound/tolerant because the org is shared
             // across cases and the endpoint reports the whole current month.
             Usage usage = client.usage();
             INVOKED.add("CountersClient.usage");
-            check(usage.ops().used() >= 1, "usage reports at least the writes this run made");
+            check(usage.operations().used() >= 1, "usage reports at least the writes this run made");
             check(usage.counters().used() >= 1, "usage reports at least one live counter");
-            check(usage.ops().resetsAt() != null && !usage.ops().resetsAt().isEmpty(),
-                    "usage carries a resetsAt instant");
+            check(usage.operations().resetsAt() != null, "usage carries a resetsAt instant");
             check(usage.month() != null && !usage.month().isEmpty(), "usage carries the UTC month");
         } // try-with-resources: AutoCloseable close() flushes buffered writes and stops the timer
         INVOKED.add("CountersClient.close");
@@ -264,8 +272,8 @@ public final class E2e {
     // ── 1b. Leaderboards & members: the full board lifecycle against a live server ──────────────
 
     private static void leaderboards() {
-        OffsetDateTime from = T0.minusHours(24);
-        OffsetDateTime to = T0.plusHours(24);
+        Instant from = T0.minus(24, ChronoUnit.HOURS);
+        Instant to = T0.plus(24, ChronoUnit.HOURS);
 
         try (CountersClient client = CountersClient.builder().apiKey(keyA).baseUrl(baseUrl).build()) {
             CounterHandle board = client.counter(NS + "lb");
@@ -299,6 +307,8 @@ public final class E2e {
             checkEq(lb.entries().get(0).member(), "bob", "rank 1 is bob");
             checkEq(lb.entries().get(0).rank(), 1L, "bob is rank 1");
             checkEq(lb.entries().get(0).value(), "25", "bob value");
+            Instant leaderboardUpdatedAt = lb.entries().get(0).updatedAt();
+            check(leaderboardUpdatedAt != null, "leaderboard entry carries its required updatedAt instant");
             checkEq(lb.entries().get(1).rank(), 2L, "alice/carol tie at rank 2");
             checkEq(lb.entries().get(2).rank(), 2L, "the tie shares rank 2");
 
@@ -313,6 +323,8 @@ public final class E2e {
             checkEq(snap.value(), "25", "bob snapshot value");
             checkEq(snap.percentile(), "100.00", "the leader's percentile is 100.00");
             check(snap.percentile() instanceof String, "percentile stays a string");
+            Instant snapshotUpdatedAt = snap.updatedAt();
+            check(snapshotUpdatedAt != null, "member snapshot carries its required updatedAt instant");
 
             checkEq(carol.remove().value(), "30", "board total after removing carol (40 - 10)");
             INVOKED.add("MemberHandle.remove");
@@ -369,7 +381,7 @@ public final class E2e {
             checkEq(d.key(), NS + "conversion", "derived handle exposes its validated key");
             expectStatus(() -> d.value(), 404, "derived value with no definition");
             INVOKED.add("DerivedHandle.value");
-            expectStatus(() -> d.series(new DerivedSeriesParams(T0.minusHours(1), T0, "1h")),
+            expectStatus(() -> d.series(new DerivedSeriesParams(T0.minus(1, ChronoUnit.HOURS), T0, "1h")),
                     404, "derived series with no definition");
             INVOKED.add("DerivedHandle.series");
         }
@@ -421,7 +433,7 @@ public final class E2e {
                     Map<String, Object> expect = obj(step.get("expect"));
                     CountersClient client = clients.get((String) op.get("org"));
                     CounterHandle handle = op.get("key") != null ? client.counter(prefix + op.get("key")) : null;
-                    OffsetDateTime occurredAt = op.get("occurredAtMin") != null
+                    Instant occurredAt = op.get("occurredAtMin") != null
                             ? minutes(((Number) op.get("occurredAtMin")).longValue())
                             : null;
                     String where = c.get("name") + " step " + s;
@@ -444,7 +456,9 @@ public final class E2e {
                     }
                     if (expect.containsKey("pointsSum")) {
                         BigInteger sum = BigInteger.ZERO;
-                        for (SeriesPoint p : ((SeriesResponse) body).points()) sum = sum.add(new BigInteger(p.v()));
+                        for (SeriesPoint p : ((SeriesResponse) body).points()) {
+                            sum = sum.add(new BigInteger(p.value()));
+                        }
                         checkEq(sum.toString(), expect.get("pointsSum"), where + ": pointsSum");
                     }
                     if (expect.containsKey("pointsAtLeast")) {
@@ -462,8 +476,9 @@ public final class E2e {
                         Map<String, Object> u = obj(expect.get("usage"));
                         Usage usage = (Usage) body;
                         if (u.get("opsUsedAtLeast") instanceof Number n) {
-                            check(usage.ops().used() >= n.longValue(),
-                                    where + ": opsUsedAtLeast " + n.longValue() + ", got " + usage.ops().used());
+                            check(usage.operations().used() >= n.longValue(),
+                                    where + ": opsUsedAtLeast " + n.longValue()
+                                            + ", got " + usage.operations().used());
                         }
                         if (u.get("countersUsedAtLeast") instanceof Number n) {
                             check(usage.counters().used() >= n.longValue(),
@@ -471,7 +486,7 @@ public final class E2e {
                                             + ", got " + usage.counters().used());
                         }
                         if (u.get("hasResetsAt") instanceof Boolean hasResetsAt) {
-                            checkEq(usage.ops().resetsAt() != null, hasResetsAt, where + ": hasResetsAt");
+                            checkEq(usage.operations().resetsAt() != null, hasResetsAt, where + ": hasResetsAt");
                         }
                     }
                     if (expect.containsKey("memberValue")) {
@@ -530,7 +545,7 @@ public final class E2e {
     }
 
     private static Object runOp(CountersClient client, CounterHandle handle, Map<String, Object> op,
-                                OffsetDateTime occurredAt) {
+                                Instant occurredAt) {
         switch ((String) op.get("op")) {
             case "add":
                 return handle.addNow((String) op.get("amount"), occurredAt);
@@ -595,13 +610,13 @@ public final class E2e {
         }
     }
 
-    private static MemberWriteOptions memberWriteOptions(Map<String, Object> op, OffsetDateTime occurredAt) {
+    private static MemberWriteOptions memberWriteOptions(Map<String, Object> op, Instant occurredAt) {
         String metadata = (String) op.get("metadata");
         if (metadata == null && occurredAt == null) return null;
         return new MemberWriteOptions(metadata, occurredAt);
     }
 
-    private static SubmitOptions submitOptions(Map<String, Object> op, OffsetDateTime occurredAt) {
+    private static SubmitOptions submitOptions(Map<String, Object> op, Instant occurredAt) {
         String mode = (String) op.get("mode");
         String metadata = (String) op.get("metadata");
         if (mode == null && metadata == null && occurredAt == null) return null;

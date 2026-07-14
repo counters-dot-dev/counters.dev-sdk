@@ -6,7 +6,13 @@
 //   1. every operation in openapi/openapi.yaml must be either implemented by ALL three SDKs
 //      (detected via per-operation source signatures) or explicitly allowlisted below;
 //   2. no SDK may reference the keyless public endpoints;
-//   3. an operation added to the spec without a mapping here fails the build, forcing a decision.
+//   3. an operation added to the spec without a mapping here fails the build, forcing a decision;
+//   4. every REQUIRED property of every SDK-modelled spec schema must be visible in each SDK's
+//      model for that schema (the SDKs use the spec's schema names as their type names, so the
+//      check anchors on the type declaration; a schema with no matching type falls back to a
+//      whole-SDK source scan). This catches a response field the spec guarantees but a hand-written
+//      client silently fails to model — the exact drift class that reached this repo as a missing
+//      grouped-series `mode`.
 //
 // Zero dependencies; run from the repo root: node scripts/openapi-drift/check.mjs
 
@@ -181,12 +187,162 @@ for (const [lang, text] of Object.entries(sources)) {
   }
 }
 
+// ---- 4. required schema properties must be modelled by every SDK -----------------------------------
+
+// Spec schemas the SDKs intentionally do NOT model (mirror NOT_SDK_SURFACE for schemas).
+const NOT_SDK_SCHEMAS = new Set([
+  "DashboardPlaneToken", // dashboard-only surface
+  "DashboardUsage", // dashboard-only surface
+]);
+
+// Wire names the SDKs deliberately expand on their public types. A required wire property is
+// satisfied by the wire name itself (transport layer) or its expanded public name.
+const PUBLIC_NAME_EXPANSIONS = {
+  t: ["timestamp"],
+  v: ["value"],
+  tz: ["timeZone"],
+  op: ["operation"],
+  ops: ["operations"],
+  rateLimitRps: ["rateLimitRequestsPerSecond"],
+  monthlyOpsQuota: ["monthlyOperationsQuota"],
+};
+
+/**
+ * Parse `components.schemas`: name -> { top, nested } required property names. `top` is the
+ * schema's own `required:` list (checked against the SDK's model for that schema); `nested` are
+ * `required:` lists of inline sub-objects, whose model may live in a shared type in another file
+ * (e.g. Java's SeriesResponse.Range), so they are checked against the whole SDK source.
+ */
+function parseSchemaRequirements(lines) {
+  const requirements = new Map();
+  let inSchemas = false;
+  let current = null;
+  for (const line of lines) {
+    if (/^ {2}schemas:\s*$/.test(line)) {
+      inSchemas = true;
+      continue;
+    }
+    if (inSchemas && /^ {2}\S/.test(line)) break; // next 2-space key ends the schemas block
+    if (!inSchemas) continue;
+    const name = line.match(/^ {4}(\w+):\s*$/);
+    if (name) {
+      current = name[1];
+      if (!requirements.has(current)) requirements.set(current, { top: new Set(), nested: new Set() });
+      continue;
+    }
+    const req = current && line.match(/^( +)required:\s*\[([^\]]*)\]\s*$/);
+    if (req) {
+      const tier = req[1].length <= 6 ? "top" : "nested";
+      for (const prop of req[2].split(",")) {
+        const trimmed = prop.trim();
+        if (trimmed) requirements.get(current)[tier].add(trimmed);
+      }
+    }
+  }
+  if (requirements.size === 0) fail("parsed zero schemas from openapi/openapi.yaml — parser drift?");
+  return requirements;
+}
+
+function stripComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\n]*/g, " ");
+}
+
+/** Extract brace-balanced declaration bodies following each regex match (declaration line included). */
+function declarationBlocks(text, re) {
+  const blocks = [];
+  const global = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  for (const match of text.matchAll(global)) {
+    const open = text.indexOf("{", match.index);
+    const terminator = text.indexOf(";", match.index);
+    if (open === -1 || (terminator !== -1 && terminator < open)) {
+      blocks.push(text.slice(match.index, terminator === -1 ? match.index + 200 : terminator));
+      continue;
+    }
+    let depth = 0;
+    let end = open;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    blocks.push(text.slice(match.index, end));
+  }
+  return blocks;
+}
+
+/** The source text that models one schema in one SDK; null means "no dedicated model" (use fallback). */
+function schemaModelText(lang, schema) {
+  if (lang === "typescript") {
+    const text = stripComments(sources.typescript);
+    const blocks = declarationBlocks(
+      text,
+      new RegExp(`(?:interface|type) (?:Wire)?${schema}\\b`),
+    );
+    return blocks.length > 0 ? blocks.join("\n") : null;
+  }
+  if (lang === "go") {
+    const text = stripComments(sources.go);
+    const lower = schema[0].toLowerCase() + schema.slice(1);
+    const blocks = declarationBlocks(text, new RegExp(`type (?:${schema}|${lower}) struct\\b`));
+    return blocks.length > 0 ? blocks.join("\n") : null;
+  }
+  // java: one public type per file named after the schema; mapping code lives in CountersClient.
+  try {
+    return stripComments(readFileSync(join(root, `java/src/main/java/dev/counters/sdk/${schema}.java`), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+const fallbackModelText = {
+  typescript: stripComments(sources.typescript),
+  go: stripComments(sources.go),
+  java: stripComments(sources.java),
+};
+
+function modelsProperty(haystack, prop) {
+  const names = [prop, ...(PUBLIC_NAME_EXPANSIONS[prop] ?? [])];
+  return names.some((n) => new RegExp(`(?:^|[^A-Za-z0-9_])${n}(?:[^A-Za-z0-9_]|$)`).test(haystack));
+}
+
+const schemaRequirements = parseSchemaRequirements(spec);
+for (const [schema, required] of schemaRequirements) {
+  if (NOT_SDK_SCHEMAS.has(schema)) continue;
+  for (const lang of Object.keys(SDK_SOURCES)) {
+    const model = schemaModelText(lang, schema);
+    for (const prop of required.top) {
+      if (!modelsProperty(model ?? fallbackModelText[lang], prop)) {
+        errors.push(
+          `sdk '${lang}' does not model required property '${prop}' of spec schema '${schema}'` +
+            (model === null ? " (no dedicated type found; whole-SDK scan)" : ""),
+        );
+      }
+    }
+    for (const prop of required.nested) {
+      if (!modelsProperty(fallbackModelText[lang], prop)) {
+        errors.push(
+          `sdk '${lang}' does not model required nested property '${prop}' of spec schema '${schema}'`,
+        );
+      }
+    }
+  }
+}
+
 if (errors.length > 0) {
   console.error(`openapi-drift: ${errors.length} problem(s)\n`);
   for (const e of errors) console.error(`  - ${e}`);
   process.exit(1);
 }
-console.log(`openapi-drift: OK — ${operations.length} spec operations checked against 3 SDKs`);
+console.log(
+  `openapi-drift: OK — ${operations.length} spec operations and ${schemaRequirements.size} spec schemas checked against 3 SDKs`,
+);
 
 function fail(msg) {
   console.error(`openapi-drift: ${msg}`);

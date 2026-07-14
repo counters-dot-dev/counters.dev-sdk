@@ -1,5 +1,7 @@
 package dev.counters.sdk;
 
+import java.time.Instant;
+
 /** A member's rank, percentile, and standing value within a board. */
 public record MemberSnapshot(
         String key,
@@ -11,4 +13,4 @@ public record MemberSnapshot(
         long memberCount,
         String mode,
         long epoch,
-        String updatedAt) {}
+        Instant updatedAt) {}

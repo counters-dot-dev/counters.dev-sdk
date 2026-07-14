@@ -7,10 +7,20 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "engines": { "node": ">=20" },
+  "keywords": ["counters", "counter", "metrics", "leaderboard", "arbitrary-precision", "bigint", "api-client"],
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

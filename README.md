@@ -1,6 +1,6 @@
 # counters.dev SDKs
 
-Official client libraries for [counters.dev](https://counters.dev) — a multi-tenant,
+Official client libraries for [counters.dev](https://counters.dev) — an
 **arbitrary-precision** counter API. Create a counter, add to it, read its value, roll it up into a
 time series, rank members on a leaderboard, or derive one counter from others.
 
@@ -18,6 +18,29 @@ an IEEE-754 double and silently loses precision above 2^53; counters.dev counter
 carries that guarantee end to end, through its own request serialisation and response parsing, and
 proves it in its test suite with values larger than a `u64`.
 
+## The concepts, in one minute
+
+- A **counter** is a named, signed, arbitrary-precision integer on the server: add, subtract, read,
+  clear (which starts a new **epoch** — a season — keeping history), delete.
+- A **leaderboard** is the same counter with **per-member sub-values**. Use a plain counter when
+  only the total matters; use members when you care *who contributed*, ranked — per-player scores,
+  per-tenant usage. If you would otherwise create one counter per user and sort client-side, you
+  wanted a leaderboard. **Sum boards** accumulate deltas per member; **score boards**
+  (`latest`/`min`/`max`) rank submitted scores. The first member write fixes the mode.
+- A **series** is a counter's per-bucket delta over a time range (buckets `1m` … `1mo`) — the
+  change in each bucket, not a running total. Request bounds, response ranges, points, reset times,
+  and every other machine-API date-time use the language's native time type. Each point exposes
+  `timestamp` and `value`; compact names such as JSON `t`, `v`, and `tz` stay inside the transport
+  layer.
+- A **derived counter** is a server-defined, read-only **decimal** expression over other counters
+  (e.g. a conversion rate). Its value—including a derived series point's `value`—is **null** on
+  division by zero: data, not an error.
+- Every SDK surfaces exactly **three error kinds**: *validation* (rejected client-side, no request
+  made), *api* (the server answered with an HTTP error), and *transport* (no response was ever
+  obtained). The same taxonomy, natively expressed in each language.
+
+Each SDK's README develops this into a full mental model with runnable code in its own language.
+
 ## The SDKs
 
 | Language | Package | Install |
@@ -30,6 +53,10 @@ Every SDK is **hand-written**, not generated. Each is a thin JSON/HTTP transport
 layer built for its own language: client-side batching and coalescing, retries with idempotency keys,
 confirmed vs. fire-and-forget writes, and typed errors. All three cover the same API surface and are
 held to the same behaviour.
+
+Publishable `pk_` tokens use a separate read-only construction path in every SDK. The resulting
+client and handles expose only the counter reads that publishable tokens support, so trying to call a
+write is a compile-time error rather than a deployed request that eventually receives HTTP 403.
 
 ## Three SDKs, on purpose
 
@@ -61,19 +88,30 @@ const state = await signups.addNow("18446744073709551616"); // confirmed — and
 console.log(state.value);                              // a decimal string, always
 
 const { value, epoch } = await signups.value();
+const to = new Date();
+const from = new Date(to.getTime() - 60 * 60 * 1000);
 const series = await signups.series({ from, to, bucket: "1h" });
+for (const point of series.points) {
+  console.log(point.timestamp.toISOString(), point.value);
+}
 
 await client.close();                                  // flush buffered writes before exit
 ```
 
 Each SDK's README has the equivalent for its own language, and each has a runnable example app under
-`<lang>/examples/e2e/` that exercises the entire public surface.
+`<lang>/examples/e2e/` that exercises the entire public surface. Alongside those, each SDK ships one
+narrative example of the SDK doing a real job: a game server reporting a raid to a leaderboard
+([`java/examples/raid`](./java/examples/raid)), a per-customer API usage meter with batched writes
+and an error sink ([`go/examples/metering`](./go/examples/metering)), and a Next.js App Router app
+mixing confirmed writes, buffered telemetry, and a browser-safe publishable token
+([`typescript/examples/nextjs`](./typescript/examples/nextjs)).
 
 ## How the SDKs are kept honest
 
 - **[`openapi/openapi.yaml`](./openapi)** is the API contract — the *shape* source of truth. Because
   the clients are hand-written, CI runs a drift guard (`scripts/openapi-drift/check.mjs`) that diffs
-  every SDK's operation inventory against the spec, so a client cannot silently fall behind it.
+  every SDK's operation inventory against the spec **and** checks that every required property of
+  every spec schema is modelled by each SDK, so a client cannot silently fall behind the contract.
 - **[`conformance/`](./conformance)** is the *behaviour* source of truth — language-agnostic vectors
   for key and amount validation, arbitrary-precision arithmetic, query encoding, response parsing, the
   error taxonomy, and full HTTP interactions. Every SDK asserts against the same files, so a

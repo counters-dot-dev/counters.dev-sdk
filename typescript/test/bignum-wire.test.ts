@@ -50,11 +50,13 @@ describe("bignum over the wire (mock transport)", () => {
     });
     expect((await client.counter("big").value()).value).toBe(U64_CROSS);
     const series = await client.counter("big").series({
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-02T00:00:00Z",
+      from: new Date("2026-01-01T00:00:00Z"),
+      to: new Date("2026-01-02T00:00:00Z"),
       bucket: "1h",
     });
-    expect(series.points[0]?.v).toBe(HUGE);
+    expect(series.points[0]?.value).toBe(HUGE);
+    expect(series.points[0]?.timestamp).toBeInstanceOf(Date);
+    expect(series.points[0]?.timestamp.toISOString()).toBe("2026-01-01T00:00:00.000Z");
     await client.close();
   });
 });
