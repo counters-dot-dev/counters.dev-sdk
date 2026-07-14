@@ -1,0 +1,5 @@
+coverage.out
+
+# Compiled binaries emitted by the standalone example modules.
+examples/*/example
+examples/*/example.exe

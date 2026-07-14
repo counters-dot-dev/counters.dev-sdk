@@ -1,0 +1,68 @@
+name: openapi-validate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", "tools/spec-lint/**", ".github/workflows/openapi-validate.yml"]
+  push:
+    branches: [main]
+    paths: ["openapi/**", "typescript/**", "go/**", "java/**", ".spectral.yaml", "scripts/openapi-drift/**", "scripts/ci/**", "tools/spec-lint/**", ".github/workflows/openapi-validate.yml"]
+
+permissions:
+  contents: read
+  pull-requests: write # sticky results comment (scripts/ci/pr-comment.sh)
+
+jobs:
+  validate:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/spec-lint/package-lock.json
+      - name: Install the pinned Spectral toolchain
+        shell: bash
+        run: npm ci --no-audit --no-fund --prefix tools/spec-lint
+      - name: Spectral lint (spec hygiene)
+        id: spectral
+        shell: bash
+        run: tools/spec-lint/node_modules/.bin/spectral lint openapi/openapi.yaml --ruleset .spectral.yaml --fail-severity=warn 2>&1 | tee /tmp/spectral.log
+      - name: SDK drift guard (hand-written clients vs spec operations)
+        id: drift
+        if: always() # report drift even when spectral failed — both results belong on the PR
+        shell: bash
+        run: node scripts/openapi-drift/check.mjs 2>&1 | tee /tmp/drift.log
+      - name: PR comment (results)
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SPECTRAL: ${{ steps.spectral.outcome }}
+          DRIFT: ${{ steps.drift.outcome }}
+        run: |
+          {
+            if [ "$SPECTRAL" = "success" ] && [ "$DRIFT" = "success" ]; then echo "### ✅ openapi-validate"; else echo "### ❌ openapi-validate"; fi
+            if [ "$SPECTRAL" = "success" ]; then
+              echo "- spectral: clean"
+            else
+              echo "- spectral: **problems**"
+              echo '```'
+              grep -E "warning|error" /tmp/spectral.log 2>/dev/null | tail -15 || true
+              echo '```'
+            fi
+            if [ "$DRIFT" = "success" ]; then
+              echo "- $(grep -m1 '^openapi-drift:' /tmp/drift.log || echo 'drift guard: ok')"
+            else
+              echo "- drift guard: **problems**"
+              echo '```'
+              tail -15 /tmp/drift.log 2>/dev/null || true
+              echo '```'
+            fi
+            echo ""
+            echo "_[run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_"
+          } | bash scripts/ci/pr-comment.sh openapi-validate

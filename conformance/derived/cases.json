@@ -1,0 +1,84 @@
+{
+  "description": "Client-side derived-counter encode + parse vectors. A derived counter is a server-defined expression over other counters; the SDK read surface is just GET /v1/derived/{key}/value and /series. There is no happy-path http vector (a definition is created only on the dashboard/JWT plane the http runners cannot reach — see ../http/README.md), so correctness of encoding+parsing is pinned here. `encodeQuery` maps derived-series read params to the query string (presence-exact, same rule as series/cases.json — every key listed present, every key not listed absent). `parse` maps a response body to typed fields; `kind` selects the schema. The derived surface is DECIMAL, not integer: `DecimalValue` is a signed arbitrary-precision decimal STRING that is `null` when the expression divided by zero — SDKs MUST surface null (with the `reason`) rather than throw, and MUST NOT parse the string to a native float (precision loss). Loader contract in README.md.",
+  "encodeQuery": [
+    {
+      "name": "derived-series-params",
+      "note": "GET /v1/derived/{key}/series takes ONLY from/to/bucket/tz. There is deliberately no gapfill, no mode, and no member on this surface: those keys MUST NOT appear in the query. Presence-exact already forbids them (they are not listed); `absent` restates it for loader authors.",
+      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "tz": "Europe/London" },
+      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1h", "tz": "Europe/London" },
+      "absent": ["gapfill", "mode", "member", "groupBy"]
+    },
+    {
+      "name": "derived-series-minimal",
+      "note": "tz optional and omitted -> exactly from/to/bucket.",
+      "params": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d" },
+      "query": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z", "bucket": "1d" },
+      "absent": ["gapfill", "mode", "member", "groupBy", "tz"]
+    }
+  ],
+  "parse": [
+    {
+      "name": "derived-value",
+      "kind": "derivedValue",
+      "note": "DerivedValueResponse: `value` is a scale-6 decimal string, `scale` its fixed decimal places, `inputs` a map of each referenced counter's current integer-string value. `value` stays a STRING (arbitrary precision; parsing 0.052337 to a float is banned). No `reason` when value is non-null.",
+      "body": {
+        "key": "conversion",
+        "value": "0.052337",
+        "scale": 6,
+        "inputs": { "signups": "12", "visits": "229" }
+      },
+      "expect": {
+        "key": "conversion",
+        "value": "0.052337",
+        "scale": 6,
+        "inputs": { "signups": "12", "visits": "229" },
+        "reasonAbsent": true
+      }
+    },
+    {
+      "name": "derived-value-null-division-by-zero",
+      "kind": "derivedValue",
+      "note": "The headline null case: the expression divided by zero, so `value` is JSON null and `reason` explains it. An SDK MUST surface value=null plus the reason (a typed nullable / optional), NOT throw and NOT coerce null to \"0\". The inputs that produced it are still present (here the denominator counter reads \"0\").",
+      "body": {
+        "key": "conversion",
+        "value": null,
+        "scale": 6,
+        "inputs": { "signups": "0", "visits": "0" },
+        "reason": "division by zero"
+      },
+      "expect": {
+        "key": "conversion",
+        "value": null,
+        "scale": 6,
+        "inputs": { "signups": "0", "visits": "0" },
+        "reason": "division by zero"
+      }
+    },
+    {
+      "name": "derived-series-null-mid-point",
+      "kind": "derivedSeries",
+      "note": "DerivedSeriesResponse: per-bucket decimal points where a bucket that divided by zero has `v: null` (a hole in the middle of the series, not the end). SDKs preserve the null point in place; the surrounding points stay decimal strings. Point wire keys are t/v as in a plain series.",
+      "body": {
+        "key": "conversion",
+        "bucket": "1h",
+        "scale": 6,
+        "range": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-01T03:00:00Z" },
+        "points": [
+          { "t": "2026-01-01T00:00:00Z", "v": "0.010000" },
+          { "t": "2026-01-01T01:00:00Z", "v": null },
+          { "t": "2026-01-01T02:00:00Z", "v": "0.020000" }
+        ]
+      },
+      "expect": {
+        "key": "conversion",
+        "bucket": "1h",
+        "scale": 6,
+        "points": [
+          { "t": "2026-01-01T00:00:00Z", "v": "0.010000" },
+          { "t": "2026-01-01T01:00:00Z", "v": null },
+          { "t": "2026-01-01T02:00:00Z", "v": "0.020000" }
+        ]
+      }
+    }
+  ]
+}

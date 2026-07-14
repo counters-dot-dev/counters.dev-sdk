@@ -1,0 +1,16 @@
+{
+  "name": "@counters.dev/sdk-example-nextjs",
+  "private": true,
+  "type": "module",
+  "description": "Narrative Next.js App Router example for the counters.dev TypeScript SDK.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@counters.dev/sdk": "file:../.."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

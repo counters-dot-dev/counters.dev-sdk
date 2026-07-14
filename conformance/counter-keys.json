@@ -1,0 +1,21 @@
+{
+  "regex": "^[A-Za-z0-9._:-]{1,200}$",
+  "valid": [
+    "a",
+    "registrations",
+    "login.attempts",
+    "successful_logins",
+    "ns:metric",
+    "A1.-_:b",
+    "1234567890"
+  ],
+  "invalid": [
+    "",
+    "has space",
+    "slash/here",
+    "comma,here",
+    "tab\there",
+    "emoji😀",
+    "newline\nhere"
+  ]
+}

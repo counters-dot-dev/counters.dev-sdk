@@ -1,0 +1,5 @@
+# Spectral ruleset for openapi/openapi.yaml (CI: openapi-validate.yml).
+extends: ["spectral:oas"]
+rules:
+  # The spec deliberately has no contact block; everything else from the recommended set applies.
+  info-contact: off

@@ -1,0 +1,96 @@
+name: sdk-go-ci
+
+# The example apps are COMPILED here, not run: exercising them end-to-end needs a live counters.dev
+# service. Maintainers run the end-to-end suites against a checkout of this repo. Here: unit tests
+# + conformance vectors + build only.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["go/**", "conformance/**", "openapi/**", "scripts/ci/**", ".github/workflows/sdk-go-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["go/**", "conformance/**", "openapi/**", "scripts/ci/**", ".github/workflows/sdk-go-ci.yml"]
+
+permissions:
+  contents: read
+  pull-requests: write # sticky results comment (scripts/ci/pr-comment.sh)
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      summary: ${{ steps.sum.outputs.summary }}
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.23"
+      - run: go vet ./...
+      - name: Test with coverage (report only, no gate yet)
+        shell: bash
+        run: |
+          go test ./... -coverprofile=coverage.out 2>&1 | tee /tmp/unit.log
+          go tool cover -func=coverage.out | tail -1 | tee -a /tmp/unit.log
+      - name: Unit summary
+        id: sum
+        shell: bash
+        run: |
+          # test runners force ANSI colors on GitHub Actions; strip them or the greps miss
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+          {
+            echo 'summary<<EOF_SUMMARY'
+            echo "- unit: \`$(grep -m1 -E '^ok ' /tmp/unit.txt | xargs)\`"
+            echo "- coverage: \`$(grep -m1 '^total:' /tmp/unit.txt | xargs)\`"
+            echo 'EOF_SUMMARY'
+          } >> "$GITHUB_OUTPUT"
+
+  example:
+    # Compile the example apps against the SDK just built. They are deliberately NOT executed here
+    # because they require a live counters.dev service. This proves the documented examples still
+    # compile against the current client surface.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.23"
+      - name: Example apps — compile against the current client surface
+        id: app
+        shell: bash
+        working-directory: go/examples/e2e
+        run: |
+          go build ./...
+          go vet ./... 2>&1 | tee /tmp/example.log
+          cd ../metering
+          go build ./...
+          go vet ./... 2>&1 | tee -a /tmp/example.log
+      - name: PR comment (results)
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          UNIT_SUMMARY: ${{ needs.test.outputs.summary }}
+          EXAMPLE_OUTCOME: ${{ steps.app.outcome }}
+        run: |
+          {
+            [ "$EXAMPLE_OUTCOME" = "success" ] && echo "### ✅ sdk-go" || echo "### ❌ sdk-go"
+            printf '%s\n' "$UNIT_SUMMARY"
+            if [ "$EXAMPLE_OUTCOME" = "success" ]; then
+              echo "- example apps: compile"
+            else
+              echo "- example apps: **$EXAMPLE_OUTCOME**"
+              echo '```'
+              tail -15 /tmp/example.log 2>/dev/null || echo "no output — see the run log"
+              echo '```'
+            fi
+            echo ""
+            echo "_[run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_"
+          } | bash scripts/ci/pr-comment.sh sdk-go-ci
