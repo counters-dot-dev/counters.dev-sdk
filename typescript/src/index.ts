@@ -1,5 +1,16 @@
-export { CountersClient, CounterHandle, MemberHandle, DerivedHandle } from "./client.js";
-export type { CountersClientOptions } from "./client.js";
+export {
+  CountersClient,
+  CounterHandle,
+  MemberHandle,
+  DerivedHandle,
+  PublishableCountersClient,
+} from "./client.js";
+export type {
+  CountersClientOptions,
+  PublishableCountersClientOptions,
+  PublishableCounterHandle,
+  PublishableMemberHandle,
+} from "./client.js";
 export {
   CountersApiError,
   CountersError,

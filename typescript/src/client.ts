@@ -1,5 +1,10 @@
 import { Batcher } from "./batcher.js";
-import { CountersApiError, CountersError, CountersValidationError } from "./errors.js";
+import {
+  CountersApiError,
+  CountersError,
+  CountersTransportError,
+  CountersValidationError,
+} from "./errors.js";
 import { Http } from "./http.js";
 import { newIdempotencyKey } from "./idempotency.js";
 import {
@@ -27,14 +32,17 @@ import type {
   MemberGetParams,
   MemberGroupSeriesResponse,
   MemberRemoved,
+  MemberSeriesEntry,
   MemberSeriesResponse,
   MemberSnapshot,
   MemberValue,
   Operation,
   SeriesParams,
+  SeriesPoint,
   SeriesResponse,
   SubmitOptions,
   Usage,
+  Value,
   ValueInput,
   ValueResponse,
   Window,
@@ -61,9 +69,18 @@ export interface CountersClientOptions {
      * Sink for errors from fire-and-forget writes — background flushes and, when `enabled` is false,
      * immediate-mode writes. These run detached from any caller, so without this hook they are silent.
      */
-    onError?: (e: unknown) => void;
+    onError?: (e: CountersError) => void;
   };
 }
+
+/**
+ * Options for a scoped, read-only publishable-token client. Publishable clients never buffer writes,
+ * so the writable client's `batch` configuration is intentionally absent.
+ */
+export type PublishableCountersClientOptions = Omit<CountersClientOptions, "batch"> & {
+  /** Publishable clients have no write buffer to configure. */
+  batch?: never;
+};
 
 const DEFAULT_BASE_URL = "https://api.counters.dev/v1";
 
@@ -71,7 +88,7 @@ export class CountersClient {
   private readonly http: Http;
   private readonly batcher: Batcher;
   private readonly batchEnabled: boolean;
-  private readonly onWriteError?: (e: unknown) => void;
+  private readonly onWriteError?: (e: CountersError) => void;
 
   constructor(opts: CountersClientOptions) {
     if (!opts.apiKey) throw new Error("CountersClient: apiKey is required");
@@ -194,27 +211,29 @@ export class CountersClient {
       );
     }
     if (params.member !== undefined) assertMemberKey(params.member);
-    return this.http.request<SeriesResponse | MemberSeriesResponse | MemberGroupSeriesResponse>(
-      "GET",
-      `/counters/${enc(key)}/series`,
-      {
-        query: {
-          from: toIso(params.from),
-          to: toIso(params.to),
-          bucket: params.bucket,
-          mode: params.mode,
-          tz: params.tz,
-          // gapfill: omit-when-false. The spec default is already `false`, so an explicit
-          // `gapfill=false` is identical to omission — send the parameter only when `true`, matching
-          // the other SDKs (pinned by the conformance/series query-encoding vectors).
-          gapfill: params.gapfill ? true : undefined,
-          // Dimensional variants: `member` selects one member's series, `groupBy=member` the dense
-          // per-member multi-series. Passed through verbatim under the same presence-exact contract.
-          member: params.member,
-          groupBy: params.groupBy,
+    return this.http
+      .request<WireSeriesResponse | WireMemberSeriesResponse | WireMemberGroupSeriesResponse>(
+        "GET",
+        `/counters/${enc(key)}/series`,
+        {
+          query: {
+            from: toIso(params.from),
+            to: toIso(params.to),
+            bucket: params.bucket,
+            mode: params.mode,
+            tz: params.tz,
+            // gapfill: omit-when-false. The spec default is already `false`, so an explicit
+            // `gapfill=false` is identical to omission — send the parameter only when `true`, matching
+            // the other SDKs (pinned by the conformance/series query-encoding vectors).
+            gapfill: params.gapfill ? true : undefined,
+            // Dimensional variants: `member` selects one member's series, `groupBy=member` the dense
+            // per-member multi-series. Passed through verbatim under the same presence-exact contract.
+            member: params.member,
+            groupBy: params.groupBy,
+          },
         },
-      },
-    );
+      )
+      .then(parseSeriesResult);
   }
 
   /** @internal */
@@ -332,7 +351,7 @@ export class CountersClient {
         : { counterKey: key, op: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() };
     // Fire-and-forget, like a background flush — so failures route to the same onError sink
     // (previously they were swallowed, which silently dropped counted writes).
-    void this.submitBatch([op]).catch((e) => this.onWriteError?.(e));
+    void this.submitBatch([op]).catch((e) => this.onWriteError?.(normaliseWriteError(e)));
   }
 
   private submitBatch(ops: Operation[]): Promise<void> {
@@ -355,6 +374,107 @@ export class CountersClient {
         throw new CountersValidationError(`${msg}; per-op problem carries no status`);
       }
     });
+  }
+}
+
+/**
+ * A scoped, read-only client for browser-safe `pk_` publishable tokens.
+ *
+ * Its public type exposes only operations accepted for publishable tokens. Use {@link CountersClient}
+ * with a server-side organization key when writes or organization-wide reads are required.
+ */
+export class PublishableCountersClient {
+  private readonly client: CountersClient;
+
+  constructor(opts: PublishableCountersClientOptions) {
+    this.client = new CountersClient(opts);
+  }
+
+  /** Get a read-only handle for a counter in this token's scope. */
+  counter(key: string): PublishableCounterHandle {
+    return new PublishableCounterHandleImpl(this.client.counter(key));
+  }
+
+  /** Release this client's resources. */
+  close(): Promise<void> {
+    return this.client.close();
+  }
+}
+
+/** A read-only counter handle obtained from {@link PublishableCountersClient.counter}. */
+export interface PublishableCounterHandle {
+  /** The validated counter key. */
+  readonly key: string;
+  /** Current value. */
+  value(): Promise<ValueResponse>;
+  /** One member's time series (delta per bucket). Requires member series enabled on the counter. */
+  series(params: SeriesParams & { member: string }): Promise<MemberSeriesResponse>;
+  /** The dense per-member multi-series. Requires member series enabled on the counter. */
+  series(params: SeriesParams & { groupBy: "member" }): Promise<MemberGroupSeriesResponse>;
+  /** Time series (delta per bucket). */
+  series(params: SeriesParams): Promise<SeriesResponse>;
+  /** The ranked member leaderboard for this counter (top-N). */
+  leaderboard(params?: LeaderboardParams): Promise<Leaderboard>;
+  /** The windowed leaderboard: members ranked by activity over the trailing window. */
+  leaderboard(params: WindowLeaderboardParams): Promise<WindowLeaderboard>;
+  /** A read-only handle for one member of this counter's board. */
+  member(member: string): PublishableMemberHandle;
+}
+
+/** A read-only member handle obtained from {@link PublishableCounterHandle.member}. */
+export interface PublishableMemberHandle {
+  /** The validated counter key. */
+  readonly counterKey: string;
+  /** The validated member key. */
+  readonly member: string;
+  /** This member's rank, percentile, and standing value. */
+  get(params?: MemberGetParams): Promise<MemberSnapshot>;
+}
+
+class PublishableCounterHandleImpl implements PublishableCounterHandle {
+  readonly key: string;
+
+  constructor(private readonly handle: CounterHandle) {
+    this.key = handle.key;
+  }
+
+  value(): Promise<ValueResponse> {
+    return this.handle.value();
+  }
+
+  series(params: SeriesParams & { member: string }): Promise<MemberSeriesResponse>;
+  series(params: SeriesParams & { groupBy: "member" }): Promise<MemberGroupSeriesResponse>;
+  series(params: SeriesParams): Promise<SeriesResponse>;
+  series(
+    params: SeriesParams & { member?: string; groupBy?: "member" },
+  ): Promise<SeriesResponse | MemberSeriesResponse | MemberGroupSeriesResponse> {
+    return this.handle.series(params);
+  }
+
+  leaderboard(params?: LeaderboardParams): Promise<Leaderboard>;
+  leaderboard(params: WindowLeaderboardParams): Promise<WindowLeaderboard>;
+  leaderboard(
+    params: LeaderboardParams & { window?: Window } = {},
+  ): Promise<Leaderboard | WindowLeaderboard> {
+    return this.handle.leaderboard(params);
+  }
+
+  member(member: string): PublishableMemberHandle {
+    return new PublishableMemberHandleImpl(this.handle.member(member));
+  }
+}
+
+class PublishableMemberHandleImpl implements PublishableMemberHandle {
+  readonly counterKey: string;
+  readonly member: string;
+
+  constructor(private readonly handle: MemberHandle) {
+    this.counterKey = handle.counterKey;
+    this.member = handle.member;
+  }
+
+  get(params?: MemberGetParams): Promise<MemberSnapshot> {
+    return this.handle.get(params);
   }
 }
 
@@ -504,6 +624,20 @@ type WireLeaderboard = Omit<Leaderboard, "entries"> & { entries: WireLeaderboard
 
 type WireMemberSnapshot = Omit<MemberSnapshot, "updatedAt"> & { updatedAt: string };
 
+type WireSeriesPoint = { t: string; v: Value };
+
+type WireSeriesResponse = Omit<SeriesResponse, "points"> & { points: WireSeriesPoint[] };
+
+type WireMemberSeriesResponse = Omit<MemberSeriesResponse, "points"> & {
+  points: WireSeriesPoint[];
+};
+
+type WireMemberSeriesEntry = Omit<MemberSeriesEntry, "points"> & { points: WireSeriesPoint[] };
+
+type WireMemberGroupSeriesResponse = Omit<MemberGroupSeriesResponse, "series"> & {
+  series: WireMemberSeriesEntry[];
+};
+
 function parseCounter(counter: WireCounter): Counter {
   const { createdAt, updatedAt, ...fields } = counter;
   return {
@@ -529,6 +663,25 @@ function parseLeaderboard(leaderboard: WireLeaderboard): Leaderboard {
 
 function parseMemberSnapshot(snapshot: WireMemberSnapshot): MemberSnapshot {
   return { ...snapshot, updatedAt: new Date(snapshot.updatedAt) };
+}
+
+function parseSeriesPoint(point: WireSeriesPoint): SeriesPoint {
+  return { timestamp: new Date(point.t), value: point.v };
+}
+
+function parseSeriesResult(
+  response: WireSeriesResponse | WireMemberSeriesResponse | WireMemberGroupSeriesResponse,
+): SeriesResponse | MemberSeriesResponse | MemberGroupSeriesResponse {
+  if ("series" in response) {
+    return {
+      ...response,
+      series: response.series.map((entry) => ({
+        ...entry,
+        points: entry.points.map(parseSeriesPoint),
+      })),
+    };
+  }
+  return { ...response, points: response.points.map(parseSeriesPoint) };
 }
 
 function toIso(t: string | Date): string {
@@ -561,4 +714,10 @@ function submitBody(value: bigint, opts?: SubmitOptions): Record<string, string>
   if (opts?.metadata !== undefined) body.metadata = opts.metadata;
   if (opts?.occurredAt !== undefined) body.occurredAt = toIso(opts.occurredAt);
   return body;
+}
+
+function normaliseWriteError(error: unknown): CountersError {
+  return error instanceof CountersError
+    ? error
+    : new CountersTransportError(`unexpected batch submission failure: ${String(error)}`, error);
 }

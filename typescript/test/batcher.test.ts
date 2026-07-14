@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Batcher } from "../src/batcher.js";
-import { CountersError } from "../src/errors.js";
+import { CountersError, CountersTransportError } from "../src/errors.js";
 import type { Operation } from "../src/types.js";
 
 function collector() {
@@ -101,6 +101,7 @@ describe("Batcher coalescing", () => {
     const b = new Batcher(submit, { maxBatchSize: 1, intervalMs: 0, onError });
     b.enqueue("a", 1n); // triggers a background flush that rejects
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(onError).toHaveBeenCalledWith(expect.any(CountersTransportError));
   });
 
   it("throws on enqueue after close (no timer resurrection, no stranded write)", async () => {

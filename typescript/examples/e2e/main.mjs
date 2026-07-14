@@ -19,6 +19,7 @@ import {
   CountersValidationError,
   DerivedHandle,
   MemberHandle,
+  PublishableCountersClient,
 } from "@counters.dev/sdk";
 
 const ORIGIN = required("COUNTERS_BASE_URL").replace(/\/$/, "");
@@ -113,7 +114,10 @@ async function tour() {
   const to = new Date(t0.getTime() + 24 * 3600_000);
   for (const bucket of ["1m", "5m", "1h", "1d", "1w", "1mo"]) {
     const series = await signups.series({ from, to, bucket });
-    const sum = series.points.reduce((acc, p) => acc + BigInt(p.v), 0n);
+    for (const point of series.points) {
+      assert(point.timestamp instanceof Date, `series(${bucket}) point timestamp is a Date`);
+    }
+    const sum = series.points.reduce((acc, point) => acc + BigInt(point.value), 0n);
     assertEq(sum.toString(), "16", `series(${bucket}) sums to the total delta`);
   }
   invoked.add("CounterHandle.series");
@@ -174,14 +178,24 @@ async function tour() {
   const pkDemo = client.counter("pk-demo"); // fixed key the token is scoped to
   await pkDemo.addNow(1); // ensure it exists before clearing (first run on a fresh DB)
   await pkDemo.clear();
-  await pkDemo.addNow(7);
-  const pkClient = new CountersClient({ apiKey: PK_TOKEN, baseUrl: BASE_URL });
-  assertEq((await pkClient.counter("pk-demo").value()).value, "7", "pk token reads its scoped counter");
-  await pkClient.counter("pk-demo").series({ from, to, bucket: "1h" }); // read surface also includes series
-  await expectStatus(pkClient.counter("pk-demo").addNow(1), 403, "pk token cannot write");
+  await pkDemo.member("alice").add(7);
+  const pkClient = new PublishableCountersClient({ apiKey: PK_TOKEN, baseUrl: BASE_URL });
+  invoked.add("PublishableCountersClient.constructor");
+  const publicCounter = pkClient.counter("pk-demo");
+  invoked.add("PublishableCountersClient.counter");
+  assertEq((await publicCounter.value()).value, "7", "pk token reads its scoped counter");
+  invoked.add("PublishableCounterHandle.value");
+  await publicCounter.series({ from, to, bucket: "1h" });
+  invoked.add("PublishableCounterHandle.series");
+  await publicCounter.leaderboard();
+  invoked.add("PublishableCounterHandle.leaderboard");
+  const publicMember = publicCounter.member("alice");
+  invoked.add("PublishableCounterHandle.member");
+  await publicMember.get();
+  invoked.add("PublishableMemberHandle.get");
   await expectStatus(pkClient.counter(`${ns}signups`).value(), 403, "pk token cannot leave its scope");
-  await expectStatus(pkClient.list(), 403, "pk token cannot list");
   await pkClient.close();
+  invoked.add("PublishableCountersClient.close");
 
   // Usage: org-wide quota state. Tolerant lower-bound assertions — this org wrote many counters above.
   const usage = await client.usage();
@@ -411,7 +425,7 @@ async function replayVectors() {
       if (expect.value !== undefined) assertEq(body.value, expect.value, `${where}: value`);
       if (expect.epoch !== undefined) assertEq(body.epoch, expect.epoch, `${where}: epoch`);
       if (expect.pointsSum !== undefined) {
-        const sum = body.points.reduce((acc, p) => acc + BigInt(p.v), 0n);
+        const sum = body.points.reduce((acc, point) => acc + BigInt(point.value), 0n);
         assertEq(sum.toString(), expect.pointsSum, `${where}: pointsSum`);
       }
       if (expect.pointsAtLeast !== undefined) {
@@ -463,6 +477,7 @@ function surfaceGate() {
     CounterHandle: ["add", "subtract", "addNow", "subtractNow", "clear", "delete", "value", "series", "leaderboard", "member"],
     MemberHandle: ["get", "remove", "add", "subtract", "submit"],
     DerivedHandle: ["value", "series"],
+    PublishableCountersClient: ["counter", "close"],
   };
   // TS `private`/@internal members still exist on the prototype at runtime; they are not SDK surface.
   const internals = {
@@ -475,12 +490,14 @@ function surfaceGate() {
     CounterHandle: new Set(["constructor"]),
     MemberHandle: new Set(["constructor"]),
     DerivedHandle: new Set(["constructor"]),
+    PublishableCountersClient: new Set(["constructor"]),
   };
   for (const [name, proto] of [
     ["CountersClient", CountersClient.prototype],
     ["CounterHandle", CounterHandle.prototype],
     ["MemberHandle", MemberHandle.prototype],
     ["DerivedHandle", DerivedHandle.prototype],
+    ["PublishableCountersClient", PublishableCountersClient.prototype],
   ]) {
     for (const method of documented[name]) {
       assert(
@@ -493,6 +510,20 @@ function surfaceGate() {
       throw new Error(
         `${name}.${prop} is a new public prototype member not covered by the example app — ` +
           `demonstrate it here (and add it to 'documented') or mark it internal`,
+      );
+    }
+  }
+  // The publishable handles are exported interfaces backed by private implementations, so there is
+  // deliberately no constructible runtime class to inspect. Their full method sets are still pinned
+  // by the calls above and by the SDK's compile-only negative API tests.
+  for (const [name, methods] of Object.entries({
+    PublishableCounterHandle: ["value", "series", "leaderboard", "member"],
+    PublishableMemberHandle: ["get"],
+  })) {
+    for (const method of methods) {
+      assert(
+        invoked.has(`${name}.${method}`),
+        `public method ${name}.${method} was never demonstrated by this example app`,
       );
     }
   }

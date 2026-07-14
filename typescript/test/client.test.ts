@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CountersClient } from "../src/client.js";
+import { CountersClient, PublishableCountersClient } from "../src/client.js";
 import { CountersApiError, CountersError, CountersValidationError } from "../src/errors.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
@@ -12,6 +12,64 @@ describe("CountersClient", () => {
     const c = new CountersClient({ apiKey: "k", fetch: mockFetch(() => jsonResponse(200, {})) });
     expect(() => c.counter("has space")).toThrow(CountersValidationError);
     expect(() => c.counter("ok.key")).not.toThrow();
+  });
+
+  it("publishable client sends its bearer and exposes only scoped read handles", async () => {
+    const seenAuth: string[] = [];
+    const client = new PublishableCountersClient({
+      apiKey: "pk_browser",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch((url, init) => {
+        seenAuth.push((init.headers as Record<string, string>).authorization);
+        if (url.pathname.endsWith("/series")) {
+          return jsonResponse(200, {
+            counterKey: "views",
+            bucket: "1h",
+            mode: "delta",
+            range: { from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z" },
+            points: [{ t: "2026-01-01T00:00:00Z", v: "7" }],
+          });
+        }
+        if (url.pathname.includes("/members/")) {
+          return jsonResponse(200, {
+            key: "views",
+            member: "alice",
+            value: "7",
+            rank: 1,
+            percentile: "100.00",
+            memberCount: 1,
+            mode: "sum",
+            epoch: 0,
+            updatedAt: "2026-01-01T00:00:00Z",
+          });
+        }
+        return jsonResponse(200, { key: "views", value: "7", epoch: 0 });
+      }),
+    });
+
+    const counter = client.counter("views");
+    expect(counter.key).toBe("views");
+    expect((await counter.value()).value).toBe("7");
+    const series = await counter.series({
+      from: "2026-01-01T00:00:00Z",
+      to: "2026-01-01T01:00:00Z",
+      bucket: "1h",
+    });
+    expect(series.points[0]).toEqual({
+      timestamp: new Date("2026-01-01T00:00:00Z"),
+      value: "7",
+    });
+    const member = counter.member("alice");
+    expect(member.counterKey).toBe("views");
+    expect(member.member).toBe("alice");
+    expect((await member.get()).updatedAt).toBeInstanceOf(Date);
+    expect(seenAuth).toEqual(["Bearer pk_browser", "Bearer pk_browser", "Bearer pk_browser"]);
+
+    expect((client as unknown as Record<string, unknown>).list).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).flush).toBeUndefined();
+    expect((counter as unknown as Record<string, unknown>).add).toBeUndefined();
+    expect((member as unknown as Record<string, unknown>).remove).toBeUndefined();
+    await client.close();
   });
 
   it("buffers adds and flushes one coalesced batch", async () => {

@@ -21,7 +21,10 @@ export async function GET(_request: Request, { params }: RouteContext): Promise<
     const series = await views.series({ from, to, bucket: "1h", gapfill: true });
 
     return Response.json({
-      points: series.points.map((point) => ({ at: point.t, exactViews: point.v })),
+      points: series.points.map((point) => ({
+        at: point.timestamp.toISOString(),
+        exactViews: point.value,
+      })),
     });
   } catch (error) {
     if (error instanceof CountersValidationError) {

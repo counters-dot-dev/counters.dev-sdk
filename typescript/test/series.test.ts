@@ -5,6 +5,7 @@ import type {
   MemberGroupSeriesResponse,
   MemberSeriesResponse,
   SeriesParams,
+  SeriesPoint,
   SeriesResponse,
 } from "../src/types.js";
 import { jsonResponse, loadVectors, mockFetch } from "./helpers.js";
@@ -87,12 +88,7 @@ describe("series conformance (conformance/series)", () => {
       expect(r.series).toHaveLength(ex.series.length);
       r.series.forEach((s, i) => {
         expect(s.member).toBe(ex.series[i]!.member);
-        expect(s.points).toHaveLength(ex.series[i]!.points.length);
-        s.points.forEach((pt, j) => {
-          expect(typeof pt.v).toBe("string");
-          expect(pt.v).toBe(ex.series[i]!.points[j]!.v);
-          expect(pt.t).toBe(ex.series[i]!.points[j]!.t);
-        });
+        assertPoints(s.points, ex.series[i]!.points);
       });
       return;
     }
@@ -119,12 +115,16 @@ describe("series conformance (conformance/series)", () => {
   });
 });
 
-function assertPoints(actual: Point[], expected: Point[]): void {
+function assertPoints(actual: SeriesPoint[], expected: Point[]): void {
   expect(actual).toHaveLength(expected.length);
   actual.forEach((pt, i) => {
-    expect(pt.t).toBe(expected[i]!.t);
+    expect(pt.timestamp).toBeInstanceOf(Date);
+    expect(pt.timestamp.toISOString()).toBe(new Date(expected[i]!.t).toISOString());
     // Delta stays a string (arbitrary precision; never a JS number).
-    expect(typeof pt.v).toBe("string");
-    expect(pt.v).toBe(expected[i]!.v);
+    expect(typeof pt.value).toBe("string");
+    expect(pt.value).toBe(expected[i]!.v);
+    // The compact wire keys do not leak into the ergonomic public object.
+    expect(pt).not.toHaveProperty("t");
+    expect(pt).not.toHaveProperty("v");
   });
 }

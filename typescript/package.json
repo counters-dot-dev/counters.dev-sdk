@@ -20,7 +20,7 @@
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

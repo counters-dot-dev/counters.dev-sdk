@@ -1,4 +1,4 @@
-import { CountersError } from "./errors.js";
+import { CountersError, CountersTransportError } from "./errors.js";
 import { newIdempotencyKey } from "./idempotency.js";
 import type { Operation } from "./types.js";
 
@@ -7,7 +7,7 @@ export type SubmitFn = (ops: Operation[]) => Promise<void>;
 export interface BatcherOptions {
   maxBatchSize: number;
   intervalMs: number;
-  onError?: (err: unknown) => void;
+  onError?: (err: CountersError) => void;
 }
 
 /**
@@ -80,6 +80,12 @@ export class Batcher {
   }
 
   private flushSafe(): void {
-    this.flush().catch((err) => this.opts.onError?.(err));
+    this.flush().catch((err) => this.opts.onError?.(normaliseBatchError(err)));
   }
+}
+
+function normaliseBatchError(error: unknown): CountersError {
+  return error instanceof CountersError
+    ? error
+    : new CountersTransportError(`unexpected batch submission failure: ${String(error)}`, error);
 }

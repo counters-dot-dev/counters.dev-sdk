@@ -54,7 +54,9 @@ describe("bignum over the wire (mock transport)", () => {
       to: "2026-01-02T00:00:00Z",
       bucket: "1h",
     });
-    expect(series.points[0]?.v).toBe(HUGE);
+    expect(series.points[0]?.value).toBe(HUGE);
+    expect(series.points[0]?.timestamp).toBeInstanceOf(Date);
+    expect(series.points[0]?.timestamp.toISOString()).toBe("2026-01-01T00:00:00.000Z");
     await client.close();
   });
 });

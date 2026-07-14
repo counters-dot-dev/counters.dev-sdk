@@ -8,7 +8,8 @@ Official TypeScript SDK for [counters.dev](https://counters.dev), the
   `Idempotency-Key`, so retries are safe.
 - Amounts and values are **arbitrary precision**: `bigint` internally, **strings on the wire**. The
   SDK never represents a counter value as a JS `number`. Decimal (derived) values stay strings too.
-- Response timestamps (`createdAt` and `updatedAt`) are native JavaScript `Date` values.
+- Response timestamps (`createdAt`, `updatedAt`, and series point `timestamp`) are native JavaScript
+  `Date` values.
 - This is the **reference SDK** — the dashboard dogfoods it and the other language SDKs mirror its shape.
 
 ## The mental model
@@ -83,7 +84,8 @@ Two kinds of write, deliberately:
 - **Buffered** — `add`/`subtract`. Coalesced per counter client-side and flushed as one batch
   (every 1s or at 100 distinct counters, by default). Quotas meter *operations, not magnitude*, so
   coalescing a thousand `add(1)` calls into one `add 1000` costs one op. Failures are asynchronous;
-  give `batch.onError` a sink or they are silent. Call `close()` before exit.
+  give `batch.onError` a sink or they are silent. Its argument is `CountersError`, so the same three
+  `instanceof` checks below apply. Call `close()` before exit.
 - **Immediate** — `addNow`/`subtractNow` (pass `occurredAt` to stamp an event time for
   late-arriving data). One request now, returning the new state. Every write carries a fresh
   idempotency key, so retries never double-count.
@@ -107,6 +109,9 @@ const series = await registrations.series({
   tz: "Europe/London", // optional
   gapfill: true, // optional
 });
+for (const point of series.points) {
+  console.log(point.timestamp.toISOString(), point.value); // Date + arbitrary-precision string
+}
 ```
 
 On a board you can slice by member — the return type follows the argument shape (requires member
@@ -191,9 +196,10 @@ make retried writes safe.
 
 - **Usage**: `client.usage()` returns month-to-date ops, quota, reset instant, and counter
   headroom. Poll it periodically, not per write.
-- **Publishable tokens**: a read-only `pk_` token can be used as the `apiKey` for embedding public
-  reads (values, series, leaderboards) of the counters it is scoped to; writes — and reads outside
-  its scope — fail with a 403 `CountersApiError`.
+- **Publishable tokens**: construct `PublishableCountersClient` with a scoped, read-only `pk_` token
+  for browser-safe values, series, leaderboards, and member snapshots. Its handles do not expose
+  writes, organization-wide listing/usage, derived counters, or a write buffer, so those calls fail
+  at compile time. Reads outside the token's counter scope still fail with a 403 `CountersApiError`.
 - **Validation helpers**: `isValidCounterKey`, `isValidMemberKey`, `isValidMetadata`, `BUCKETS`,
   `WINDOWS` are exported so you can pre-check user-supplied names.
 

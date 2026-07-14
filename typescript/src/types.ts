@@ -38,8 +38,10 @@ export interface CounterPage {
 }
 
 export interface SeriesPoint {
-  t: string;
-  v: Value;
+  /** Inclusive start of this bucket. */
+  timestamp: Date;
+  /** Arbitrary-precision delta for this bucket. */
+  value: Value;
 }
 
 export interface SeriesResponse {
