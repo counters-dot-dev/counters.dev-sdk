@@ -341,8 +341,9 @@ export class CountersClient {
   }
 }
 
-/** A typed handle to a single counter. */
+/** A typed handle to a single counter. Obtain one from {@link CountersClient.counter}. */
 export class CounterHandle {
+  /** @internal — use {@link CountersClient.counter}, which validates the key. */
   constructor(
     private readonly client: CountersClient,
     readonly key: string,
@@ -412,8 +413,9 @@ export class CounterHandle {
   }
 }
 
-/** A typed handle to a single member of a counter's board. */
+/** A typed handle to a single member of a counter's board. Obtain one from {@link CounterHandle.member}. */
 export class MemberHandle {
+  /** @internal — use {@link CounterHandle.member}, which validates the member key. */
   constructor(
     private readonly client: CountersClient,
     readonly counterKey: string,
@@ -449,8 +451,9 @@ export class MemberHandle {
   }
 }
 
-/** A typed handle to a single derived counter (a server-defined decimal expression over counters). */
+/** A typed handle to a single derived counter (a server-defined decimal expression over counters). Obtain one from {@link CountersClient.derived}. */
 export class DerivedHandle {
+  /** @internal — use {@link CountersClient.derived}, which validates the key. */
   constructor(
     private readonly client: CountersClient,
     readonly key: string,
