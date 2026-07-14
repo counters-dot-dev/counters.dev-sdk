@@ -91,7 +91,7 @@ public final class RaidCompletion {
         }
     }
 
-    private static void handleFailure(String operation, Throwable error) {
+    private static void handleFailure(String operation, CountersException error) {
         if (error instanceof CountersApiException api) {
             if (api.status() == 403) {
                 // Quota/permission rejection is operational; it must never undo the cleared raid.

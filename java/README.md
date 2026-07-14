@@ -18,7 +18,8 @@ The one thing you must not do is undo that: parse values with `new BigInteger(va
 `new BigDecimal(value)` for derived values), never `Double.parseDouble` or `Long.parseLong` unless
 you know the magnitude fits.
 
-The `createdAt`/`updatedAt` response fields are native `java.time.Instant` values.
+Response timestamps are native `java.time.Instant` values, including `SeriesPoint.timestamp()` and
+the `createdAt`/`updatedAt` fields.
 `Counter.createdAt()` and `Counter.updatedAt()` are nullable because those fields are optional;
 `LeaderboardEntry.updatedAt()` and `MemberSnapshot.updatedAt()` are required instants.
 
@@ -103,6 +104,10 @@ boundaries.
 ```java
 SeriesResponse s = registrations.series(new SeriesParams(
         OffsetDateTime.now().minusDays(1), OffsetDateTime.now(), "1h"));
+for (SeriesPoint point : s.points()) {
+    Instant bucketStart = point.timestamp();
+    BigInteger delta = new BigInteger(point.value());
+}
 ```
 
 On a board you can slice by member: `memberSeries(member, params)` for one member's series,
@@ -170,6 +175,8 @@ what to do:
 
 All three extend `CountersException` (itself a `RuntimeException`), so one
 `catch (CountersException e)` catches anything originating in this SDK.
+`onBatchError` likewise receives a `CountersException`, so asynchronous failures use the same typed
+branches instead of exposing a raw `Throwable`.
 
 Retries are built in: connect errors and HTTP 429/5xx retry with exponential backoff
 (`maxRetries`, default 3), honouring `Retry-After`; `requestTimeoutMillis` bounds each attempt
@@ -181,7 +188,7 @@ Retries are built in: connect errors and HTTP 429/5xx retry with exponential bac
 
 | Option | Default | Meaning |
 |---|---|---|
-| `apiKey` | — | Organization API key, sent as `Authorization: Bearer` |
+| `apiKey` | — | Full-access organization API key, sent as `Authorization: Bearer` |
 | `baseUrl` | production | API endpoint override |
 | `httpClient` | JDK default | Inject a custom `java.net.http.HttpClient` |
 | `maxRetries` | 3 | Retries after the first attempt on connect errors and 429/5xx |
@@ -192,13 +199,29 @@ Retries are built in: connect errors and HTTP 429/5xx retry with exponential bac
 | `batchIntervalMillis` | 1000 | Background flush cadence; `<= 0` disables the timer |
 | `onBatchError` | — | Sink for errors from fire-and-forget writes (background flushes and immediate mode) |
 
+For a scoped publishable (`pk_`) token, use the separate transport-only builder. Its result exposes
+only the operations that publishable tokens can perform:
+
+```java
+try (ReadOnlyCountersClient publicViews = CountersClient.publishableBuilder()
+        .apiKey(System.getenv("COUNTERS_PUBLISHABLE_TOKEN"))
+        .build()) {
+    ValueResponse value = publicViews.counter("signups").value();
+    Leaderboard leaders = publicViews.counter("raid-dps").leaderboard();
+}
+```
+
+`ReadOnlyCountersClient` supports scoped counter values, counter/member series, leaderboards
+(including windowed leaderboards), and member snapshots. Writes are not methods on its counter or
+member handles, so attempting one is a compile error. Organization-wide `list`/`usage` reads and
+derived counters require the full client and are absent too. The publishable builder retains the
+transport options (`baseUrl`, `httpClient`, retries, backoff, and request timeout) but deliberately
+has no batching options.
+
 ## Odds and ends
 
 - **Usage**: `client.usage()` returns month-to-date ops, quota, reset instant, and counter
   headroom. Poll it periodically, not per write. Quota fields are null on unlimited plans.
-- **Publishable tokens**: a read-only `pk_` token can be used as the `apiKey` for embedding public
-  reads (values, series, leaderboards) of the counters it is scoped to; writes — and reads outside
-  its scope — fail with a 403 `CountersApiException`.
 - **Validation helpers**: `Validation.isValidCounterKey`, `isValidMemberKey`, `isValidMetadata`,
   and the `BUCKETS`/`WINDOWS`/`MODES` sets are public so you can pre-check user-supplied names.
 

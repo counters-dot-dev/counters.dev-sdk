@@ -332,7 +332,8 @@ class ExpandedSurfaceTest {
                     new SeriesParams(at(), at().plusHours(1), "1h", "delta", null, null));
             assertEquals("alice|bob", parseQuery(recorded.get(0).query()).get("member"));
             assertEquals("delta", parseQuery(recorded.get(0).query()).get("mode"));
-            assertEquals("5", s.points().get(0).v());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals("5", s.points().get(0).value());
         }
     }
 
@@ -347,7 +348,9 @@ class ExpandedSurfaceTest {
                     new SeriesParams(at(), at().plusHours(1), "1h"));
             assertEquals("member", parseQuery(recorded.get(0).query()).get("groupBy"));
             assertEquals("alice", s.series().get(0).member());
-            assertEquals("5", s.series().get(0).points().get(0).v());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"),
+                    s.series().get(0).points().get(0).timestamp());
+            assertEquals("5", s.series().get(0).points().get(0).value());
         }
     }
 

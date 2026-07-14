@@ -30,6 +30,7 @@ import dev.counters.sdk.MemberRemoved;
 import dev.counters.sdk.MemberSnapshot;
 import dev.counters.sdk.MemberValue;
 import dev.counters.sdk.MemberWriteOptions;
+import dev.counters.sdk.ReadOnlyCountersClient;
 import dev.counters.sdk.SeriesParams;
 import dev.counters.sdk.SeriesPoint;
 import dev.counters.sdk.SeriesResponse;
@@ -187,7 +188,10 @@ public final class E2e {
             for (String bucket : List.of("1m", "5m", "1h", "1d", "1w", "1mo")) {
                 SeriesResponse series = signups.series(new SeriesParams(from, to, bucket));
                 BigInteger sum = BigInteger.ZERO;
-                for (SeriesPoint p : series.points()) sum = sum.add(new BigInteger(p.v()));
+                for (SeriesPoint p : series.points()) {
+                    check(p.timestamp() != null, "series point exposes its bucket timestamp as an Instant");
+                    sum = sum.add(new BigInteger(p.value()));
+                }
                 checkEq(sum.toString(), "16", "series(" + bucket + ") sums to the total delta");
             }
             INVOKED.add("CounterHandle.series");
@@ -241,12 +245,16 @@ public final class E2e {
             pkDemo.addNow(1); // ensure it exists before clearing (first run on a fresh DB)
             pkDemo.clear();
             pkDemo.addNow(7);
-            try (CountersClient pkClient = CountersClient.builder().apiKey(pkToken).baseUrl(baseUrl).build()) {
+            // publishableBuilder() returns a read-only static type: writes, list, usage, and derived
+            // operations are absent rather than calls that fail later with 403.
+            try (ReadOnlyCountersClient pkClient = CountersClient.publishableBuilder()
+                    .apiKey(pkToken)
+                    .baseUrl(baseUrl)
+                    .build()) {
+                INVOKED.add("CountersClient.publishableBuilder");
                 checkEq(pkClient.counter("pk-demo").value().value(), "7", "pk token reads its scoped counter");
                 pkClient.counter("pk-demo").series(new SeriesParams(from, to, "1h")); // read surface also includes series
-                expectStatus(() -> pkClient.counter("pk-demo").addNow(1), 403, "pk token cannot write");
                 expectStatus(() -> pkClient.counter(NS + "signups").value(), 403, "pk token cannot leave its scope");
-                expectStatus(() -> pkClient.list(), 403, "pk token cannot list");
             }
 
             // Usage: org-wide quota state. Assertions are lower-bound/tolerant because the org is shared
@@ -449,7 +457,9 @@ public final class E2e {
                     }
                     if (expect.containsKey("pointsSum")) {
                         BigInteger sum = BigInteger.ZERO;
-                        for (SeriesPoint p : ((SeriesResponse) body).points()) sum = sum.add(new BigInteger(p.v()));
+                        for (SeriesPoint p : ((SeriesResponse) body).points()) {
+                            sum = sum.add(new BigInteger(p.value()));
+                        }
                         checkEq(sum.toString(), expect.get("pointsSum"), where + ": pointsSum");
                     }
                     if (expect.containsKey("pointsAtLeast")) {

@@ -27,7 +27,7 @@ import java.util.function.Consumer;
  * }
  * }</pre>
  */
-public final class CountersClient implements AutoCloseable {
+public final class CountersClient implements ReadOnlyCountersClient {
 
     /** Production API endpoint. */
     public static final String DEFAULT_BASE_URL = "https://api.counters.dev/v1";
@@ -35,7 +35,7 @@ public final class CountersClient implements AutoCloseable {
     private final Http http;
     private final Batcher batcher;
     private final boolean batchEnabled;
-    private final Consumer<Throwable> onWriteError;
+    private final Consumer<CountersException> onWriteError;
 
     private CountersClient(Builder b) {
         if (b.apiKey == null || b.apiKey.isEmpty()) {
@@ -50,6 +50,11 @@ public final class CountersClient implements AutoCloseable {
 
     public static Builder builder() {
         return new Builder();
+    }
+
+    /** Configure a read-only client for a scoped publishable ({@code pk_}) token. */
+    public static PublishableBuilder publishableBuilder() {
+        return new PublishableBuilder();
     }
 
     /** Get a handle for a counter. Throws {@link CountersValidationException} if the key is invalid. */
@@ -109,7 +114,7 @@ public final class CountersClient implements AutoCloseable {
         CompletableFuture.runAsync(() -> {
             try {
                 submitBatch(List.of(op));
-            } catch (RuntimeException e) {
+            } catch (CountersException e) {
                 // Fire-and-forget, like a background flush — so failures route to the same onError sink
                 // (previously they were swallowed, which silently dropped counted writes).
                 if (onWriteError != null) onWriteError.accept(e);
@@ -376,7 +381,7 @@ public final class CountersClient implements AutoCloseable {
         List<SeriesPoint> points = new ArrayList<>();
         for (Object item : asList(m.get("points"))) {
             Map<String, Object> pm = asMap(item);
-            points.add(new SeriesPoint(str(pm, "t"), str(pm, "v")));
+            points.add(new SeriesPoint(instant(pm, "t"), str(pm, "v")));
         }
         return new SeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "mode"), str(m, "tz"),
                 new SeriesResponse.Range(str(range, "from"), str(range, "to")), List.copyOf(points));
@@ -463,7 +468,7 @@ public final class CountersClient implements AutoCloseable {
         List<SeriesPoint> points = new ArrayList<>();
         for (Object item : asList(m.get("points"))) {
             Map<String, Object> pm = asMap(item);
-            points.add(new SeriesPoint(str(pm, "t"), str(pm, "v")));
+            points.add(new SeriesPoint(instant(pm, "t"), str(pm, "v")));
         }
         return new MemberSeriesResponse(str(m, "counterKey"), str(m, "member"), str(m, "bucket"),
                 str(m, "mode"), str(m, "tz"),
@@ -478,7 +483,7 @@ public final class CountersClient implements AutoCloseable {
             List<SeriesPoint> points = new ArrayList<>();
             for (Object rawPoint : asList(sm.get("points"))) {
                 Map<String, Object> pm = asMap(rawPoint);
-                points.add(new SeriesPoint(str(pm, "t"), str(pm, "v")));
+                points.add(new SeriesPoint(instant(pm, "t"), str(pm, "v")));
             }
             series.add(new MemberSeriesEntry(str(sm, "member"), List.copyOf(points)));
         }
@@ -519,7 +524,7 @@ public final class CountersClient implements AutoCloseable {
         private boolean batchEnabled = true;
         private int maxBatchSize = 100;
         private long batchIntervalMillis = 1000;
-        private Consumer<Throwable> onBatchError;
+        private Consumer<CountersException> onBatchError;
 
         private Builder() {}
 
@@ -586,15 +591,67 @@ public final class CountersClient implements AutoCloseable {
         /**
          * Sink for errors from fire-and-forget writes — background flushes and, when
          * {@link #batchEnabled(boolean) batching is disabled}, immediate-mode writes. These run
-         * off-thread, so without this hook they are silent.
+         * off-thread, so without this hook they are silent. Every delivered error is a
+         * {@link CountersException} and can be matched against its API, transport, and validation subtypes.
          */
-        public Builder onBatchError(Consumer<Throwable> onBatchError) {
+        public Builder onBatchError(Consumer<CountersException> onBatchError) {
             this.onBatchError = onBatchError;
             return this;
         }
 
         public CountersClient build() {
             return new CountersClient(this);
+        }
+    }
+
+    /**
+     * Transport-only configuration for a scoped publishable ({@code pk_}) token. Its build result has
+     * no write, organization-wide, or derived-counter operations.
+     */
+    public static final class PublishableBuilder {
+        private final Builder delegate = new Builder();
+
+        private PublishableBuilder() {}
+
+        /** Scoped publishable token (required). Sent as {@code Authorization: Bearer <token>}. */
+        public PublishableBuilder apiKey(String apiKey) {
+            delegate.apiKey(apiKey);
+            return this;
+        }
+
+        /** API base URL, default {@value CountersClient#DEFAULT_BASE_URL}. */
+        public PublishableBuilder baseUrl(String baseUrl) {
+            delegate.baseUrl(baseUrl);
+            return this;
+        }
+
+        /** Inject a custom {@link HttpClient} (useful in tests). */
+        public PublishableBuilder httpClient(HttpClient httpClient) {
+            delegate.httpClient(httpClient);
+            return this;
+        }
+
+        /** Retries after the first attempt on connect errors and 429/5xx, default 3. */
+        public PublishableBuilder maxRetries(int maxRetries) {
+            delegate.maxRetries(maxRetries);
+            return this;
+        }
+
+        /** Base backoff in milliseconds, doubled per retry, default 200. */
+        public PublishableBuilder backoffMillis(long backoffMillis) {
+            delegate.backoffMillis(backoffMillis);
+            return this;
+        }
+
+        /** Per-attempt request timeout in milliseconds, default 30000. */
+        public PublishableBuilder requestTimeoutMillis(long requestTimeoutMillis) {
+            delegate.requestTimeoutMillis(requestTimeoutMillis);
+            return this;
+        }
+
+        /** Build a client whose static type exposes only scoped read operations. */
+        public ReadOnlyCountersClient build() {
+            return delegate.build();
         }
     }
 }

@@ -6,7 +6,7 @@ import java.math.BigInteger;
  * A typed handle to a single member of a counter's board. Member writes are immediate; they are never
  * routed through the counter write buffer.
  */
-public final class MemberHandle {
+public final class MemberHandle implements ReadOnlyMemberHandle {
 
     private final CountersClient client;
     private final String counterKey;

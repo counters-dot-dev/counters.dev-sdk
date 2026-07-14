@@ -96,7 +96,7 @@ class BatcherTest {
     @Test
     void backgroundFlushErrorsGoToOnError() throws InterruptedException {
         CountDownLatch failed = new CountDownLatch(1);
-        AtomicReference<Throwable> seen = new AtomicReference<>();
+        AtomicReference<CountersException> seen = new AtomicReference<>();
         Batcher b = new Batcher(ops -> {
             throw new CountersApiException(500, "boom");
         }, 1000, 20, t -> {

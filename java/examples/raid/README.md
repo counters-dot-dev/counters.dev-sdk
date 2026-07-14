@@ -14,7 +14,8 @@ and never pass through a floating-point or 64-bit parser.
 The error branches also reflect game-server priorities. API quota failures are logged without
 rolling back the raid, transport failures are dropped after the SDK's built-in retries, and
 client-side validation failures are treated as code/configuration bugs. Background failures from
-the buffered telemetry counter reach the same handler through `onBatchError`.
+the buffered telemetry counter reach the same handler through `onBatchError`, whose parameter is the
+typed `CountersException` base rather than a raw `Throwable`.
 
 The app is compile-checked rather than run in CI. With a real API key, run it from this directory:
 

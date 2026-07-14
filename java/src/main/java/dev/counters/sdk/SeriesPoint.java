@@ -1,4 +1,6 @@
 package dev.counters.sdk;
 
-/** One time-series bucket: {@code t} is the bucket start (RFC 3339), {@code v} the delta as a decimal string. */
-public record SeriesPoint(String t, String v) {}
+import java.time.Instant;
+
+/** One time-series bucket. {@code value} is an arbitrary-precision integer string. */
+public record SeriesPoint(Instant timestamp, String value) {}

@@ -24,7 +24,7 @@ final class Batcher {
     private final Consumer<List<Operation>> submit;
     private final int maxBatchSize;
     private final long intervalMillis;
-    private final Consumer<Throwable> onError;
+    private final Consumer<CountersException> onError;
 
     private final Object lock = new Object();
     private final Map<String, BigInteger> buf = new LinkedHashMap<>();
@@ -32,7 +32,11 @@ final class Batcher {
     private boolean timerStarted;
     private boolean closed;
 
-    Batcher(Consumer<List<Operation>> submit, int maxBatchSize, long intervalMillis, Consumer<Throwable> onError) {
+    Batcher(
+            Consumer<List<Operation>> submit,
+            int maxBatchSize,
+            long intervalMillis,
+            Consumer<CountersException> onError) {
         this.submit = submit;
         this.maxBatchSize = maxBatchSize;
         this.intervalMillis = intervalMillis;
@@ -116,8 +120,8 @@ final class Batcher {
     private void flushSafe() {
         try {
             flush();
-        } catch (Throwable t) {
-            if (onError != null) onError.accept(t);
+        } catch (CountersException error) {
+            if (onError != null) onError.accept(error);
         }
     }
 

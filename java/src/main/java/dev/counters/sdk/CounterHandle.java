@@ -8,7 +8,7 @@ import java.time.OffsetDateTime;
  * the key). Amount arguments accept {@code long}, decimal-digit {@code String}, or {@link BigInteger} and are
  * normalised to a non-negative {@link BigInteger}; invalid amounts throw {@link CountersValidationException}.
  */
-public final class CounterHandle {
+public final class CounterHandle implements ReadOnlyCounterHandle {
 
     private final CountersClient client;
     private final String key;

@@ -195,7 +195,8 @@ class ClientTest {
             assertEquals("delta", s.mode());
             assertEquals("2026-01-01T00:00:00Z", s.range().from());
             assertEquals(1, s.points().size());
-            assertEquals("7", s.points().get(0).v());
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals("7", s.points().get(0).value());
 
             // Optional params are omitted, not sent empty.
             c.counter("c").series(new SeriesParams(from, to, "1d"));
@@ -219,7 +220,9 @@ class ClientTest {
             SeriesResponse s = c.counter("c").series(new SeriesParams(from, to, "1h"));
 
             assertEquals(1, s.points().size());
-            assertEquals(huge, s.points().get(0).v(), "series point must round-trip as a string, no precision loss");
+            assertEquals(Instant.parse("2026-01-01T00:00:00Z"), s.points().get(0).timestamp());
+            assertEquals(huge, s.points().get(0).value(),
+                    "series point must round-trip as a string, no precision loss");
         }
     }
 
@@ -323,9 +326,9 @@ class ClientTest {
         assertEquals(expected.size(), actual.size(), name);
         for (int i = 0; i < expected.size(); i++) {
             Map<String, Object> ep = (Map<String, Object>) expected.get(i);
-            assertEquals(ep.get("t"), actual.get(i).t(), name);
+            assertEquals(Instant.parse((String) ep.get("t")), actual.get(i).timestamp(), name);
             // Delta stays a string (arbitrary precision).
-            assertEquals(ep.get("v"), actual.get(i).v(), name);
+            assertEquals(ep.get("v"), actual.get(i).value(), name);
         }
     }
 
@@ -671,14 +674,15 @@ class ClientTest {
     void immediateModeRoutesErrorsToOnBatchError() throws Exception {
         String base = startServer((exchange, r) ->
                 json(exchange, 403, "{\"title\":\"quota exceeded\",\"status\":403}"));
-        java.util.concurrent.BlockingQueue<Throwable> errors = new java.util.concurrent.LinkedBlockingQueue<>();
+        java.util.concurrent.BlockingQueue<CountersException> errors =
+                new java.util.concurrent.LinkedBlockingQueue<>();
         try (CountersClient client = CountersClient.builder()
                 .apiKey("k").baseUrl(base).maxRetries(0)
                 .batchEnabled(false)
                 .onBatchError(errors::add)
                 .build()) {
             client.counter("c").add(1);
-            Throwable e = errors.poll(2, java.util.concurrent.TimeUnit.SECONDS);
+            CountersException e = errors.poll(2, java.util.concurrent.TimeUnit.SECONDS);
             assertNotNull(e, "immediate-mode write failure never reached onBatchError");
             assertTrue(e instanceof CountersApiException, "got " + e);
             assertEquals(403, ((CountersApiException) e).status());
