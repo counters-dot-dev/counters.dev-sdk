@@ -99,13 +99,19 @@ await client.close();                                  // flush buffered writes 
 ```
 
 Each SDK's README has the equivalent for its own language, and each has a runnable example app under
-`<lang>/examples/e2e/` that exercises the entire public surface.
+`<lang>/examples/e2e/` that exercises the entire public surface. Alongside those, each SDK ships one
+narrative example of the SDK doing a real job: a game server reporting a raid to a leaderboard
+([`java/examples/raid`](./java/examples/raid)), a per-customer API usage meter with batched writes
+and an error sink ([`go/examples/metering`](./go/examples/metering)), and a Next.js App Router app
+mixing confirmed writes, buffered telemetry, and a browser-safe publishable token
+([`typescript/examples/nextjs`](./typescript/examples/nextjs)).
 
 ## How the SDKs are kept honest
 
 - **[`openapi/openapi.yaml`](./openapi)** is the API contract — the *shape* source of truth. Because
   the clients are hand-written, CI runs a drift guard (`scripts/openapi-drift/check.mjs`) that diffs
-  every SDK's operation inventory against the spec, so a client cannot silently fall behind it.
+  every SDK's operation inventory against the spec **and** checks that every required property of
+  every spec schema is modelled by each SDK, so a client cannot silently fall behind the contract.
 - **[`conformance/`](./conformance)** is the *behaviour* source of truth — language-agnostic vectors
   for key and amount validation, arbitrary-precision arithmetic, query encoding, response parsing, the
   error taxonomy, and full HTTP interactions. Every SDK asserts against the same files, so a
