@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CountersClient } from "../src/client.js";
-import { CountersApiError, CountersValidationError } from "../src/errors.js";
+import { CountersApiError, CountersError, CountersValidationError } from "../src/errors.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
 describe("CountersClient", () => {
@@ -132,6 +132,30 @@ describe("CountersClient", () => {
     c.counter("c").add(1);
     await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget submit run
     expect(seen[0]).toBe("/v1/batch");
+  });
+
+  it("immediate mode routes write failures to batch.onError instead of swallowing them", async () => {
+    const errors: unknown[] = [];
+    const f = mockFetch(() => jsonResponse(403, { title: "quota exceeded", status: 403 }));
+    const c = new CountersClient({
+      apiKey: "k",
+      fetch: f,
+      baseUrl: "https://x/v1",
+      maxRetries: 0,
+      batch: { enabled: false, onError: (e) => errors.push(e) },
+    });
+    c.counter("c").add(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(CountersApiError);
+    expect((errors[0] as CountersApiError).status).toBe(403);
+  });
+
+  it("immediate mode rejects writes after close, like the buffered path", async () => {
+    const f = mockFetch(() => jsonResponse(200, { results: [] }));
+    const c = new CountersClient({ apiKey: "k", fetch: f, baseUrl: "https://x/v1", batch: { enabled: false } });
+    await c.close();
+    expect(() => c.counter("c").add(1)).toThrow(CountersError);
   });
 
   it("surfaces a per-operation batch error instead of silently dropping it", async () => {

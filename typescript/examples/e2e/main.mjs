@@ -464,7 +464,7 @@ function surfaceGate() {
   const internals = {
     CountersClient: new Set([
       "constructor", "enqueue", "addNow", "subtractNow", "clearCounter", "deleteCounter", "getValue",
-      "getSeries", "fireSingle", "batcherOnError", "submitBatch", "getLeaderboard", "getMember",
+      "getSeries", "fireSingle", "submitBatch", "getLeaderboard", "getMember",
       "removeMember", "addToMember", "subtractFromMember", "submitMember", "memberDelta",
       "getDerivedValue", "getDerivedSeries",
     ]),

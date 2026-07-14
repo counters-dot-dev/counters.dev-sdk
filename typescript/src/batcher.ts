@@ -38,6 +38,11 @@ export class Batcher {
     return this.buf.size;
   }
 
+  /** Whether close() has been called (used by the client's immediate-mode path to reject late writes). */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
   /** Drain the current buffer into one batch and submit it. */
   async flush(): Promise<void> {
     const ops = this.drain();

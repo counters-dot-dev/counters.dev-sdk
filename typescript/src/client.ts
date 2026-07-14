@@ -1,5 +1,5 @@
 import { Batcher } from "./batcher.js";
-import { CountersApiError, CountersValidationError } from "./errors.js";
+import { CountersApiError, CountersError, CountersValidationError } from "./errors.js";
 import { Http } from "./http.js";
 import { newIdempotencyKey } from "./idempotency.js";
 import {
@@ -50,9 +50,16 @@ export interface CountersClientOptions {
   /** Per-attempt request timeout in milliseconds (default 30s). */
   timeoutMs?: number;
   batch?: {
+    /** Buffer + coalesce `add`/`subtract` writes (default true). When false, each write fires immediately. */
     enabled?: boolean;
+    /** Buffered distinct-counter count that triggers an early flush (default 100). */
     maxBatchSize?: number;
+    /** Background flush interval in milliseconds (default 1000). `<= 0` disables the timer. */
     intervalMs?: number;
+    /**
+     * Sink for errors from fire-and-forget writes — background flushes and, when `enabled` is false,
+     * immediate-mode writes. These run detached from any caller, so without this hook they are silent.
+     */
     onError?: (e: unknown) => void;
   };
 }
@@ -63,6 +70,7 @@ export class CountersClient {
   private readonly http: Http;
   private readonly batcher: Batcher;
   private readonly batchEnabled: boolean;
+  private readonly onWriteError?: (e: unknown) => void;
 
   constructor(opts: CountersClientOptions) {
     if (!opts.apiKey) throw new Error("CountersClient: apiKey is required");
@@ -75,6 +83,7 @@ export class CountersClient {
       timeoutMs: opts.timeoutMs,
     });
     this.batchEnabled = opts.batch?.enabled ?? true;
+    this.onWriteError = opts.batch?.onError;
     this.batcher = new Batcher((ops) => this.submitBatch(ops), {
       maxBatchSize: opts.batch?.maxBatchSize ?? 100,
       intervalMs: opts.batch?.intervalMs ?? 1000,
@@ -305,17 +314,15 @@ export class CountersClient {
   }
 
   private fireSingle(key: string, delta: bigint): void {
+    // Match the buffered path: a write after close() has no worker to observe it — surface the misuse.
+    if (this.batcher.isClosed()) throw new CountersError("cannot enqueue on a closed client");
     const op: Operation =
       delta >= 0n
         ? { counterKey: key, op: "add", amount: delta.toString(), idempotencyKey: newIdempotencyKey() }
         : { counterKey: key, op: "subtract", amount: (-delta).toString(), idempotencyKey: newIdempotencyKey() };
-    void this.submitBatch([op]).catch((e) => this.batcherOnError(e));
-  }
-
-  private batcherOnError(e: unknown): void {
-    // Mirror the batcher's error sink for immediate-mode fire-and-forget writes.
-    // (Buffered writes use the configured onError; here we avoid an unhandled rejection.)
-    void e;
+    // Fire-and-forget, like a background flush — so failures route to the same onError sink
+    // (previously they were swallowed, which silently dropped counted writes).
+    void this.submitBatch([op]).catch((e) => this.onWriteError?.(e));
   }
 
   private submitBatch(ops: Operation[]): Promise<void> {

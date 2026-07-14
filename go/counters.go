@@ -444,20 +444,37 @@ type Operation struct {
 
 // --- client ---
 
+// Options configures a Client. Only APIKey is required; every zero value means "use the default".
 type Options struct {
-	APIKey     string
-	BaseURL    string
+	// APIKey is the organization API key, sent as "Authorization: Bearer <key>". Required.
+	APIKey string
+	// BaseURL overrides the production endpoint (default https://api.counters.dev/v1).
+	BaseURL string
+	// HTTPClient overrides the transport (default: net/http client with a 30s overall timeout).
 	HTTPClient *http.Client
+	// MaxRetries is the number of retries after the first attempt on connect errors and
+	// HTTP 429/5xx (default 3). Set -1 to disable retries entirely.
 	MaxRetries int
-	Backoff    time.Duration
-	Batch      *BatchOptions
+	// Backoff is the base delay between retries, doubled per attempt (default 200ms). A server
+	// Retry-After header, when present, takes precedence.
+	Backoff time.Duration
+	// Batch tunes the client-side write buffer; nil keeps every default (buffering enabled).
+	Batch *BatchOptions
 }
 
+// BatchOptions tunes the buffering of CounterHandle.Add/Subtract writes.
 type BatchOptions struct {
-	Disabled     bool
+	// Disabled turns buffering off: each Add/Subtract fires one immediate batch call instead.
+	Disabled bool
+	// MaxBatchSize is the buffered distinct-counter count that triggers an early flush (default 100).
 	MaxBatchSize int
-	Interval     time.Duration
-	OnError      func(error)
+	// Interval is the background flush cadence (default 1s). <= 0 disables the timer; flush
+	// manually with Client.Flush or rely on MaxBatchSize.
+	Interval time.Duration
+	// OnError receives errors from fire-and-forget writes — background flushes and, when Disabled
+	// is true, immediate-mode writes. These run detached from any caller, so without this hook
+	// they are silent.
+	OnError func(error)
 }
 
 type Client struct {
@@ -468,6 +485,7 @@ type Client struct {
 	backoff      time.Duration
 	batchEnabled bool
 	batcher      *batcher
+	onWriteError func(error)         // BatchOptions.OnError; also the sink for immediate-mode write failures
 	sleepFn      func(time.Duration) // nil => time.Sleep; overridden in tests to record backoff
 }
 
@@ -475,11 +493,18 @@ func NewClient(opts Options) (*Client, error) {
 	if opts.APIKey == "" {
 		return nil, errors.New("counters: APIKey is required")
 	}
+	maxRetries := opts.MaxRetries
+	switch {
+	case maxRetries == 0:
+		maxRetries = 3 // zero value => default
+	case maxRetries < 0:
+		maxRetries = 0 // -1 => retries disabled
+	}
 	c := &Client{
 		apiKey:     opts.APIKey,
 		baseURL:    orString(opts.BaseURL, defaultBaseURL),
 		httpClient: orHTTP(opts.HTTPClient),
-		maxRetries: orInt(opts.MaxRetries, 3),
+		maxRetries: maxRetries,
 		backoff:    orDur(opts.Backoff, 200*time.Millisecond),
 	}
 	enabled := true
@@ -493,6 +518,7 @@ func NewClient(opts Options) (*Client, error) {
 		onErr = opts.Batch.OnError
 	}
 	c.batchEnabled = enabled
+	c.onWriteError = onErr
 	c.batcher = newBatcher(func(ops []Operation) error {
 		return c.submitBatch(context.Background(), ops)
 	}, maxSize, interval, onErr)
@@ -894,7 +920,13 @@ func (c *Client) enqueue(key string, delta *big.Int) error {
 	} else {
 		op.Op, op.Amount = "subtract", new(big.Int).Neg(delta).String()
 	}
-	go func() { _ = c.submitBatch(context.Background(), []Operation{op}) }()
+	// Fire-and-forget, like a background flush — so failures route to the same OnError sink
+	// (previously they were dropped, which silently lost counted writes).
+	go func() {
+		if err := c.submitBatch(context.Background(), []Operation{op}); err != nil && c.onWriteError != nil {
+			c.onWriteError(err)
+		}
+	}()
 	return nil
 }
 

@@ -34,6 +34,7 @@ public final class CountersClient implements AutoCloseable {
     private final Http http;
     private final Batcher batcher;
     private final boolean batchEnabled;
+    private final Consumer<Throwable> onWriteError;
 
     private CountersClient(Builder b) {
         if (b.apiKey == null || b.apiKey.isEmpty()) {
@@ -41,6 +42,7 @@ public final class CountersClient implements AutoCloseable {
         }
         this.http = new Http(b.baseUrl, b.apiKey, b.httpClient, b.maxRetries, b.backoffMillis);
         this.batchEnabled = b.batchEnabled;
+        this.onWriteError = b.onBatchError;
         this.batcher = new Batcher(this::submitBatch, b.maxBatchSize, b.batchIntervalMillis, b.onBatchError);
     }
 
@@ -97,14 +99,18 @@ public final class CountersClient implements AutoCloseable {
             return;
         }
         // Immediate mode: fire a single-op batch without buffering (fire-and-forget, like the TS/Go SDKs).
+        // Match the buffered path: a write after close() has no worker to observe it — surface the misuse.
+        if (batcher.isClosed()) throw new CountersException("cannot enqueue on a closed client");
         Operation op = delta.signum() >= 0
                 ? new Operation(key, "add", delta.toString(), Idempotency.newKey(), null)
                 : new Operation(key, "subtract", delta.negate().toString(), Idempotency.newKey(), null);
         CompletableFuture.runAsync(() -> {
             try {
                 submitBatch(List.of(op));
-            } catch (RuntimeException ignored) {
-                // fire-and-forget; buffered writes use the configured onError instead
+            } catch (RuntimeException e) {
+                // Fire-and-forget, like a background flush — so failures route to the same onError sink
+                // (previously they were swallowed, which silently dropped counted writes).
+                if (onWriteError != null) onWriteError.accept(e);
             }
         });
     }
@@ -559,7 +565,11 @@ public final class CountersClient implements AutoCloseable {
             return this;
         }
 
-        /** Callback for errors from background flushes (they run off-thread and would otherwise be silent). */
+        /**
+         * Sink for errors from fire-and-forget writes — background flushes and, when
+         * {@link #batchEnabled(boolean) batching is disabled}, immediate-mode writes. These run
+         * off-thread, so without this hook they are silent.
+         */
         public Builder onBatchError(Consumer<Throwable> onBatchError) {
             this.onBatchError = onBatchError;
             return this;

@@ -659,6 +659,34 @@ class ClientTest {
     }
 
     @Test
+    void immediateModeRoutesErrorsToOnBatchError() throws Exception {
+        String base = startServer((exchange, r) ->
+                json(exchange, 403, "{\"title\":\"quota exceeded\",\"status\":403}"));
+        java.util.concurrent.BlockingQueue<Throwable> errors = new java.util.concurrent.LinkedBlockingQueue<>();
+        try (CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).maxRetries(0)
+                .batchEnabled(false)
+                .onBatchError(errors::add)
+                .build()) {
+            client.counter("c").add(1);
+            Throwable e = errors.poll(2, java.util.concurrent.TimeUnit.SECONDS);
+            assertNotNull(e, "immediate-mode write failure never reached onBatchError");
+            assertTrue(e instanceof CountersApiException, "got " + e);
+            assertEquals(403, ((CountersApiException) e).status());
+        }
+    }
+
+    @Test
+    void immediateModeRejectsWritesAfterClose() throws Exception {
+        String base = startServer((exchange, r) -> json(exchange, 200, "{\"results\":[]}"));
+        CountersClient client = CountersClient.builder()
+                .apiKey("k").baseUrl(base).batchEnabled(false).build();
+        CounterHandle c = client.counter("c");
+        client.close();
+        assertThrows(CountersException.class, () -> c.add(1));
+    }
+
+    @Test
     void builderRequiresApiKey() {
         assertThrows(IllegalArgumentException.class, () -> CountersClient.builder().build());
         assertThrows(IllegalArgumentException.class, () -> CountersClient.builder().apiKey("").build());

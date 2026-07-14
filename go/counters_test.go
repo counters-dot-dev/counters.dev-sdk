@@ -43,7 +43,7 @@ func loopbackClient(t *testing.T, f roundTripFunc) *Client {
 		HTTPClient: &http.Client{
 			Transport: f,
 		},
-		MaxRetries: 0,
+		MaxRetries: -1, // disable retries: taxonomy cases must observe the first response
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1551,7 +1551,7 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: 0})
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
 			h, _ := cl.Counter("c")
 			_, err := h.AddNow(context.Background(), 1)
 			var apiErr *APIError
@@ -1631,7 +1631,7 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(resp["body"])
 			}))
 			defer srv.Close()
-			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: 0})
+			cl, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
 			h, _ := cl.Counter("a")
 			if err := h.Add(1); err != nil {
 				t.Fatal(err)
@@ -1668,5 +1668,72 @@ func TestErrorTaxonomyConformance(t *testing.T) {
 				t.Error("batch error not caught by counters.Error marker")
 			}
 		})
+	}
+}
+
+func TestImmediateModeRoutesErrorsToOnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(403)
+		_, _ = io.WriteString(w, `{"title":"quota exceeded","status":403}`)
+	}))
+	defer srv.Close()
+
+	errCh := make(chan error, 1)
+	c, _ := NewClient(Options{
+		APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1,
+		Batch: &BatchOptions{Disabled: true, OnError: func(err error) { errCh <- err }},
+	})
+	h, _ := c.Counter("c")
+	if err := h.Add(1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != 403 {
+			t.Fatalf("OnError got %v, want *APIError with status 403", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("immediate-mode write failure never reached OnError")
+	}
+}
+
+func TestImmediateModeRejectsWritesAfterClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"results":[]}`)
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", Batch: &BatchOptions{Disabled: true}})
+	h, _ := c.Counter("c")
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Add(1); !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("Add after Close = %v, want ErrClientClosed", err)
+	}
+}
+
+func TestMaxRetriesMinusOneDisablesRetries(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		_, _ = io.WriteString(w, `{"title":"boom","status":500}`)
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1", MaxRetries: -1})
+	h, _ := c.Counter("c")
+	_, err := h.AddNow(context.Background(), 1)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 500 {
+		t.Fatalf("got %v, want *APIError 500", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (retries disabled)", attempts)
 	}
 }

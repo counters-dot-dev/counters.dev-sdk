@@ -56,6 +56,13 @@ final class Batcher {
         }
     }
 
+    /** Whether close() has been called (used by the client's immediate-mode path to reject late writes). */
+    boolean isClosed() {
+        synchronized (lock) {
+            return closed;
+        }
+    }
+
     /** Number of distinct counters currently buffered. */
     int pending() {
         synchronized (lock) {
