@@ -1,0 +1,127 @@
+name: sdk-maven-publish
+
+# Publishes the Java SDK (`dev.counters:counters-sdk`) to Maven Central via the Central Portal on
+# release tags `java-v*`.
+# Publishing is currently ON HOLD — no release tag is pushed yet, and Maven Central namespace
+# verification for `dev.counters` is a prerequisite. Release tags build and test the Maven
+# repository layout without credentials first; the credentialed job signs that downloaded layout
+# and uploads a Central Portal bundle without running Gradle.
+on:
+  push:
+    tags: ["java-v*"]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "java/build.gradle.kts"
+      - ".github/workflows/sdk-maven-publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    if: (github.event_name != 'push') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - name: Test
+        working-directory: java
+        run: gradle --no-daemon test
+      - name: Publish to Maven local (dry-run — no upload, no signing)
+        working-directory: java
+        run: gradle --no-daemon publishToMavenLocal
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/java-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag source
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD^{commit})"
+          if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid release source sha: $source_sha" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "$source_sha" origin/main
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - name: Test
+        working-directory: java
+        run: gradle --no-daemon test
+      - name: Build Maven local artifact layout
+        working-directory: java
+        run: gradle --no-daemon publishToMavenLocal
+      - name: Stage Maven repository layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_path="dev/counters/counters-sdk/0.1.0"
+          mkdir -p "maven-bundle/$(dirname "$artifact_path")"
+          cp -R "$HOME/.m2/repository/$artifact_path" "maven-bundle/$artifact_path"
+          find maven-bundle -type f -print | sort
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk-maven-package
+          path: maven-bundle/**
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/java-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sdk-maven-package
+          path: maven-bundle
+      - name: Sign downloaded Maven artifacts and upload Central Portal bundle
+        shell: bash
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zip
+
+          printf '%s' "$SIGNING_KEY" | gpg --batch --import
+          find maven-bundle -type f ! -name '*.asc' ! -name '*.md5' ! -name '*.sha1' -print0 |
+            while IFS= read -r -d '' file; do
+              gpg --batch --yes --pinentry-mode loopback \
+                --passphrase "$SIGNING_PASSWORD" \
+                --armor --detach-sign "$file"
+            done
+
+          find maven-bundle -type f ! -name '*.md5' ! -name '*.sha1' -print0 |
+            while IFS= read -r -d '' file; do
+              sha1sum "$file" | awk '{print $1}' > "$file.sha1"
+              md5sum "$file" | awk '{print $1}' > "$file.md5"
+            done
+
+          bundle="$RUNNER_TEMP/central-bundle.zip"
+          (cd maven-bundle && zip -qr "$bundle" .)
+          auth="$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 | tr -d '\n')"
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $auth" \
+            --form "bundle=@${bundle}" \
+            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=AUTOMATIC"

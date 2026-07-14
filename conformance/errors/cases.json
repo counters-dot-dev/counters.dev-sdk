@@ -1,0 +1,83 @@
+{
+  "description": "Error-taxonomy vectors. Each case maps an HTTP outcome (or a client-side validation input) to the taxonomy type every SDK must surface: 'api' (an HTTP error response), 'transport' (no HTTP response was ever obtained), or 'validation' (rejected client-side — a bad input before any request, or a response payload the SDK cannot faithfully represent). 'batch' cases drive the POST /batch per-operation error path under an outer HTTP 200. See conformance/errors/README.md for the loader contract. All 'api' and 'transport' cases are driven with retries disabled (single attempt) so the outcome is deterministic.",
+  "api": [
+    {
+      "name": "not-found-problem-json",
+      "response": { "status": 404, "body": { "type": "about:blank", "title": "counter not found", "status": 404, "detail": "no counter with that key" } },
+      "expect": { "taxonomy": "api", "status": 404, "title": "counter not found" }
+    },
+    {
+      "name": "conflict-problem-json",
+      "response": { "status": 409, "body": { "title": "idempotency key reused with a different payload", "status": 409 } },
+      "expect": { "taxonomy": "api", "status": 409, "title": "idempotency key reused with a different payload" }
+    },
+    {
+      "name": "forbidden-quota",
+      "response": { "status": 403, "body": { "title": "counter limit reached", "status": 403 } },
+      "expect": { "taxonomy": "api", "status": 403, "title": "counter limit reached" }
+    },
+    {
+      "name": "unauthorized-empty-body",
+      "response": { "status": 401, "body": null },
+      "expect": { "taxonomy": "api", "status": 401 }
+    },
+    {
+      "name": "bad-request-empty-body",
+      "response": { "status": 400, "body": null },
+      "expect": { "taxonomy": "api", "status": 400 }
+    },
+    {
+      "name": "server-error-terminal",
+      "note": "500 is retryable, but with retries disabled the first (only) attempt is terminal and surfaces as an API error carrying the real status 500 — NOT a transport error (a response did arrive).",
+      "response": { "status": 500, "body": { "title": "internal error" } },
+      "expect": { "taxonomy": "api", "status": 500 }
+    }
+  ],
+  "transport": [
+    {
+      "name": "no-response-network-error",
+      "note": "The transport raises/never yields an HTTP response on every attempt. After the single attempt this must surface as the transport type, and MUST NOT be an API error with status 0/null.",
+      "transport": "network-error",
+      "expect": { "taxonomy": "transport" }
+    }
+  ],
+  "validation": [
+    {
+      "name": "bad-counter-key",
+      "validate": { "key": "has space" },
+      "expect": { "taxonomy": "validation" }
+    },
+    {
+      "name": "negative-amount",
+      "validate": { "amount": "-1" },
+      "expect": { "taxonomy": "validation" }
+    }
+  ],
+  "batch": [
+    {
+      "name": "per-op-error-with-status",
+      "note": "HTTP 200: the batch was accepted, but one operation failed with a problem carrying `status`. Surfaces as the SDK's api type with that status/title (+ problem details where the type carries them) — exactly as if the operation had failed standalone. The `applied` sibling result must not mask it.",
+      "response": { "status": 200, "body": { "results": [
+        { "counterKey": "signups", "status": "applied", "value": "6" },
+        { "counterKey": "capped", "status": "error", "error": { "title": "counter limit reached", "status": 403 } }
+      ] } },
+      "expect": { "taxonomy": "api", "status": 403, "title": "counter limit reached" }
+    },
+    {
+      "name": "per-op-error-missing-status",
+      "note": "The per-op problem omits `status` — wire-legal (Problem.status is optional in openapi.yaml) though the current server always sets it. No failing HTTP status exists, so an api error cannot be constructed (an api error carries status >= 400, never 0/fabricated): the SDK rejects the problem it cannot faithfully represent via its validation type.",
+      "response": { "status": 200, "body": { "results": [
+        { "counterKey": "capped", "status": "error", "error": { "title": "quota exceeded" } }
+      ] } },
+      "expect": { "taxonomy": "validation" }
+    },
+    {
+      "name": "per-op-error-without-problem",
+      "note": "A per-op `error` with no problem object at all — same rule as per-op-error-missing-status: validation type, never an api error with a 0/absent status.",
+      "response": { "status": 200, "body": { "results": [
+        { "counterKey": "capped", "status": "error" }
+      ] } },
+      "expect": { "taxonomy": "validation" }
+    }
+  ]
+}

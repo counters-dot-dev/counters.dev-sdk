@@ -1,0 +1,103 @@
+name: sdk-typescript-ci
+
+# The example apps are COMPILED here, not run: exercising them end-to-end needs a live counters.dev
+# service, which lives in a separate (private) repository. Maintainers run the end-to-end suites
+# there against a checkout of this repo. Here: unit tests + conformance vectors + build only.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["typescript/**", "conformance/**", "openapi/**", "scripts/ci/**", ".github/workflows/sdk-typescript-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["typescript/**", "conformance/**", "openapi/**", "scripts/ci/**", ".github/workflows/sdk-typescript-ci.yml"]
+
+permissions:
+  contents: read
+  pull-requests: write # sticky results comment (scripts/ci/pr-comment.sh)
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      summary: ${{ steps.sum.outputs.summary }}
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test with coverage (report only, no gate yet)
+        shell: bash
+        run: npm run test:coverage 2>&1 | tee /tmp/unit.log
+      - run: npm run build
+      - name: Unit summary
+        id: sum
+        shell: bash
+        run: |
+          # test runners force ANSI colors on GitHub Actions; strip them or the greps miss
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+          {
+            echo 'summary<<EOF_SUMMARY'
+            echo "- unit: \`$(grep -m1 -E 'Tests {2}[0-9]+ passed' /tmp/unit.txt | xargs)\`"
+            grep -m1 'All files' /tmp/unit.txt \
+              | awk -F'|' '{gsub(/ /,"",$2); gsub(/ /,"",$3); gsub(/ /,"",$4); gsub(/ /,"",$5);
+                            printf "- coverage: %s%% stmts · %s%% branch · %s%% funcs · %s%% lines\n", $2, $3, $4, $5}'
+            echo 'EOF_SUMMARY'
+          } >> "$GITHUB_OUTPUT"
+
+  example:
+    # Compile the example apps against the SDK just built. They are deliberately NOT executed: running them
+    # requires a live counters.dev service (private repo). This proves the documented example still
+    # compiles against the current client surface.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Example apps — compile against the current client surface
+        id: app
+        shell: bash
+        working-directory: typescript
+        run: |
+          npm ci
+          npm run build
+          cd examples/e2e
+          npm install --no-fund --no-audit
+          node --check main.mjs 2>&1 | tee /tmp/example.log
+          cd ../nextjs
+          npm ci --no-fund --no-audit
+          npm run typecheck 2>&1 | tee -a /tmp/example.log
+      - name: PR comment (results)
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          UNIT_SUMMARY: ${{ needs.test.outputs.summary }}
+          EXAMPLE_OUTCOME: ${{ steps.app.outcome }}
+        run: |
+          {
+            [ "$EXAMPLE_OUTCOME" = "success" ] && echo "### ✅ sdk-typescript" || echo "### ❌ sdk-typescript"
+            printf '%s\n' "$UNIT_SUMMARY"
+            if [ "$EXAMPLE_OUTCOME" = "success" ]; then
+              echo "- example apps: compile"
+            else
+              echo "- example apps: **$EXAMPLE_OUTCOME**"
+              echo '```'
+              tail -15 /tmp/example.log 2>/dev/null || echo "no output — see the run log"
+              echo '```'
+            fi
+            echo ""
+            echo "_[run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_"
+          } | bash scripts/ci/pr-comment.sh sdk-typescript-ci
