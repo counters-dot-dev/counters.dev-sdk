@@ -18,6 +18,25 @@ an IEEE-754 double and silently loses precision above 2^53; counters.dev counter
 carries that guarantee end to end, through its own request serialisation and response parsing, and
 proves it in its test suite with values larger than a `u64`.
 
+## The concepts, in one minute
+
+- A **counter** is a named, signed, arbitrary-precision integer on the server: add, subtract, read,
+  clear (which starts a new **epoch** — a season — keeping history), delete.
+- A **leaderboard** is the same counter with **per-member sub-values**. Use a plain counter when
+  only the total matters; use members when you care *who contributed*, ranked — per-player scores,
+  per-tenant usage. If you would otherwise create one counter per user and sort client-side, you
+  wanted a leaderboard. **Sum boards** accumulate deltas per member; **score boards**
+  (`latest`/`min`/`max`) rank submitted scores. The first member write fixes the mode.
+- A **series** is a counter's per-bucket delta over a time range (buckets `1m` … `1mo`) — the
+  change in each bucket, not a running total.
+- A **derived counter** is a server-defined, read-only **decimal** expression over other counters
+  (e.g. a conversion rate). Its value is **null** on division by zero — data, not an error.
+- Every SDK surfaces exactly **three error kinds**: *validation* (rejected client-side, no request
+  made), *api* (the server answered with an HTTP error), and *transport* (no response was ever
+  obtained). The same taxonomy, natively expressed in each language.
+
+Each SDK's README develops this into a full mental model with runnable code in its own language.
+
 ## The SDKs
 
 | Language | Package | Install |
