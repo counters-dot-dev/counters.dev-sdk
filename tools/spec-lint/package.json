@@ -2,7 +2,7 @@
   "name": "counters-spec-lint",
   "version": "0.0.0",
   "private": true,
-  "description": "Pinned Spectral toolchain for the openapi-validate CI job. The lockfile freezes the whole dependency tree so a bad upstream release of a transitive dependency cannot break the spec-lint gate. The @asyncapi/specs override skips 6.11.2, a broken publish that crashes on import (`module is not defined in ES module scope`); Spectral pulls that package transitively for AsyncAPI support the OpenAPI lint never uses. Regenerate with `npm install` here and commit the lockfile.",
+  "description": "Pinned Spectral toolchain for the openapi-validate CI job. The committed lockfile freezes the entire dependency tree so a malicious or broken upstream release of a transitive dependency cannot reach the spec-lint gate. The @asyncapi/specs override pins 6.11.1, the last known-good release: 6.11.2 was a malicious supply-chain publish (the AsyncAPI npm compromise of 2026-07-14 that shipped the Miasma credential-stealing RAT as an install-time dropper). Spectral pulls @asyncapi/specs transitively for AsyncAPI support the OpenAPI lint never uses. Regenerate with `npm install` here and commit the lockfile.",
   "dependencies": {
     "@stoplight/spectral-cli": "6.16.1"
   },
