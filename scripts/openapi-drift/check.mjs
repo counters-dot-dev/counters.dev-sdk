@@ -86,6 +86,7 @@ const NOT_SDK_SURFACE = {
   getDashboardReadUsage: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   listDashboardReadCounters: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   mintDashboardPlaneToken: "dashboard-only WorkOS-authenticated mint endpoint — consumed by dashboard web, not machine SDKs",
+  previewDashboardReadDerived: "dashboard-only direct-to-plane read-only evaluation — consumed by dashboard web, not machine SDKs",
   getPublicCounterValue: "keyless public demo endpoint — website-only by design",
   tapPublicCounter: "keyless public demo endpoint — website-only by design",
 };
@@ -193,6 +194,7 @@ for (const [lang, text] of Object.entries(sources)) {
 const NOT_SDK_SCHEMAS = new Set([
   "DashboardPlaneToken", // dashboard-only surface
   "DashboardUsage", // dashboard-only surface
+  "DerivedPreviewRequest", // dashboard-only surface (previewDashboardReadDerived)
 ]);
 
 // Wire names the SDKs deliberately expand on their public types. A required wire property is
