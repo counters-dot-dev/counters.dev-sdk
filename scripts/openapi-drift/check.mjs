@@ -82,6 +82,7 @@ const NOT_SDK_SURFACE = {
   getDashboardReadCounterValues: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadDerivedSeries: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadDerivedValue: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
+  getDashboardReadEntitlements: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadMember: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadUsage: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   listDashboardReadCounters: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
@@ -192,6 +193,9 @@ for (const [lang, text] of Object.entries(sources)) {
 
 // Spec schemas the SDKs intentionally do NOT model (mirror NOT_SDK_SURFACE for schemas).
 const NOT_SDK_SCHEMAS = new Set([
+  "DashboardEntitlementBoost", // dashboard-only surface (getDashboardReadEntitlements)
+  "DashboardEntitlementDimension", // dashboard-only surface (getDashboardReadEntitlements)
+  "DashboardEntitlementsUsage", // dashboard-only surface (getDashboardReadEntitlements)
   "DashboardPlaneToken", // dashboard-only surface
   "DashboardUsage", // dashboard-only surface
   "DerivedPreviewRequest", // dashboard-only surface (previewDashboardReadDerived)
