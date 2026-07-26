@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Counters API
   version: 0.6.0
-  summary: Arbitrary-precision counter service.
+  summary: Multi-tenant arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
     (drift-checked in CI; there is no client codegen).
@@ -19,6 +19,16 @@ info:
       `clear`) is rejected with `409 Conflict` rather than returning a result the second operation never produced.
     - **Auth:** SDK/machine calls use an organization API key (HTTP Bearer). All data is scoped to the key's organization.
     - **Counters may go negative.** `clear` resets to zero by starting a new epoch; historical series are retained.
+
+    ## Dashboard direct reads
+    - Browser dashboard core reads for usage, counters, values, series, leaderboards, member state, and
+      read-only derived previews use `POST /dashboard/plane-token` on the hub, then `/dashboard-read/*`
+      at the returned plane origin.
+      In production `APP_ROLE=hub`, the legacy `/dashboard/...` runtime read aliases are not mounted; they
+      remain only in local `APP_ROLE=all` composition for development compatibility.
+    - A plane admits `dt_` dashboard reads only when the token org is present in its committed core projection
+      snapshot and that projection binds the org to the token's plane. Missing or stale committed config returns
+      `503` with `error: "plane_config_stale"`.
 
     ## Quotas & coalescing
     - Quotas meter **operations, not magnitude**: an `add` of any size is **one op** (`add(key, 500)` costs
@@ -93,7 +103,7 @@ paths:
     get:
       operationId: getDashboardReadUsage
       summary: Read dashboard quota usage directly from a plane
-      description: Returns the current-month write-operation usage for the caller’s org, served from the plane’s local store without any hub round-trip.
+      description: Returns the current-month write-operation usage for the caller’s org, served from the assigned plane's local store without any hub round-trip.
       security:
         - dashboardReadToken: []
       tags: [dashboard]
@@ -104,6 +114,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DashboardUsage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters:
     servers:
@@ -129,6 +140,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CounterPage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters/values:
     servers:
@@ -158,6 +170,7 @@ paths:
               schema: { $ref: '#/components/schemas/CounterPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters/{counterKey}:
     servers:
@@ -183,6 +196,7 @@ paths:
               schema: { $ref: '#/components/schemas/Counter' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters/{counterKey}/series:
     servers:
@@ -238,6 +252,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters/{counterKey}/leaderboard:
     servers:
@@ -281,6 +296,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/counters/{counterKey}/members/{member}:
     servers:
@@ -313,6 +329,38 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
+
+  /dashboard-read/derived/preview:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    post:
+      operationId: previewDashboardReadDerived
+      summary: Preview a derived expression directly on a plane
+      description: Evaluates an expression against the organization’s plane-local counter data without persisting a definition.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DerivedPreviewRequest' }
+      responses:
+        '200':
+          description: The evaluated preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DerivedValueResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
 
   /dashboard-read/derived/{derivedKey}/value:
     servers:
@@ -971,7 +1019,9 @@ components:
       scheme: bearer
       bearerFormat: dt_
       description: |
-        Short-lived `dt_` dashboard read token minted by the hub and verified locally by a data plane.
+        Short-lived `dt_` dashboard read token minted by the hub and verified locally by the assigned
+        data plane. Production planes bind the token org through their committed core projection snapshot
+        before serving core dashboard reads.
 
   parameters:
     CounterKey:
@@ -1147,6 +1197,18 @@ components:
         reason:
           type: string
           description: Present only when `value` is null (e.g. "division by zero").
+    DerivedPreviewRequest:
+      type: object
+      required: [expression]
+      properties:
+        expression:
+          type: string
+          maxLength: 500
+        scale:
+          type: integer
+          minimum: 0
+          maximum: 20
+          default: 6
     DerivedSeriesPoint:
       type: object
       required: [t, v]
@@ -1479,6 +1541,23 @@ components:
               type: string
               format: date-time
               description: When the usage resets (time-windowed quotas only, e.g. monthly ops).
+    PlaneConfigStale:
+      type: object
+      required: [error, reason]
+      description: |
+        A production plane cannot prove that its committed config snapshot is fresh enough to admit
+        a dashboard read. Retry after the `Retry-After` delay; the hub must refresh the plane snapshot
+        before the plane serves more projection-bound dashboard reads.
+      properties:
+        error:
+          type: string
+          const: plane_config_stale
+        reason:
+          type: string
+          description: Machine-readable stale-config reason, for example `no_committed_snapshot`.
+        seconds_since_hub_contact:
+          type: [integer, 'null']
+          description: Seconds since the last accepted hub contact when known; omitted or null when unknown.
 
   responses:
     BadRequest:
@@ -1517,6 +1596,15 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
+    DashboardReadUnavailable:
+      description: The target plane cannot currently serve projection-bound dashboard reads.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PlaneConfigStale' }
     Conflict:
       description: >-
         The `Idempotency-Key` was first used for a different operation; replaying it here would return a
