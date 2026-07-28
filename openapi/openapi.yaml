@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Counters API
-  version: 0.6.0
+  version: 0.7.0
   summary: Multi-tenant arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
@@ -115,6 +115,33 @@ paths:
               schema: { $ref: '#/components/schemas/DashboardUsage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/DashboardReadUnavailable' }
+
+  /dashboard-read/entitlements:
+    servers:
+      - url: https://{planeHost}
+        description: Plane-local dashboard read endpoints live at each plane origin root.
+        variables:
+          planeHost:
+            default: plane-a.counters.dev
+    get:
+      operationId: getDashboardReadEntitlements
+      summary: Read dashboard entitlement caps and usage directly from a plane
+      description: |
+        Returns every customer-dashboard entitlement dimension with the org's effective post-grant max,
+        active temporary-grant display metadata, and plane-local usage where the plane owns the meter.
+        `counters` and `monthlyOps` include live usage; HUB-owned dimensions return `usage: null` and
+        `usageAvailable: false` until those counts are projected to planes.
+      security:
+        - dashboardReadToken: []
+      tags: [dashboard]
+      responses:
+        '200':
+          description: Dashboard entitlement caps and usage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardEntitlementsUsage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/DashboardEntitlementsUnavailable' }
 
   /dashboard-read/counters:
     servers:
@@ -1140,6 +1167,71 @@ components:
         opsQuota:
           type: [integer, 'null']
           description: Monthly op ceiling; null for unlimited plans.
+    DashboardEntitlementsUsage:
+      type: object
+      required: [generatedAt, snapshotVersion, dimensions]
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+          description: Timestamp of the applied plane config snapshot used for the entitlement caps.
+        snapshotVersion:
+          type: integer
+          format: int64
+          description: Applied plane config snapshot version used for the entitlement caps.
+        dimensions:
+          type: array
+          description: Stable customer-dashboard entitlement dimensions in render order.
+          minItems: 5
+          maxItems: 5
+          items: { $ref: '#/components/schemas/DashboardEntitlementDimension' }
+    DashboardEntitlementDimension:
+      type: object
+      required: [key, usage, usageAvailable, effectiveMax, unlimited, activeBoost]
+      properties:
+        key:
+          type: string
+          enum: [counters, monthlyOps, alertChannels, hostedPages, customDomains]
+        usage:
+          type: [integer, 'null']
+          format: int64
+          description: Plane-metered usage; null when the plane does not own this dimension's usage table.
+        usageAvailable:
+          type: boolean
+          description: True only when `usage` is a live plane-local count.
+        effectiveMax:
+          type: [integer, 'null']
+          format: int64
+          description: Effective post-grant cap from the applied plane config snapshot; null when unlimited.
+        unlimited:
+          type: boolean
+          description: True when the effective cap is the unlimited sentinel and `effectiveMax` is null.
+        activeBoost:
+          anyOf:
+            - $ref: '#/components/schemas/DashboardEntitlementBoost'
+            - type: 'null'
+          description: Temporary-grant display metadata when a live grant currently raises this dimension.
+        windowStart:
+          type: string
+          format: date-time
+          description: UTC usage window start; present for `monthlyOps`.
+        windowResetsAt:
+          type: string
+          format: date-time
+          description: UTC usage reset instant; present for `monthlyOps`.
+    DashboardEntitlementBoost:
+      type: object
+      required: [delta, expiresAt]
+      properties:
+        delta:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Amount by which the live temporary grant raises the effective max above baseline.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Expiry of the grant currently holding the displayed cap.
     CounterPage:
       type: object
       required: [data]
@@ -1558,6 +1650,13 @@ components:
         seconds_since_hub_contact:
           type: [integer, 'null']
           description: Seconds since the last accepted hub contact when known; omitted or null when unknown.
+    DashboardEntitlementsStale:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          const: plane_config_stale
 
   responses:
     BadRequest:
@@ -1605,6 +1704,13 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/PlaneConfigStale' }
+    DashboardEntitlementsUnavailable:
+      description: >-
+        The plane has no applied config snapshot, or the caller's organization is absent from it; retry
+        once the plane's snapshot is current.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DashboardEntitlementsStale' }
     Conflict:
       description: >-
         The `Idempotency-Key` was first used for a different operation; replaying it here would return a
