@@ -179,6 +179,12 @@ For example, `1234000000000000000` renders as `1.234 Quintillion`, and its negat
 
 Names follow each language's normal conventions. The output contract is identical.
 
+An implementation MAY additionally expose an entry point accepting the language's native
+arbitrary-precision integer type alongside the digit-string entry point. It MUST produce output
+identical to passing the same value as a digit string, while the digit-string functions listed below
+remain the required surface; Go provides the `…Big` functions and Java provides the `BigInteger`
+overloads.
+
 ### TypeScript
 
 ```ts

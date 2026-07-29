@@ -118,7 +118,7 @@ func TestFormatOptionsValidation(t *testing.T) {
 		opts := &FormatOptions{MaxFractionDigits: &f}
 		// Options are validated before formatting, even when the value would not display a
 		// fraction ("0" never does) — and even when the value itself is invalid.
-		for _, value := range []string{"0", "5"} {
+		for _, value := range []string{"0", "5", "abc"} {
 			for name, format := range map[string]func(string, *FormatOptions) (string, error){
 				"FormatCompact":     FormatCompact,
 				"FormatScientific":  FormatScientific,
@@ -130,6 +130,8 @@ func TestFormatOptionsValidation(t *testing.T) {
 					var verr *ValidationError
 					if !errors.As(err, &verr) {
 						t.Errorf("%s(%q, maxFractionDigits=%d): expected *ValidationError, got %T: %v", name, value, f, err, err)
+					} else if verr.Msg != "maxFractionDigits must be an integer from 0 through 20" {
+						t.Errorf("%s(%q, maxFractionDigits=%d): expected option validation error, got %q", name, value, f, verr.Msg)
 					}
 				}
 			}

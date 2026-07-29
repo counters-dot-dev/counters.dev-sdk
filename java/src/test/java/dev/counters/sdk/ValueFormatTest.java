@@ -51,7 +51,7 @@ class ValueFormatTest {
 
     @Test
     void rejectsInvalidValuesWithSdkValidationException() {
-        for (String value : List.of("", "-", "1.5", "+5", " 5", "abc")) {
+        for (String value : List.of("", "-", "1.5", "+5", " 5", "1_000", "abc")) {
             assertThrows(
                     CountersValidationException.class,
                     () -> ValueFormat.formatCompact(value),
@@ -69,6 +69,13 @@ class ValueFormatTest {
                     () -> ValueFormat.describeMagnitude(value),
                     "magnitude: " + value);
         }
+
+        assertThrows(
+                CountersValidationException.class,
+                () -> ValueFormat.formatCompact((String) null));
+        assertThrows(
+                CountersValidationException.class,
+                () -> ValueFormat.formatCompact((BigInteger) null));
     }
 
     @Test
