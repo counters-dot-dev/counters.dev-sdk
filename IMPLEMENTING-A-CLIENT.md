@@ -36,12 +36,12 @@ demo endpoints at `https://api.counters.dev/public/...`, the dashboard hub endpo
 `POST /dashboard/plane-token` at the API origin root, and the plane-local `/dashboard-read/*`
 endpoints at each data plane's origin. None of those are part of the client contract — see §12.
 
-The spec's `info.version` is **0.7.0**. The API evolves **additively within a major version** — new
-response fields, new operations, and new optional parameters are minor changes; breaking changes
-require a major-version bump. The practical consequence is a hard rule for your parser: **tolerate
-unknown response fields**. Ignore anything you do not recognise rather than failing deserialisation.
-The spec relies on exactly this tolerance itself: the quota-`403` extension members (§8) are
-explicitly optional so older problem consumers keep parsing those bodies.
+The spec's current `info.version` is **0.7.0**; check that value in the copy of the contract you
+implement against. A hard rule for your parser is to **tolerate unknown response fields and unknown
+enum values**. Ignore fields you do not recognise rather than failing deserialisation, and preserve
+an unrecognised enum value rather than rejecting the response. The spec relies on field tolerance
+itself: the quota-`403` extension members (§8) are explicitly optional so older problem consumers
+keep parsing those bodies.
 
 Make the base URL a configuration option of your client, so the same code can be pointed at a
 staging or local deployment.
@@ -63,16 +63,18 @@ There are two credential kinds:
   leaderboard (`GET /v1/counters/{key}/leaderboard` — the embeddable public leaderboard), and a
   member snapshot (`GET /v1/counters/{key}/members/{member}`). Value and leaderboard responses to
   publishable bearers carry CORS and cache headers so they can be called straight from a browser.
-  Everything else — every write, listing counters, usage, batch, and the derived reads — requires
-  full access and is answered `403 Forbidden`. The spec does not state a publishable rule for the
-  series reads; treat them as full-key-only unless the contract says otherwise.
+  Everything else is outside this grant. Usage and both derived reads explicitly declare `403` for
+  insufficient access. For every other operation outside the grant, a credential-aware client
+  should reject a publishable-token call locally; the specification does not pin the status for
+  credential denial on those operations. If such a call nevertheless yields `403`, handle it
+  generically without assuming its body shape. The `403` declared for the series read is
+  plan/granularity gating, not an authentication failure.
 
 Missing or malformed credentials are `401 Unauthorized` on every operation.
 
 Keep the organization key on servers only. The publishable token is the browser-safe kind: it is
-meant to be embedded in public client-side code, and its reduced scope is enforced server-side. A
-wrapper may expose a correspondingly reduced surface for publishable tokens, but the enforcement
-point is the server's `403`, not your code.
+meant to be embedded in public client-side code. A credential-aware wrapper should expose only the
+three granted reads or reject other publishable-token calls locally with the validation role (§8).
 
 ## 4. Values are digit strings — the headline rule
 
@@ -99,8 +101,9 @@ Two adjacent string-typed numbers not to trip over:
 
 - A member's `percentile` is a decimal string at scale 2 (`^-?[0-9]+\.[0-9]{2}$`, e.g. `"83.33"`;
   the leader and a sole member both read `"100.00"`).
-- A derived `value` of JSON `null` is **data, not an error** — it means the expression divided by
-  zero, and a `reason` member accompanies it. The same holds per bucket in a derived series.
+- A `DerivedValueResponse.value` of JSON `null` is **data, not an error** — it means the expression
+  divided by zero, and the response-level `reason` accompanies it. A `DerivedSeriesPoint` has only
+  `t` and `v`: preserve a `v: null` point in place, with no per-point `reason`.
 
 ## 5. Operation catalogue
 
@@ -162,11 +165,15 @@ is bounded by the storage lifecycle, not read-gated. Writes can be back-dated in
 
 Two dimensional variants share the same endpoint: `member=<key>` returns one member's per-bucket
 series (`MemberSeriesResponse`), and `groupBy=member` returns a series per member with data in range
-(`MemberGroupSeriesResponse`). They are mutually exclusive, require the counter to have member
-series enabled, and require `bucket` at `1h` or coarser. On a score board (`min`/`max`/`latest`)
-each point is the bucket-best/latest value, points are **sparse** — a gap is "no submission", not
-zero — and `gapfill=true` is rejected (`400`); the response's `mode` field tells you how to read
-each bucket's value (`delta` on a sum board, else the board mode).
+(`MemberGroupSeriesResponse`). They are mutually exclusive: as with an invalid counter key, a client
+must reject the combination locally with the validation role before sending a request. Both variants
+require the counter to have member series enabled and require `bucket` at `1h` or coarser. On a score
+board (`min`/`max`/`latest`) each point is the bucket-best/latest value, points are **sparse** — a gap
+is "no submission", not zero — and `gapfill=true` is rejected (`400`); the response's `mode` field
+tells you how to read each bucket's value (`delta` on a sum board, else the board mode). The shipped
+behaviour vectors carry `sum` for this field on a sum-board group response, outside the
+specification's enum, so parse `mode` as an open string that tolerates unknown values rather than as
+a closed enum.
 
 ### Leaderboards and members
 
@@ -182,24 +189,28 @@ characters) rides accepted member values and is returned verbatim.
 `getCounterLeaderboard` pages ranked entries with `limit` (1–1000, default 100) and `offset`
 (0–100000, default 0). `order` defaults to `desc`, except `min` boards which default to `asc`
 (fastest-first); an explicit `order` overrides. `total` (the group total) is present only on `sum`
-boards. With `window=` (`1h`, `6h`, `12h`, `1d`, `7d`, `30d`) the response is a `WindowLeaderboard`:
-members ranked by **activity over the trailing window** (window-sum on a sum board, window-best/
-latest on a score board) rather than all-time standing — members with no window activity are absent.
-Windowed boards require member series enabled, ignore `epoch`, and report the effective summed range
-as `effectiveStart` (floored to the 1h rollup boundary, so possibly earlier than `now − window`) and
-`effectiveEnd`; `total` is `null` on score boards. `getMember` returns one member's value,
-competition **rank** (ties share; the next rank skips: 1, 2, 2, 4), `percentile`, and board state.
+boards. With `window=` (`1h`, `6h`, `12h`, `1d`, `7d`, `30d`) the response is a
+`WindowLeaderboard`; as with an invalid counter key, a client must reject any other `window` value
+locally with the validation role before sending a request. Windowed boards rank members by
+**activity over the trailing window** (window-sum on a sum board, window-best/latest on a score
+board) rather than all-time standing — members with no window activity are absent. They require
+member series enabled, ignore `epoch`, and report the effective summed range as `effectiveStart`
+(floored to the 1h rollup boundary, so possibly earlier than `now − window`) and `effectiveEnd`. Sum
+boards carry a string `total`; on score boards the vectors omit `total`, while the schema also
+permits JSON `null`, so clients must treat it as both optional and nullable. `getMember` returns one
+member's value, competition **rank** (ties share; the next rank skips: 1, 2, 2, 4), `percentile`, and
+board state.
 `removeMember` removes the member from the current epoch; on `sum` boards a non-zero value is
 compensated into the group total.
 
 ### Usage and quota
 
 `getUsage` returns machine-readable quota state for the calling organization: the UTC `month`,
-`ops.used`/`ops.quota`/`ops.resetsAt` (write ops this month; `quota` is `null` for unlimited plans,
-`resetsAt` is present regardless), `counters.used`/`counters.max`, and the plan's `limits`
-(`rateLimitRps`, `maxCounters`, `monthlyOpsQuota`). It is for **periodic polling** (e.g. once a
-minute), not per-write interrogation — the hot write path deliberately exposes no per-request usage
-headers.
+write-op state, `counters.used`/`counters.max`, and the plan's `limits`. Within `ops` and `limits`,
+the four required fields are `ops.used`, `ops.resetsAt`, `limits.rateLimitRps`, and
+`limits.maxCounters`. `ops.quota` and `limits.monthlyOpsQuota` are optional and nullable (`null` for
+unlimited plans when present). It is for **periodic polling** (e.g. once a minute), not per-write
+interrogation — the hot write path deliberately exposes no per-request usage headers.
 
 ### Derived counters
 
@@ -254,10 +265,12 @@ independently — so a batch is safe to retry wholesale.
 
 HTTP `200` means the batch was **accepted**, not that every operation succeeded. The client must
 inspect each entry of `results`: its `status` is `applied`, `deduplicated` (a retry replay), or
-`error`, and an `error` entry carries an embedded problem object that always has its own `status`
-— including the per-operation `403` of the idempotency-key cap (§6). Member operations report
-`memberValue` and, for submits, `memberAccepted`. Treat a per-operation error exactly like the
-standalone status it carries.
+`error`. A result with `status: "error"` may omit its `error` object, and an embedded problem may
+omit its own `status`. When the problem carries a usable failing HTTP status — including the
+per-operation `403` of the idempotency-key cap (§6) — surface it with the **api** role exactly like
+the standalone status. If the `error` object is absent or its problem has no usable failing status,
+the result cannot be represented faithfully: surface the **validation** role and never fabricate an
+HTTP status. Member operations report `memberValue` and, for submits, `memberAccepted`.
 
 ## 8. Error model
 
@@ -276,12 +289,12 @@ three kinds beneath it:
 - **api** — the server answered with an HTTP error response. Carries the status and the parsed
   problem details. The same kind is the right surface for a `2xx` whose body could not be parsed:
   it carries the real status of the unusable exchange.
-- **validation** — rejected locally, before any network call: a bad key, a bad amount, an
-  out-of-range parameter.
+- **validation** — rejected locally before any network call (a bad key, a bad amount, an out-of-range
+  parameter), or a response payload the client cannot faithfully represent.
 - **transport** — no HTTP response was ever obtained: DNS, connect, TLS, timeout, or retries
   exhausted. It carries no HTTP status, and callers must be able to distinguish it from `api`.
 
-`conformance/errors/` pins exactly this mapping (§13).
+`conformance/errors/` pins this taxonomy together with detailed response-classification cases (§13).
 
 ## 9. Retry and backoff
 
@@ -393,19 +406,21 @@ loaded by any test runner. What each pins:
   `1m, 5m, 1h, 1d, 1w, 1mo`) and which it rejects locally as a validation error before issuing a
   request. Plan-gating of finer buckets stays server-side.
 - `series/` — series query encoding (RFC 3339 `from`/`to`, `gapfill` omitted when false,
-  `mode`/`tz` passthrough, the `member`/`groupBy=member` variants) and response parsing for
-  `SeriesResponse`, `MemberSeriesResponse`, and `MemberGroupSeriesResponse`.
-- `leaderboard/` — board and window read query encoding, member add/subtract/submit request-body
-  encoding, and parsing of `Leaderboard`, `WindowLeaderboard`, `MemberValue`, `MemberSnapshot`, and
-  `MemberRemoved`.
+  `mode`/`tz` passthrough, the `member`/`groupBy=member` variants), their mutual-exclusion
+  local-validation error case, and response parsing for `SeriesResponse`, `MemberSeriesResponse`,
+  and `MemberGroupSeriesResponse`.
+- `leaderboard/` — board and window read query encoding, including the invalid-`window`
+  local-validation error case; member add/subtract/submit request-body encoding; and parsing of
+  `Leaderboard`, `WindowLeaderboard`, `MemberValue`, `MemberSnapshot`, and `MemberRemoved`.
 - `derived/` — derived series query encoding and the decimal/`null` response shapes
   (`DerivedValueResponse`, `DerivedSeriesResponse`).
 - `errors/` — the error-taxonomy mapping (§8): which catchable kind an HTTP error response (`api`),
   a no-response failure (`transport`), and a client-side rejection (`validation`) each surface as.
 - `http/` — full request→response→state interaction vectors, plus a raw request→status validation
-  matrix. These are replayed by the service's own suites and by the first-party SDKs' example apps
-  against a live service; replaying them yourself needs a live deployment and an API key. The rest
-  of the vectors are pure client-side encode/parse/validate checks and need no network.
+  matrix. Client runners replay only the `cases.json` entries with `scope: "all"` through client
+  surfaces; `scope: "http"` entries and `requests.json` are server-runner vectors. Replaying the
+  client-scoped cases yourself needs a live deployment and an API key. The rest of the vectors are
+  pure client-side encode/parse/validate checks and need no network.
 
 Both `conformance/` and `openapi/` are synced read-only mirrors — do not edit them here; to propose
 a new vector, open an issue describing it (see `CONTRIBUTING.md`). A client that passes the vectors
