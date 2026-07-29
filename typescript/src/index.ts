@@ -38,6 +38,13 @@ export {
   toValue,
 } from "./validation.js";
 export { newIdempotencyKey } from "./idempotency.js";
+export {
+  describeMagnitude,
+  formatCompact,
+  formatFull,
+  formatScientific,
+} from "./format.js";
+export type { FormatOptions } from "./format.js";
 // The published type surface, enumerated explicitly so nothing is frozen by accident. Internal wire
 // helpers (`Operation`, `OperationType`, `BatchResult`, `BatchResponse`) are deliberately absent:
 // no public method accepts or returns them — publishing them would freeze a dead-end shape.
