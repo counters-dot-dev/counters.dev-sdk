@@ -31,7 +31,9 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
-      - run: gradle --no-daemon test # test is finalized by jacocoTestReport (report only, no gate yet)
+        with:
+          validate-wrappers: true # checked-in wrapper jar — fail the build if it is ever swapped
+      - run: ./gradlew --no-daemon test # test is finalized by jacocoTestReport (report only, no gate yet)
       - name: Unit summary
         id: sum
         shell: bash
@@ -51,13 +53,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          validate-wrappers: true
       - name: Example apps — compile against the current client surface
         id: app
         shell: bash
+        # Driven through the SDK's own wrapper: the examples are separate builds that
+        # includeBuild("../..") the SDK, so they build with the version java/ pins.
         run: |
-          gradle --no-daemon -p java/examples/e2e assemble --console=plain 2>&1 | tee /tmp/example.log
-          gradle --no-daemon -p java/examples/raid assemble --console=plain 2>&1 | tee -a /tmp/example.log
+          java/gradlew --no-daemon -p java/examples/e2e assemble --console=plain 2>&1 | tee /tmp/example.log
+          java/gradlew --no-daemon -p java/examples/raid assemble --console=plain 2>&1 | tee -a /tmp/example.log
       - name: PR comment (results)
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true

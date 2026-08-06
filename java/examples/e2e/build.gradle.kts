@@ -2,7 +2,7 @@
 // typescript/examples/e2e). Run against a live stack with the seed env exported:
 //
 //   COUNTERS_BASE_URL=... COUNTERS_API_KEY_A=... COUNTERS_API_KEY_B=... COUNTERS_PK_TOKEN=... \
-//     gradle run
+//     ../../gradlew -p . run
 plugins {
     application
 }
