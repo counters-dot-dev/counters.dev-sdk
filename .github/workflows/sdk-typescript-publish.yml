@@ -119,6 +119,18 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: Publish downloaded tarball to npm
         working-directory: .
-        run: npm publish artifacts/*.tgz --access public
+        # The leading `./` is load-bearing. `npm publish artifacts/foo.tgz` is parsed as npm's
+        # GitHub `owner/repo` shorthand, so npm tries to clone `github.com/artifacts/foo.tgz`
+        # instead of publishing the file. Resolving the glob first also turns "no tarball" or
+        # "more than one tarball" into a clear failure rather than a confusing npm error.
+        run: |
+          set -euo pipefail
+          tarball="$(echo ./artifacts/*.tgz)"
+          if [ ! -f "$tarball" ]; then
+            echo "expected exactly one tarball in ./artifacts, found: $(echo ./artifacts/*)" >&2
+            exit 1
+          fi
+          echo "publishing $tarball"
+          npm publish "$tarball" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
