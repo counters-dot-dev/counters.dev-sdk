@@ -122,15 +122,22 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          # Deliberately no `registry-url`. It makes setup-node write an .npmrc containing
+          # `_authToken=${NODE_AUTH_TOKEN}` and export a literal `XXXXX-XXXXX-XXXXX-XXXXX`
+          # placeholder when no token is supplied — so npm would present a junk credential
+          # instead of falling through to OIDC. registry.npmjs.org is the default anyway, and
+          # package.json pins no registry.
       - name: Upgrade npm to a version that speaks OIDC
         working-directory: .
-        # Trusted publishing needs npm >= 11.5.1. Node 22 ships npm 10.x, so the bundled one
-        # cannot do this no matter which Node 22.x setup-node resolves.
+        # Trusted publishing needs npm >= 11.5.1, and Node 22 bundles npm 10.x — so an upgrade
+        # is unavoidable. Not `@latest`: npm 12 requires Node ^22.22.2 and setup-node's "22"
+        # currently resolves to 22.22.0, two patches short, which fails with EBADENGINE. The
+        # 11.x line supports Node >=22.9.0 and satisfies the OIDC minimum.
         run: |
           set -euo pipefail
-          npm install -g npm@latest
+          npm install -g npm@^11.5.1
           echo "npm $(npm --version) / node $(node --version)"
+          node -e 'const [maj,min]=process.versions.node.split(".").map(Number); if(maj<22||(maj===22&&min<9)) throw new Error("node too old for npm 11")'
       - name: Publish downloaded tarball to npm
         working-directory: .
         # The leading `./` is load-bearing. `npm publish artifacts/foo.tgz` is parsed as npm's
