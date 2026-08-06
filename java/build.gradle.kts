@@ -6,7 +6,9 @@ plugins {
 }
 
 group = "dev.counters"
-version = "0.1.0"
+// Rehearsal version. 0.0.1 exists to prove the signing and upload legs against the real
+// registries, which no dry-run can reach. Bumped back to 0.1.0 before the real release.
+version = "0.0.1"
 
 java {
     toolchain {
