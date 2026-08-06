@@ -1,6 +1,6 @@
 {
   "name": "@counters.dev/sdk",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Counters — arbitrary-precision counter service. Official TypeScript SDK.",
   "homepage": "https://counters.dev",
   "repository": { "type": "git", "url": "git+https://github.com/counters-dot-dev/counters.dev-sdk.git", "directory": "typescript" },
