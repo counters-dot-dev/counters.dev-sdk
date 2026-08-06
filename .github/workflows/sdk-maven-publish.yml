@@ -6,6 +6,10 @@ name: sdk-maven-publish
 # verification for `dev.counters` is a prerequisite. Release tags build and test the Maven
 # repository layout without credentials first; the credentialed job signs that downloaded layout
 # and uploads a Central Portal bundle without running Gradle.
+# The upload is USER_MANAGED: it stages a deployment for inspection rather than publishing it.
+# Maven Central is append-only, and the signing and upload legs cannot be rehearsed without
+# credentials, so the last step before something permanent is a human looking at it. Switch to
+# AUTOMATIC once a release has gone through this path intact.
 on:
   push:
     tags: ["java-v*"]
@@ -32,12 +36,14 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          validate-wrappers: true
       - name: Test
         working-directory: java
-        run: gradle --no-daemon test
+        run: ./gradlew --no-daemon test
       - name: Publish to Maven local (dry-run — no upload, no signing)
         working-directory: java
-        run: gradle --no-daemon publishToMavenLocal
+        run: ./gradlew --no-daemon publishToMavenLocal
 
   package:
     if: startsWith(github.ref, 'refs/tags/java-v')
@@ -57,22 +63,45 @@ jobs:
           fi
           git show-ref --verify --quiet refs/remotes/origin/main
           git merge-base --is-ancestor "$source_sha" origin/main
+      - name: Validate release tag version
+        id: version
+        shell: bash
+        # The tag names the release; build.gradle.kts names the artifact. If they disagree, the
+        # bundle below would carry a version nobody asked for — and Maven Central is immutable,
+        # so a wrong publish cannot be taken back. Fail here, before any credential is touched.
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#java-v}"
+          declared="$(sed -nE 's/^version = "(.+)"$/\1/p' java/build.gradle.kts)"
+          if [ -z "$declared" ]; then
+            echo "could not read version from java/build.gradle.kts" >&2
+            exit 1
+          fi
+          if [ "$tag_version" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME asks for $tag_version, java/build.gradle.kts declares $declared" >&2
+            exit 1
+          fi
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          validate-wrappers: true
       - name: Test
         working-directory: java
-        run: gradle --no-daemon test
+        run: ./gradlew --no-daemon test
       - name: Build Maven local artifact layout
         working-directory: java
-        run: gradle --no-daemon publishToMavenLocal
+        run: ./gradlew --no-daemon publishToMavenLocal
       - name: Stage Maven repository layout
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          artifact_path="dev/counters/counters-sdk/0.1.0"
+          artifact_path="dev/counters/counters-sdk/$VERSION"
           mkdir -p "maven-bundle/$(dirname "$artifact_path")"
           cp -R "$HOME/.m2/repository/$artifact_path" "maven-bundle/$artifact_path"
           find maven-bundle -type f -print | sort
@@ -118,10 +147,14 @@ jobs:
             done
 
           bundle="$RUNNER_TEMP/central-bundle.zip"
-          (cd maven-bundle && zip -qr "$bundle" .)
+          # Zip the `dev` tree by name, not `.`: Central reads the Maven coordinates straight off
+          # the entry paths, which must start at the group directory.
+          (cd maven-bundle && zip -qr "$bundle" dev)
           auth="$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 | tr -d '\n')"
           curl --fail --silent --show-error \
             --request POST \
             --header "Authorization: Bearer $auth" \
             --form "bundle=@${bundle}" \
-            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=AUTOMATIC"
+            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=USER_MANAGED"
+          echo "Uploaded as USER_MANAGED — the deployment is staged, not live."
+          echo "Release it from https://central.sonatype.com/publishing/deployments after checking it."

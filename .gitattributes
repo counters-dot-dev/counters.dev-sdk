@@ -1,0 +1,9 @@
+# Line endings for the Gradle wrapper.
+#
+# `gradlew` is a POSIX shell script: it must keep LF endings in the working copy even
+# when cloned on Windows with core.autocrlf=true, or it fails under git-bash/WSL with
+# `\r: command not found`. `gradlew.bat` is the opposite — a Windows batch file that
+# wants CRLF. The wrapper jar is binary and must never be line-ending translated.
+gradlew         text eol=lf
+gradlew.bat     text eol=crlf
+*.jar           binary

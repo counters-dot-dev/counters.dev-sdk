@@ -49,8 +49,10 @@ Boards come in two flavours, fixed by the **first member write** and immutable a
 ## Install
 
 > **Not yet published.** Maven Central coordinates will be `dev.counters:counters-sdk:0.1.0`. Until
-> then, build the jar locally (`gradle build` → `build/libs/counters-sdk-0.1.0.jar`) or consume this
-> directory as a Gradle [composite build](https://docs.gradle.org/current/userguide/composite_builds.html).
+> then, build the jar locally (`./gradlew build` → `build/libs/counters-sdk-0.1.0.jar`), install it
+> into your local Maven repository (`./gradlew publishToMavenLocal`, then add `mavenLocal()` to your
+> repositories), or consume this directory as a Gradle
+> [composite build](https://docs.gradle.org/current/userguide/composite_builds.html).
 
 ```kotlin
 // build.gradle.kts — once published
@@ -266,9 +268,19 @@ has no batching options.
 
 ## Development
 
+A JDK 17+ is the only prerequisite. The checked-in [Gradle wrapper](https://docs.gradle.org/current/userguide/gradle_wrapper.html)
+downloads the pinned Gradle version on first use, so nothing else needs installing — on Windows use
+`gradlew.bat` in place of `./gradlew`.
+
 ```bash
-# from java/ — needs a JDK 17+ and Gradle on PATH
-gradle test
+# from java/
+./gradlew test                # unit tests + conformance vectors
+./gradlew build               # jars into build/libs/
+./gradlew publishToMavenLocal # dev.counters:counters-sdk:0.1.0 into ~/.m2
+
+# the example apps are separate builds that compose this one
+./gradlew -p examples/e2e assemble
+./gradlew -p examples/raid assemble
 ```
 
 The behaviour is pinned by the shared vectors in [`../conformance/`](../conformance/) and the wire

@@ -9,7 +9,10 @@ build/
 .gradle/
 *.class
 *.jar
-!gradle/wrapper/gradle-wrapper.jar
+# The wrapper jar is checked in on purpose — it is what makes `./gradlew` work on a
+# fresh clone. The pattern has to be depth-independent: the wrapper lives in
+# java/gradle/wrapper/, and a leading-slash-anchored pattern would never match it.
+!**/gradle/wrapper/gradle-wrapper.jar
 
 # Node / TypeScript
 node_modules/

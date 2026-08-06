@@ -25,5 +25,5 @@ of the three typed `CountersException` subtypes.
 The app is compile-checked rather than run in CI. With a real API key, run it from this directory:
 
 ```bash
-COUNTERS_API_KEY=ck_... gradle run
+COUNTERS_API_KEY=ck_... ../../gradlew -p . run
 ```
