@@ -6,6 +6,10 @@ name: sdk-maven-publish
 # verification for `dev.counters` is a prerequisite. Release tags build and test the Maven
 # repository layout without credentials first; the credentialed job signs that downloaded layout
 # and uploads a Central Portal bundle without running Gradle.
+# The upload is USER_MANAGED: it stages a deployment for inspection rather than publishing it.
+# Maven Central is append-only, and the signing and upload legs cannot be rehearsed without
+# credentials, so the last step before something permanent is a human looking at it. Switch to
+# AUTOMATIC once a release has gone through this path intact.
 on:
   push:
     tags: ["java-v*"]
@@ -151,4 +155,6 @@ jobs:
             --request POST \
             --header "Authorization: Bearer $auth" \
             --form "bundle=@${bundle}" \
-            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=AUTOMATIC"
+            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=USER_MANAGED"
+          echo "Uploaded as USER_MANAGED — the deployment is staged, not live."
+          echo "Release it from https://central.sonatype.com/publishing/deployments after checking it."
