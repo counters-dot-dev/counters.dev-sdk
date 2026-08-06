@@ -1,9 +1,12 @@
 name: sdk-typescript-publish
 
 # Publishes the TypeScript SDK (@counters.dev/sdk) to npm on a release tag like `ts-v0.1.0`.
-# Publishing is currently ON HOLD — no release tag is pushed yet. Requires the NPM_TOKEN repo
-# secret: a Granular Access Token scoped to `@counters.dev/*`. Release tags are packaged
-# without credentials first; the credentialed job only publishes the downloaded tarball.
+# Authentication is npm trusted publishing (OIDC) — there is no npm token. The publish job
+# exchanges a short-lived GitHub OIDC token for publish rights, which npm grants only to the
+# repository and workflow filename registered as the package's trusted publisher. Changing this
+# file's NAME therefore breaks publishing until the trusted publisher is updated to match.
+# Release tags are packaged without any credential first; the publish job only uploads the
+# tarball the package job built.
 on:
   push:
     tags: ["ts-v*"]
@@ -108,6 +111,9 @@ jobs:
     needs: package
     if: startsWith(github.ref, 'refs/tags/ts-v')
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token npm exchanges for publish rights
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -117,6 +123,14 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm to a version that speaks OIDC
+        working-directory: .
+        # Trusted publishing needs npm >= 11.5.1. Node 22 ships npm 10.x, so the bundled one
+        # cannot do this no matter which Node 22.x setup-node resolves.
+        run: |
+          set -euo pipefail
+          npm install -g npm@latest
+          echo "npm $(npm --version) / node $(node --version)"
       - name: Publish downloaded tarball to npm
         working-directory: .
         # The leading `./` is load-bearing. `npm publish artifacts/foo.tgz` is parsed as npm's
@@ -133,4 +147,8 @@ jobs:
           echo "publishing $tarball"
           npm publish "$tarball" --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Provenance is generated automatically under trusted publishing, but npm refuses to
+          # attest a package whose source repository is private — provenance from private repos
+          # has been unsupported since 2023. Drop this line when counters.dev-sdk goes public;
+          # provenance is worth having and costs nothing once the repo is visible.
+          NPM_CONFIG_PROVENANCE: "false"
