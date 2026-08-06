@@ -41,7 +41,7 @@ Every SDK is independent, with its own toolchain. From the repository root:
 | SDK | Command |
 |---|---|
 | TypeScript | `cd typescript && npm ci && npm test` |
-| Java | `cd java && gradle test` |
+| Java | `cd java && ./gradlew test` |
 | Go | `cd go && go test ./...` |
 
 Each language's own README has more detail, including a container command if you would rather not
