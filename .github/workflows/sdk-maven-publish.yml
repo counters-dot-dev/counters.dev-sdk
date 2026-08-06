@@ -59,6 +59,25 @@ jobs:
           fi
           git show-ref --verify --quiet refs/remotes/origin/main
           git merge-base --is-ancestor "$source_sha" origin/main
+      - name: Validate release tag version
+        id: version
+        shell: bash
+        # The tag names the release; build.gradle.kts names the artifact. If they disagree, the
+        # bundle below would carry a version nobody asked for — and Maven Central is immutable,
+        # so a wrong publish cannot be taken back. Fail here, before any credential is touched.
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#java-v}"
+          declared="$(sed -nE 's/^version = "(.+)"$/\1/p' java/build.gradle.kts)"
+          if [ -z "$declared" ]; then
+            echo "could not read version from java/build.gradle.kts" >&2
+            exit 1
+          fi
+          if [ "$tag_version" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME asks for $tag_version, java/build.gradle.kts declares $declared" >&2
+            exit 1
+          fi
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
@@ -74,9 +93,11 @@ jobs:
         run: ./gradlew --no-daemon publishToMavenLocal
       - name: Stage Maven repository layout
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          artifact_path="dev/counters/counters-sdk/0.1.0"
+          artifact_path="dev/counters/counters-sdk/$VERSION"
           mkdir -p "maven-bundle/$(dirname "$artifact_path")"
           cp -R "$HOME/.m2/repository/$artifact_path" "maven-bundle/$artifact_path"
           find maven-bundle -type f -print | sort
@@ -122,7 +143,9 @@ jobs:
             done
 
           bundle="$RUNNER_TEMP/central-bundle.zip"
-          (cd maven-bundle && zip -qr "$bundle" .)
+          # Zip the `dev` tree by name, not `.`: Central reads the Maven coordinates straight off
+          # the entry paths, which must start at the group directory.
+          (cd maven-bundle && zip -qr "$bundle" dev)
           auth="$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 | tr -d '\n')"
           curl --fail --silent --show-error \
             --request POST \
