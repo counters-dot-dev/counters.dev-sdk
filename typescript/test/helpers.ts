@@ -9,6 +9,10 @@ export function loadVectors<T = any>(name: string): T {
   return JSON.parse(readFileSync(join(repoRoot, "conformance", name), "utf8"));
 }
 
+export function loadFormatVectors<T = any>(): T {
+  return JSON.parse(readFileSync(join(repoRoot, "format", "vectors.json"), "utf8"));
+}
+
 /** Build a fetch stand-in from a handler that receives the URL and init. */
 export function mockFetch(
   handler: (url: URL, init: RequestInit) => Response | Promise<Response>,

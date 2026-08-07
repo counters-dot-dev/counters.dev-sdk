@@ -1,0 +1,881 @@
+{
+  "description": "Byte-exact golden vectors for the arbitrary-precision integer display formatter.",
+  "cases": [
+    {
+      "id": "compact-zero",
+      "mode": "compact",
+      "value": "0",
+      "expected": "0"
+    },
+    {
+      "id": "compact-negative-zero",
+      "mode": "compact",
+      "value": "-0",
+      "expected": "0"
+    },
+    {
+      "id": "compact-negative-one",
+      "mode": "compact",
+      "value": "-1",
+      "expected": "-1"
+    },
+    {
+      "id": "compact-below-ladder",
+      "mode": "compact",
+      "value": "42",
+      "expected": "42"
+    },
+    {
+      "id": "compact-boundary-999",
+      "mode": "compact",
+      "value": "999",
+      "expected": "999"
+    },
+    {
+      "id": "compact-step-thousand",
+      "mode": "compact",
+      "value": "1000",
+      "expected": "1K"
+    },
+    {
+      "id": "compact-boundary-1001",
+      "mode": "compact",
+      "value": "1001",
+      "expected": "1.001K"
+    },
+    {
+      "id": "compact-leading-zeros",
+      "mode": "compact",
+      "value": "000001000",
+      "expected": "1K"
+    },
+    {
+      "id": "compact-negative-leading-zeros",
+      "mode": "compact",
+      "value": "-000001000",
+      "expected": "-1K"
+    },
+    {
+      "id": "compact-boundary-999999",
+      "mode": "compact",
+      "value": "999999",
+      "expected": "999.999K"
+    },
+    {
+      "id": "compact-step-million",
+      "mode": "compact",
+      "value": "1000000",
+      "expected": "1M"
+    },
+    {
+      "id": "compact-just-above-million",
+      "mode": "compact",
+      "value": "1000001",
+      "expected": "1M"
+    },
+    {
+      "id": "compact-carry-999950-one-fraction",
+      "mode": "compact",
+      "value": "999950",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1M"
+    },
+    {
+      "id": "compact-carry-999999-two-fractions",
+      "mode": "compact",
+      "value": "999999",
+      "options": {
+        "maxFractionDigits": 2
+      },
+      "expected": "1M"
+    },
+    {
+      "id": "compact-carry-exact-half-zero-fractions",
+      "mode": "compact",
+      "value": "999500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "1M"
+    },
+    {
+      "id": "compact-below-carry-zero-fractions",
+      "mode": "compact",
+      "value": "999499",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "999K"
+    },
+    {
+      "id": "compact-half-up-zero-fractions",
+      "mode": "compact",
+      "value": "1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "2K"
+    },
+    {
+      "id": "compact-negative-half-up-zero-fractions",
+      "mode": "compact",
+      "value": "-1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "-2K"
+    },
+    {
+      "id": "compact-fraction-control-zero",
+      "mode": "compact",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "123K"
+    },
+    {
+      "id": "compact-fraction-control-one",
+      "mode": "compact",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "123.5K"
+    },
+    {
+      "id": "compact-fraction-control-three",
+      "mode": "compact",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "123.456K"
+    },
+    {
+      "id": "compact-121600",
+      "mode": "compact",
+      "value": "121600",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "121.6K"
+    },
+    {
+      "id": "compact-product-69-569-peta",
+      "mode": "compact",
+      "value": "69569000000000000",
+      "expected": "69.569P"
+    },
+    {
+      "id": "compact-negative-121600",
+      "mode": "compact",
+      "value": "-121600",
+      "expected": "-121.6K"
+    },
+    {
+      "id": "compact-negative-1-234-exa",
+      "mode": "compact",
+      "value": "-1234000000000000000",
+      "expected": "-1.234E"
+    },
+    {
+      "id": "compact-step-billion",
+      "mode": "compact",
+      "value": "1000000000",
+      "expected": "1B"
+    },
+    {
+      "id": "compact-step-trillion",
+      "mode": "compact",
+      "value": "1000000000000",
+      "expected": "1T"
+    },
+    {
+      "id": "compact-step-peta",
+      "mode": "compact",
+      "value": "1000000000000000",
+      "expected": "1P"
+    },
+    {
+      "id": "compact-step-exa",
+      "mode": "compact",
+      "value": "1000000000000000000",
+      "expected": "1E"
+    },
+    {
+      "id": "compact-step-zetta",
+      "mode": "compact",
+      "value": "1000000000000000000000",
+      "expected": "1Z"
+    },
+    {
+      "id": "compact-step-yotta",
+      "mode": "compact",
+      "value": "1000000000000000000000000",
+      "expected": "1Y"
+    },
+    {
+      "id": "compact-step-ronna",
+      "mode": "compact",
+      "value": "1000000000000000000000000000",
+      "expected": "1R"
+    },
+    {
+      "id": "compact-step-quetta",
+      "mode": "compact",
+      "value": "1000000000000000000000000000000",
+      "expected": "1Q"
+    },
+    {
+      "id": "compact-fallback-at-10-power-33",
+      "mode": "compact",
+      "value": "1000000000000000000000000000000000",
+      "expected": "1e33"
+    },
+    {
+      "id": "compact-fallback-just-above-10-power-33",
+      "mode": "compact",
+      "value": "1000000000000000000000000000000001",
+      "expected": "1e33"
+    },
+    {
+      "id": "compact-top-step-carry-to-scientific",
+      "mode": "compact",
+      "value": "999950000000000000000000000000000",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1e33"
+    },
+    {
+      "id": "compact-top-step-default-carry-to-scientific",
+      "mode": "compact",
+      "value": "999999999999999999999999999999999",
+      "expected": "1e33"
+    },
+    {
+      "id": "compact-int64-maximum",
+      "mode": "compact",
+      "value": "9223372036854775807",
+      "expected": "9.223E"
+    },
+    {
+      "id": "compact-int64-overflow",
+      "mode": "compact",
+      "value": "9223372036854775808",
+      "expected": "9.223E"
+    },
+    {
+      "id": "compact-two-to-64",
+      "mode": "compact",
+      "value": "18446744073709551616",
+      "expected": "18.447E"
+    },
+    {
+      "id": "compact-forty-digit-fallback",
+      "mode": "compact",
+      "value": "1234567890123456789012345678901234567890",
+      "expected": "1.235e39"
+    },
+    {
+      "id": "compact-156-digit-fallback",
+      "mode": "compact",
+      "value": "123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123",
+      "expected": "1.231e155"
+    },
+    {
+      "id": "compact-twenty-fraction-digits",
+      "mode": "compact",
+      "value": "1234567890123456789012",
+      "options": {
+        "maxFractionDigits": 20
+      },
+      "expected": "1.23456789012345678901Z"
+    },
+    {
+      "id": "scientific-zero",
+      "mode": "scientific",
+      "value": "0",
+      "expected": "0"
+    },
+    {
+      "id": "scientific-negative-zero",
+      "mode": "scientific",
+      "value": "-0",
+      "expected": "0"
+    },
+    {
+      "id": "scientific-single-digit-one",
+      "mode": "scientific",
+      "value": "1",
+      "expected": "1"
+    },
+    {
+      "id": "scientific-single-digit-five",
+      "mode": "scientific",
+      "value": "5",
+      "expected": "5"
+    },
+    {
+      "id": "scientific-single-digit-nine",
+      "mode": "scientific",
+      "value": "9",
+      "expected": "9"
+    },
+    {
+      "id": "scientific-negative-single-digit",
+      "mode": "scientific",
+      "value": "-5",
+      "expected": "-5"
+    },
+    {
+      "id": "scientific-negative-one",
+      "mode": "scientific",
+      "value": "-1",
+      "expected": "-1"
+    },
+    {
+      "id": "scientific-ten",
+      "mode": "scientific",
+      "value": "10",
+      "expected": "1e1"
+    },
+    {
+      "id": "scientific-leading-zeros",
+      "mode": "scientific",
+      "value": "00012",
+      "expected": "1.2e1"
+    },
+    {
+      "id": "scientific-negative-leading-zeros",
+      "mode": "scientific",
+      "value": "-00012",
+      "expected": "-1.2e1"
+    },
+    {
+      "id": "scientific-999",
+      "mode": "scientific",
+      "value": "999",
+      "expected": "9.99e2"
+    },
+    {
+      "id": "scientific-1000",
+      "mode": "scientific",
+      "value": "1000",
+      "expected": "1e3"
+    },
+    {
+      "id": "scientific-1001",
+      "mode": "scientific",
+      "value": "1001",
+      "expected": "1.001e3"
+    },
+    {
+      "id": "scientific-121600",
+      "mode": "scientific",
+      "value": "121600",
+      "expected": "1.216e5"
+    },
+    {
+      "id": "scientific-negative-121600",
+      "mode": "scientific",
+      "value": "-121600",
+      "expected": "-1.216e5"
+    },
+    {
+      "id": "scientific-negative-1-234-quintillion",
+      "mode": "scientific",
+      "value": "-1234000000000000000",
+      "expected": "-1.234e18"
+    },
+    {
+      "id": "scientific-fraction-control-zero",
+      "mode": "scientific",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "1e5"
+    },
+    {
+      "id": "scientific-fraction-control-one",
+      "mode": "scientific",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1.2e5"
+    },
+    {
+      "id": "scientific-fraction-control-three",
+      "mode": "scientific",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "1.235e5"
+    },
+    {
+      "id": "scientific-half-up-zero-fractions",
+      "mode": "scientific",
+      "value": "1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "2e3"
+    },
+    {
+      "id": "scientific-negative-half-up-zero-fractions",
+      "mode": "scientific",
+      "value": "-1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "-2e3"
+    },
+    {
+      "id": "scientific-below-mantissa-carry",
+      "mode": "scientific",
+      "value": "99994",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "9.999e4"
+    },
+    {
+      "id": "scientific-exact-half-mantissa-carry",
+      "mode": "scientific",
+      "value": "99995",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "1e5"
+    },
+    {
+      "id": "scientific-mantissa-carry-99996",
+      "mode": "scientific",
+      "value": "99996",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "1e5"
+    },
+    {
+      "id": "scientific-one-fraction-mantissa-carry",
+      "mode": "scientific",
+      "value": "999",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1e3"
+    },
+    {
+      "id": "scientific-int64-maximum",
+      "mode": "scientific",
+      "value": "9223372036854775807",
+      "expected": "9.223e18"
+    },
+    {
+      "id": "scientific-int64-overflow",
+      "mode": "scientific",
+      "value": "9223372036854775808",
+      "expected": "9.223e18"
+    },
+    {
+      "id": "scientific-two-to-64",
+      "mode": "scientific",
+      "value": "18446744073709551616",
+      "expected": "1.845e19"
+    },
+    {
+      "id": "scientific-forty-digit",
+      "mode": "scientific",
+      "value": "1234567890123456789012345678901234567890",
+      "expected": "1.235e39"
+    },
+    {
+      "id": "scientific-156-digit",
+      "mode": "scientific",
+      "value": "123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123",
+      "expected": "1.231e155"
+    },
+    {
+      "id": "scientific-twenty-fraction-digits",
+      "mode": "scientific",
+      "value": "1234567890123456789012",
+      "options": {
+        "maxFractionDigits": 20
+      },
+      "expected": "1.23456789012345678901e21"
+    },
+    {
+      "id": "scientific-exact-10-power-33",
+      "mode": "scientific",
+      "value": "1000000000000000000000000000000000",
+      "expected": "1e33"
+    },
+    {
+      "id": "full-zero",
+      "mode": "full",
+      "value": "0",
+      "expected": "0"
+    },
+    {
+      "id": "full-negative-zero",
+      "mode": "full",
+      "value": "-0",
+      "expected": "0"
+    },
+    {
+      "id": "full-negative-one",
+      "mode": "full",
+      "value": "-1",
+      "expected": "-1"
+    },
+    {
+      "id": "full-999",
+      "mode": "full",
+      "value": "999",
+      "expected": "999"
+    },
+    {
+      "id": "full-1000",
+      "mode": "full",
+      "value": "1000",
+      "expected": "1,000"
+    },
+    {
+      "id": "full-negative-1000",
+      "mode": "full",
+      "value": "-1000",
+      "expected": "-1,000"
+    },
+    {
+      "id": "full-121600",
+      "mode": "full",
+      "value": "121600",
+      "expected": "121,600"
+    },
+    {
+      "id": "full-negative-121600",
+      "mode": "full",
+      "value": "-121600",
+      "expected": "-121,600"
+    },
+    {
+      "id": "full-negative-1-234-quintillion",
+      "mode": "full",
+      "value": "-1234000000000000000",
+      "expected": "-1,234,000,000,000,000,000"
+    },
+    {
+      "id": "full-one-million",
+      "mode": "full",
+      "value": "1000000",
+      "expected": "1,000,000"
+    },
+    {
+      "id": "full-leading-zeros",
+      "mode": "full",
+      "value": "00000121600",
+      "expected": "121,600"
+    },
+    {
+      "id": "full-int64-maximum",
+      "mode": "full",
+      "value": "9223372036854775807",
+      "expected": "9,223,372,036,854,775,807"
+    },
+    {
+      "id": "full-int64-overflow",
+      "mode": "full",
+      "value": "9223372036854775808",
+      "expected": "9,223,372,036,854,775,808"
+    },
+    {
+      "id": "full-two-to-64",
+      "mode": "full",
+      "value": "18446744073709551616",
+      "expected": "18,446,744,073,709,551,616"
+    },
+    {
+      "id": "full-forty-digit",
+      "mode": "full",
+      "value": "1234567890123456789012345678901234567890",
+      "expected": "1,234,567,890,123,456,789,012,345,678,901,234,567,890"
+    },
+    {
+      "id": "full-negative-forty-digit",
+      "mode": "full",
+      "value": "-1234567890123456789012345678901234567890",
+      "expected": "-1,234,567,890,123,456,789,012,345,678,901,234,567,890"
+    },
+    {
+      "id": "full-156-digit",
+      "mode": "full",
+      "value": "123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123",
+      "expected": "123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123,123"
+    },
+    {
+      "id": "magnitude-zero",
+      "mode": "magnitude",
+      "value": "0",
+      "expected": "0"
+    },
+    {
+      "id": "magnitude-negative-zero",
+      "mode": "magnitude",
+      "value": "-0",
+      "expected": "0"
+    },
+    {
+      "id": "magnitude-negative-one",
+      "mode": "magnitude",
+      "value": "-1",
+      "expected": "-1"
+    },
+    {
+      "id": "magnitude-below-ladder",
+      "mode": "magnitude",
+      "value": "999",
+      "expected": "999"
+    },
+    {
+      "id": "magnitude-thousand",
+      "mode": "magnitude",
+      "value": "1000",
+      "expected": "1 Thousand"
+    },
+    {
+      "id": "magnitude-just-above-thousand",
+      "mode": "magnitude",
+      "value": "1001",
+      "expected": "1.001 Thousand"
+    },
+    {
+      "id": "magnitude-boundary-999999",
+      "mode": "magnitude",
+      "value": "999999",
+      "expected": "999.999 Thousand"
+    },
+    {
+      "id": "magnitude-million",
+      "mode": "magnitude",
+      "value": "1000000",
+      "expected": "1 Million"
+    },
+    {
+      "id": "magnitude-billion",
+      "mode": "magnitude",
+      "value": "1000000000",
+      "expected": "1 Billion"
+    },
+    {
+      "id": "magnitude-trillion",
+      "mode": "magnitude",
+      "value": "1000000000000",
+      "expected": "1 Trillion"
+    },
+    {
+      "id": "magnitude-quadrillion",
+      "mode": "magnitude",
+      "value": "1000000000000000",
+      "expected": "1 Quadrillion"
+    },
+    {
+      "id": "magnitude-quintillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000",
+      "expected": "1 Quintillion"
+    },
+    {
+      "id": "magnitude-sextillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000000",
+      "expected": "1 Sextillion"
+    },
+    {
+      "id": "magnitude-septillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000",
+      "expected": "1 Septillion"
+    },
+    {
+      "id": "magnitude-octillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000000",
+      "expected": "1 Octillion"
+    },
+    {
+      "id": "magnitude-nonillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000000000",
+      "expected": "1 Nonillion"
+    },
+    {
+      "id": "magnitude-decillion",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000000000000",
+      "expected": "1 Decillion"
+    },
+    {
+      "id": "magnitude-carry-999950-one-fraction",
+      "mode": "magnitude",
+      "value": "999950",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1 Million"
+    },
+    {
+      "id": "magnitude-carry-999999-two-fractions",
+      "mode": "magnitude",
+      "value": "999999",
+      "options": {
+        "maxFractionDigits": 2
+      },
+      "expected": "1 Million"
+    },
+    {
+      "id": "magnitude-fraction-control-zero",
+      "mode": "magnitude",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "123 Thousand"
+    },
+    {
+      "id": "magnitude-fraction-control-one",
+      "mode": "magnitude",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "123.5 Thousand"
+    },
+    {
+      "id": "magnitude-fraction-control-three",
+      "mode": "magnitude",
+      "value": "123456",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "123.456 Thousand"
+    },
+    {
+      "id": "magnitude-121600-trims-zeros",
+      "mode": "magnitude",
+      "value": "121600",
+      "options": {
+        "maxFractionDigits": 3
+      },
+      "expected": "121.6 Thousand"
+    },
+    {
+      "id": "magnitude-product-1-234-quintillion",
+      "mode": "magnitude",
+      "value": "1234000000000000000",
+      "expected": "1.234 Quintillion"
+    },
+    {
+      "id": "magnitude-negative-1-234-quintillion",
+      "mode": "magnitude",
+      "value": "-1234000000000000000",
+      "expected": "-1.234 Quintillion"
+    },
+    {
+      "id": "magnitude-negative-121600",
+      "mode": "magnitude",
+      "value": "-121600",
+      "expected": "-121.6 Thousand"
+    },
+    {
+      "id": "magnitude-half-up-zero-fractions",
+      "mode": "magnitude",
+      "value": "1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "2 Thousand"
+    },
+    {
+      "id": "magnitude-negative-half-up-zero-fractions",
+      "mode": "magnitude",
+      "value": "-1500",
+      "options": {
+        "maxFractionDigits": 0
+      },
+      "expected": "-2 Thousand"
+    },
+    {
+      "id": "magnitude-int64-maximum",
+      "mode": "magnitude",
+      "value": "9223372036854775807",
+      "expected": "9.223 Quintillion"
+    },
+    {
+      "id": "magnitude-int64-overflow",
+      "mode": "magnitude",
+      "value": "9223372036854775808",
+      "expected": "9.223 Quintillion"
+    },
+    {
+      "id": "magnitude-two-to-64",
+      "mode": "magnitude",
+      "value": "18446744073709551616",
+      "expected": "18.447 Quintillion"
+    },
+    {
+      "id": "magnitude-forty-digit-fallback",
+      "mode": "magnitude",
+      "value": "1234567890123456789012345678901234567890",
+      "expected": "1.235e39"
+    },
+    {
+      "id": "magnitude-156-digit-fallback",
+      "mode": "magnitude",
+      "value": "123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123123",
+      "expected": "1.231e155"
+    },
+    {
+      "id": "magnitude-fallback-at-10-power-36",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000000000000000",
+      "expected": "1e36"
+    },
+    {
+      "id": "magnitude-fallback-just-above-10-power-36",
+      "mode": "magnitude",
+      "value": "1000000000000000000000000000000000001",
+      "expected": "1e36"
+    },
+    {
+      "id": "magnitude-top-step-carry-to-scientific",
+      "mode": "magnitude",
+      "value": "999950000000000000000000000000000000",
+      "options": {
+        "maxFractionDigits": 1
+      },
+      "expected": "1e36"
+    },
+    {
+      "id": "magnitude-top-step-default-carry-to-scientific",
+      "mode": "magnitude",
+      "value": "999999999999999999999999999999999999",
+      "expected": "1e36"
+    },
+    {
+      "id": "magnitude-twenty-fraction-digits",
+      "mode": "magnitude",
+      "value": "1234567890123456789012",
+      "options": {
+        "maxFractionDigits": 20
+      },
+      "expected": "1.23456789012345678901 Sextillion"
+    }
+  ]
+}
