@@ -6,10 +6,14 @@ name: sdk-maven-publish
 # verification for `dev.counters` is a prerequisite. Release tags build and test the Maven
 # repository layout without credentials first; the credentialed job signs that downloaded layout
 # and uploads a Central Portal bundle without running Gradle.
-# The upload is USER_MANAGED: it stages a deployment for inspection rather than publishing it.
-# Maven Central is append-only, and the signing and upload legs cannot be rehearsed without
-# credentials, so the last step before something permanent is a human looking at it. Switch to
-# AUTOMATIC once a release has gone through this path intact.
+# The upload is AUTOMATIC: Central validates the bundle and, if it passes, publishes it without
+# a human step. That is safe because validation still gates it — a bundle with a bad signature,
+# an unverified namespace or an incomplete POM is rejected rather than published. It was
+# USER_MANAGED for 0.0.1 and 0.1.0, when the signing and upload legs had never run; both staged
+# and validated cleanly, so the manual step was retired.
+# What this gives up: there is no longer a look-before-it-is-permanent step. A tag that passes
+# validation is live on Maven Central and cannot be unpublished. The tag/version guard below is
+# what stands in its place.
 on:
   push:
     tags: ["java-v*"]
@@ -155,6 +159,6 @@ jobs:
             --request POST \
             --header "Authorization: Bearer $auth" \
             --form "bundle=@${bundle}" \
-            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=USER_MANAGED"
-          echo "Uploaded as USER_MANAGED — the deployment is staged, not live."
-          echo "Release it from https://central.sonatype.com/publishing/deployments after checking it."
+            "https://central.sonatype.com/api/v1/publisher/upload?name=${GITHUB_REF_NAME}&publishingType=AUTOMATIC"
+          echo "Uploaded as AUTOMATIC — Central will publish it if validation passes."
+          echo "Track it at https://central.sonatype.com/publishing/deployments"
