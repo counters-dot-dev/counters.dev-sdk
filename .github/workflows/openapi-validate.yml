@@ -17,6 +17,11 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
+      - name: Metrics — mark start
+        if: github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        run: echo "CI_T0=$(date +%s)" >> "$GITHUB_ENV" || echo "::warning::failed to mark CI metrics start time (ignored)"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -35,6 +40,11 @@ jobs:
         if: always() # report drift even when spectral failed — both results belong on the PR
         shell: bash
         run: node scripts/openapi-drift/check.mjs 2>&1 | tee /tmp/drift.log
+      - name: CI metrics helper contract
+        id: metrics_contract
+        if: always()
+        shell: bash
+        run: bash scripts/ci/counters-count.test.sh
       - name: PR comment (results)
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true
@@ -44,9 +54,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SPECTRAL: ${{ steps.spectral.outcome }}
           DRIFT: ${{ steps.drift.outcome }}
+          METRICS_CONTRACT: ${{ steps.metrics_contract.outcome }}
         run: |
           {
-            if [ "$SPECTRAL" = "success" ] && [ "$DRIFT" = "success" ]; then echo "### ✅ openapi-validate"; else echo "### ❌ openapi-validate"; fi
+            if [ "$SPECTRAL" = "success" ] && [ "$DRIFT" = "success" ] && [ "$METRICS_CONTRACT" = "success" ]; then echo "### ✅ openapi-validate"; else echo "### ❌ openapi-validate"; fi
             if [ "$SPECTRAL" = "success" ]; then
               echo "- spectral: clean"
             else
@@ -63,6 +74,21 @@ jobs:
               tail -15 /tmp/drift.log 2>/dev/null || true
               echo '```'
             fi
+            if [ "$METRICS_CONTRACT" = "success" ]; then
+              echo "- ci metrics helper: contract pinned"
+            else
+              echo "- ci metrics helper: **problems**"
+            fi
             echo ""
             echo "_[run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_"
           } | bash scripts/ci/pr-comment.sh openapi-validate
+      - name: Metrics — report to counters.dev
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        env:
+          COUNTERS_API_KEY: ${{ secrets.COUNTERS_API_KEY }}
+          APP: openapi
+          BUILD_OUTCOME: ${{ job.status }}
+          IDEM_SCOPE: ${{ github.repository }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/ci/counters-count.sh

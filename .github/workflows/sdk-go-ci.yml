@@ -25,6 +25,12 @@ jobs:
       run:
         working-directory: go
     steps:
+      - name: Metrics — mark start
+        if: github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        working-directory: .
+        run: echo "CI_T0=$(date +%s)" >> "$GITHUB_ENV" || echo "::warning::failed to mark CI metrics start time (ignored)"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -33,20 +39,48 @@ jobs:
       - name: Test with coverage (report only, no gate yet)
         shell: bash
         run: |
-          go test ./... -coverprofile=coverage.out 2>&1 | tee /tmp/unit.log
+          go test -v ./... -coverprofile=coverage.out 2>&1 | tee /tmp/unit.log
           go tool cover -func=coverage.out | tail -1 | tee -a /tmp/unit.log
       - name: Unit summary
+        if: always()
         id: sum
         shell: bash
         run: |
           # test runners force ANSI colors on GitHub Actions; strip them or the greps miss
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+          if [ -f /tmp/unit.log ]; then
+            sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+            passed="$(grep -c -E '^--- PASS:' /tmp/unit.txt || true)"
+            failed="$(grep -c -E '^--- FAIL:' /tmp/unit.txt || true)"
+          else
+            : > /tmp/unit.txt
+            passed=""
+            failed=""
+          fi
+          unit_line="$(grep -m1 -E '^ok ' /tmp/unit.txt | xargs || true)"
+          coverage_line="$(grep -m1 '^total:' /tmp/unit.txt | xargs || true)"
           {
             echo 'summary<<EOF_SUMMARY'
-            echo "- unit: \`$(grep -m1 -E '^ok ' /tmp/unit.txt | xargs)\`"
-            echo "- coverage: \`$(grep -m1 '^total:' /tmp/unit.txt | xargs)\`"
+            echo "- unit: \`${unit_line:-not available}\`"
+            echo "- coverage: \`${coverage_line:-not available}\`"
             echo 'EOF_SUMMARY'
+            if [ -n "${passed}${failed}" ]; then
+              echo "passed=$passed"
+              echo "failed=$failed"
+            fi
           } >> "$GITHUB_OUTPUT"
+      - name: Metrics — report to counters.dev
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        working-directory: .
+        env:
+          COUNTERS_API_KEY: ${{ secrets.COUNTERS_API_KEY }}
+          APP: sdk-go
+          BUILD_OUTCOME: ${{ job.status }}
+          PASSED: ${{ steps.sum.outputs.passed }}
+          FAILED: ${{ steps.sum.outputs.failed }}
+          IDEM_SCOPE: ${{ github.repository }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/ci/counters-count.sh
 
   example:
     # Compile the example apps against the SDK just built. They are deliberately NOT executed here
