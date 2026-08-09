@@ -5,11 +5,9 @@ import java.net.http.HttpClient;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -77,31 +75,21 @@ public final class CountersClient implements ReadOnlyCountersClient {
         return toCounterPage(asMap(http.request("GET", "/counters", null, null, query)));
     }
 
-    /**
-     * Atomically create or verify the complete known counter set and set the organization's
-     * implicit-create policy. The request must contain 1..1000 unique declarations.
-     */
+    /** Create or verify the complete known counter set with bounded, per-key results. */
     public DeclareCountersResponse declare(DeclareCountersRequest request) {
         if (request == null) throw new CountersValidationException("declare request is required");
         List<CounterDeclaration> declarations = request.counters();
         if (declarations == null || declarations.isEmpty() || declarations.size() > 1000) {
             throw new CountersValidationException("declare counters must contain between 1 and 1000 entries");
         }
-        if (request.undeclaredCounterWrites() == null) {
-            throw new CountersValidationException("undeclaredCounterWrites is required");
-        }
-        Set<String> keys = new HashSet<>();
         List<Map<String, Object>> wireDeclarations = new ArrayList<>(declarations.size());
         for (int i = 0; i < declarations.size(); i++) {
             CounterDeclaration declaration = declarations.get(i);
             if (declaration == null) {
                 throw new CountersValidationException("declare counters[" + i + "] is required");
             }
-            Validation.assertCounterKey(declaration.key());
-            Validation.assertMode(declaration.memberMode());
-            if (!keys.add(declaration.key())) {
-                throw new CountersValidationException(
-                        "declare counters contains duplicate key: " + declaration.key());
+            if (declaration.key() == null) {
+                throw new CountersValidationException("declare counters[" + i + "].key is required");
             }
             Map<String, Object> wire = new LinkedHashMap<>();
             wire.put("key", declaration.key());
@@ -113,8 +101,27 @@ public final class CountersClient implements ReadOnlyCountersClient {
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("counters", wireDeclarations);
-        body.put("undeclaredCounterWrites", request.undeclaredCounterWrites().wireValue());
         return toDeclareCountersResponse(asMap(http.request("POST", "/counters", body, null, null)));
+    }
+
+    /** Read the organization-wide implicit-create policy and its compare-and-set version. */
+    public CounterWritePolicy getCounterWritePolicy() {
+        return toCounterWritePolicy(asMap(http.request("GET", "/counter-write-policy", null, null, null)));
+    }
+
+    /** Compare-and-set the organization-wide implicit-create policy. */
+    public CounterWritePolicy setCounterWritePolicy(SetCounterWritePolicyRequest request) {
+        if (request == null) throw new CountersValidationException("counter write policy request is required");
+        if (request.undeclaredCounterWrites() == null) {
+            throw new CountersValidationException("undeclaredCounterWrites is required");
+        }
+        if (request.expectedVersion() < 0) {
+            throw new CountersValidationException("expectedVersion must be zero or greater");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("undeclaredCounterWrites", request.undeclaredCounterWrites().wireValue());
+        body.put("expectedVersion", request.expectedVersion());
+        return toCounterWritePolicy(asMap(http.request("PUT", "/counter-write-policy", body, null, null)));
     }
 
     /** Current quota state for the organization. */
@@ -527,22 +534,44 @@ public final class CountersClient implements ReadOnlyCountersClient {
         for (Object item : asList(m.get("results"))) {
             Map<String, Object> result = asMap(item);
             String status = str(result, "status");
-            if (!("created".equals(status) || "unchanged".equals(status))) {
+            if (!("created".equals(status) || "unchanged".equals(status) || "error".equals(status))) {
                 throw new CountersValidationException("declaration result has an invalid status: " + status);
             }
             results.add(new CounterDeclarationResult(
                     str(result, "key"),
                     status,
-                    longVal(result, "epoch"),
+                    nullableLong(result, "epoch"),
                     str(result, "memberMode"),
-                    boolVal(result, "memberSeriesEnabled"),
+                    nullableBoolean(result, "memberSeriesEnabled"),
                     instant(result, "memberSeriesEnabledAt"),
                     str(result, "memberSeriesEnabledBy"),
-                    longVal(result, "memberCount")));
+                    nullableLong(result, "memberCount"),
+                    toProblem(result.get("error"))));
         }
         return new DeclareCountersResponse(
                 List.copyOf(results),
-                UndeclaredCounterWrites.fromWire(str(m, "undeclaredCounterWrites")));
+                toCounterWritePolicy(asMap(m.get("policy"))));
+    }
+
+    private static CounterWritePolicy toCounterWritePolicy(Map<String, Object> m) {
+        return new CounterWritePolicy(
+                UndeclaredCounterWrites.fromWire(str(m, "undeclaredCounterWrites")),
+                longVal(m, "version"),
+                boolVal(m, "explicit"),
+                instant(m, "updatedAt"),
+                str(m, "updatedBy"));
+    }
+
+    private static Problem toProblem(Object value) {
+        if (value == null) return null;
+        Map<String, Object> m = asMap(value);
+        Long status = nullableLong(m, "status");
+        return new Problem(
+                str(m, "type"),
+                str(m, "title"),
+                status == null ? null : status.intValue(),
+                str(m, "detail"),
+                str(m, "instance"));
     }
 
     private static MemberSeriesConfig toMemberSeriesConfig(Map<String, Object> m) {

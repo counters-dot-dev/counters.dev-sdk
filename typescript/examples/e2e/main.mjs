@@ -87,11 +87,20 @@ async function tour() {
   const signups = client.counter(`${ns}signups`);
   invoked.add("CountersClient.counter");
 
-  // Startup provisioning: atomically create/verify the known key and keep backwards-compatible
-  // implicit creation enabled for the rest of this broad surface tour.
+  // The implicit-create policy is organization-wide and versioned. Read before compare-and-setting
+  // it so concurrent clients cannot silently clobber one another. Keep allow for this broad tour.
+  let policy = await client.getCounterWritePolicy();
+  invoked.add("CountersClient.getCounterWritePolicy");
+  policy = await client.setCounterWritePolicy({
+    undeclaredCounterWrites: "allow",
+    expectedVersion: policy.version,
+  });
+  invoked.add("CountersClient.setCounterWritePolicy");
+  assertEq(policy.undeclaredCounterWrites, "allow", "counter write policy allows implicit creation");
+
+  // Startup provisioning: create/verify the known key with a per-key result.
   const declared = await client.declare({
     counters: [{ key: `${ns}signups`, memberSeriesEnabled: true }],
-    undeclaredCounterWrites: "allow",
   });
   invoked.add("CountersClient.declare");
   assertEq(declared.results[0].status, "created", "fresh startup declaration creates its counter");
@@ -494,7 +503,10 @@ async function replayVectors() {
 
 function surfaceGate() {
   const documented = {
-    CountersClient: ["counter", "declare", "list", "usage", "derived", "flush", "close"],
+    CountersClient: [
+      "counter", "declare", "getCounterWritePolicy", "setCounterWritePolicy", "list", "usage",
+      "derived", "flush", "close",
+    ],
     CounterHandle: ["add", "subtract", "addNow", "subtractNow", "clear", "delete", "value", "get", "setMemberSeries", "series", "leaderboard", "member"],
     MemberHandle: ["get", "remove", "add", "subtract", "submit"],
     DerivedHandle: ["value", "series"],

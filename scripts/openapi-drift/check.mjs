@@ -45,6 +45,8 @@ for (const op of operations) {
 // Op segments may be a path literal ("/add") or a quoted op token passed to a shared helper ("add").
 const SIGNATURES = {
   declareCounters: [/\/counters\b/, /declare/i],
+  getCounterWritePolicy: [/\/counter-write-policy\b/, /get/i],
+  setCounterWritePolicy: [/\/counter-write-policy\b/, /put/i],
   listCounters: [/\/counters\b/],
   getCounter: [/\/counters\//],
   deleteCounter: [/\/counters\b/, /delete/i],
@@ -68,9 +70,12 @@ const SIGNATURES = {
 
 const PARAM_SIGNATURES = {
   declareCounters: [
-    { name: "undeclaredCounterWrites", signatures: [/undeclaredCounterWrites/i] },
     { name: "memberMode", signatures: [/memberMode/i] },
     { name: "memberSeriesEnabled", signatures: [/memberSeriesEnabled/i] },
+  ],
+  setCounterWritePolicy: [
+    { name: "undeclaredCounterWrites", signatures: [/undeclaredCounterWrites/i] },
+    { name: "expectedVersion", signatures: [/expectedVersion/i] },
   ],
   getCounterSeries: [
     { name: "groupBy/group_by", signatures: [/groupBy|group_by/i] },

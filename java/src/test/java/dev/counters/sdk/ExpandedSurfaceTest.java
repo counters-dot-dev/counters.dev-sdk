@@ -118,20 +118,19 @@ class ExpandedSurfaceTest {
                         + "\"memberMode\":\"sum\",\"memberSeriesEnabled\":true,"
                         + "\"memberSeriesEnabledAt\":\"2026-08-10T00:00:00Z\","
                         + "\"memberSeriesEnabledBy\":\"api_key:key-id\",\"memberCount\":0}],"
-                        + "\"undeclaredCounterWrites\":\"reject\"}"));
+                        + "\"policy\":{\"undeclaredCounterWrites\":\"reject\",\"version\":2,"
+                        + "\"explicit\":true,\"updatedAt\":\"2026-08-10T00:01:00Z\"}}"));
         try (CountersClient c = client(baseUrl)) {
             DeclareCountersResponse response = c.declare(new DeclareCountersRequest(
-                    List.of(new CounterDeclaration("requests", "sum", true)),
-                    UndeclaredCounterWrites.REJECT));
+                    List.of(new CounterDeclaration("requests", "sum", true))));
 
             assertEquals("POST", recorded.get(0).method());
             assertEquals("/v1/counters", recorded.get(0).rawPath());
             Map<String, Object> body = parseBody(recorded.get(0).body());
-            assertEquals("reject", body.get("undeclaredCounterWrites"));
             assertEquals(
                     Map.of("key", "requests", "memberMode", "sum", "memberSeriesEnabled", true),
                     ((List<?>) body.get("counters")).get(0));
-            assertEquals(UndeclaredCounterWrites.REJECT, response.undeclaredCounterWrites());
+            assertEquals(UndeclaredCounterWrites.REJECT, response.policy().undeclaredCounterWrites());
             assertEquals("created", response.results().get(0).status());
             assertEquals(
                     Instant.parse("2026-08-10T00:00:00Z"),
@@ -140,28 +139,37 @@ class ExpandedSurfaceTest {
     }
 
     @Test
-    void declareRejectsInvalidAndDuplicateEntriesBeforeRequest() throws IOException {
+    void declareRejectsOnlyInvalidRequestWideShapesBeforeRequest() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 500, "{}"));
         try (CountersClient c = client(baseUrl)) {
             List<CounterDeclaration> tooMany = new ArrayList<>();
             for (int i = 0; i < 1001; i++) tooMany.add(new CounterDeclaration("key-" + i));
             assertThrows(CountersValidationException.class, () -> c.declare(
-                    new DeclareCountersRequest(List.of(), UndeclaredCounterWrites.REJECT)));
+                    new DeclareCountersRequest(List.of())));
             assertThrows(CountersValidationException.class, () -> c.declare(
-                    new DeclareCountersRequest(tooMany, UndeclaredCounterWrites.REJECT)));
+                    new DeclareCountersRequest(tooMany)));
             assertThrows(CountersValidationException.class, () -> c.declare(
-                    new DeclareCountersRequest(
-                            List.of(new CounterDeclaration("same"), new CounterDeclaration("same")),
-                            UndeclaredCounterWrites.REJECT)));
-            assertThrows(CountersValidationException.class, () -> c.declare(
-                    new DeclareCountersRequest(
-                            List.of(new CounterDeclaration("bad key")),
-                            UndeclaredCounterWrites.ALLOW)));
-            assertThrows(CountersValidationException.class, () -> c.declare(
-                    new DeclareCountersRequest(
-                            List.of(new CounterDeclaration("ok", "median")),
-                            UndeclaredCounterWrites.ALLOW)));
+                    new DeclareCountersRequest(java.util.Arrays.asList((CounterDeclaration) null))));
             assertTrue(recorded.isEmpty());
+        }
+    }
+
+    @Test
+    void counterWritePolicyReadsAndCompareAndSets() throws IOException {
+        String baseUrl = startServer((ex, r) -> {
+            if ("GET".equals(r.method())) {
+                json(ex, 200, "{\"undeclaredCounterWrites\":\"allow\",\"version\":1,\"explicit\":true}");
+            } else {
+                json(ex, 200, "{\"undeclaredCounterWrites\":\"reject\",\"version\":2,\"explicit\":true}");
+            }
+        });
+        try (CountersClient c = client(baseUrl)) {
+            assertEquals(1L, c.getCounterWritePolicy().version());
+            CounterWritePolicy updated = c.setCounterWritePolicy(
+                    new SetCounterWritePolicyRequest(UndeclaredCounterWrites.REJECT, 1));
+            assertEquals(2L, updated.version());
+            assertEquals("PUT", recorded.get(1).method());
+            assertEquals("/v1/counter-write-policy", recorded.get(1).rawPath());
         }
     }
 

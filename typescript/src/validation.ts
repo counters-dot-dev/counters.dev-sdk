@@ -3,7 +3,7 @@ import type {
   AmountInput,
   CounterDeclaration,
   DeclareCountersRequest,
-  Mode,
+  SetCounterWritePolicyRequest,
   SetMemberSeriesOptions,
   UndeclaredCounterWrites,
   ValueInput,
@@ -22,10 +22,9 @@ export function assertCounterKey(key: string): void {
   }
 }
 
-const MODES: readonly Mode[] = ["sum", "latest", "min", "max"];
 const UNDECLARED_WRITE_POLICIES: readonly UndeclaredCounterWrites[] = ["allow", "reject"];
 
-/** Validate an atomic declaration before any request is made. */
+/** Validate only request-wide declaration shape; the server reports key/config errors per entry. */
 export function assertDeclareCountersRequest(request: DeclareCountersRequest): void {
   if (request == null || typeof request !== "object" || Array.isArray(request)) {
     throw new CountersValidationError("declare request must be an object");
@@ -33,16 +32,8 @@ export function assertDeclareCountersRequest(request: DeclareCountersRequest): v
   if (!Array.isArray(request.counters) || request.counters.length < 1 || request.counters.length > 1000) {
     throw new CountersValidationError("declare counters must contain between 1 and 1000 entries");
   }
-  if (!UNDECLARED_WRITE_POLICIES.includes(request.undeclaredCounterWrites)) {
-    throw new CountersValidationError("undeclaredCounterWrites must be `allow` or `reject`");
-  }
-  const keys = new Set<string>();
   for (const [index, declaration] of request.counters.entries()) {
     assertCounterDeclaration(declaration, index);
-    if (keys.has(declaration.key)) {
-      throw new CountersValidationError(`declare counters contains duplicate key: ${declaration.key}`);
-    }
-    keys.add(declaration.key);
   }
 }
 
@@ -50,9 +41,8 @@ function assertCounterDeclaration(declaration: CounterDeclaration, index: number
   if (declaration == null || typeof declaration !== "object" || Array.isArray(declaration)) {
     throw new CountersValidationError(`declare counters[${index}] must be an object`);
   }
-  assertCounterKey(declaration.key);
-  if (declaration.memberMode !== undefined && !MODES.includes(declaration.memberMode)) {
-    throw new CountersValidationError(`declare counters[${index}].memberMode is invalid`);
+  if (typeof declaration.key !== "string") {
+    throw new CountersValidationError(`declare counters[${index}].key must be a string`);
   }
   if (
     declaration.memberSeriesEnabled !== undefined
@@ -61,6 +51,19 @@ function assertCounterDeclaration(declaration: CounterDeclaration, index: number
     throw new CountersValidationError(
       `declare counters[${index}].memberSeriesEnabled must be a boolean`,
     );
+  }
+}
+
+/** Validate a versioned organization-policy compare-and-set request. */
+export function assertSetCounterWritePolicyRequest(request: SetCounterWritePolicyRequest): void {
+  if (request == null || typeof request !== "object" || Array.isArray(request)) {
+    throw new CountersValidationError("counter write policy request must be an object");
+  }
+  if (!UNDECLARED_WRITE_POLICIES.includes(request.undeclaredCounterWrites)) {
+    throw new CountersValidationError("undeclaredCounterWrites must be `allow` or `reject`");
+  }
+  if (!Number.isSafeInteger(request.expectedVersion) || request.expectedVersion < 0) {
+    throw new CountersValidationError("expectedVersion must be a non-negative safe integer");
   }
 }
 

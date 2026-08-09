@@ -128,11 +128,12 @@ void memberSeriesConfig;
 void writable.list();
 const declaration: Promise<DeclareCountersResponse> = writable.declare({
   counters: [{ key: "views", memberMode: "sum", memberSeriesEnabled: true }],
-  undeclaredCounterWrites: "reject",
 });
 void declaration;
+void writable.getCounterWritePolicy();
+void writable.setCounterWritePolicy({ undeclaredCounterWrites: "reject", expectedVersion: 1 });
 // @ts-expect-error policy polarity is explicit.
-void writable.declare({ counters: [{ key: "views" }], undeclaredCounterWrites: "deny" });
+void writable.setCounterWritePolicy({ undeclaredCounterWrites: "deny", expectedVersion: 1 });
 // @ts-expect-error expectedEpoch must be a number.
 void writableCounter.setMemberSeries(true, { expectedEpoch: "0" });
 void writable.usage();

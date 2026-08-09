@@ -45,7 +45,7 @@ export interface Counter {
   updatedAt?: Date;
 }
 
-/** Desired immutable settings for one counter in an atomic declaration. */
+/** Desired immutable settings for one counter in a bounded declaration request. */
 export interface CounterDeclaration {
   key: string;
   memberMode?: Mode;
@@ -55,25 +55,40 @@ export interface CounterDeclaration {
 /** One result from a bulk declaration, in the same order as the request. */
 export interface CounterDeclarationResult {
   key: string;
-  status: "created" | "unchanged";
-  epoch: number;
+  status: "created" | "unchanged" | "error";
+  epoch?: number;
   memberMode?: Mode;
-  memberSeriesEnabled: boolean;
+  memberSeriesEnabled?: boolean;
   memberSeriesEnabledAt?: Date;
   memberSeriesEnabledBy?: string;
-  memberCount: number;
+  memberCount?: number;
+  error?: Problem;
 }
 
-/** Atomic startup declaration request. The full known key set must contain 1..1000 unique keys. */
+/** Startup declaration request. The server returns one result per key and commits bounded batches. */
 export interface DeclareCountersRequest {
   counters: CounterDeclaration[];
-  undeclaredCounterWrites: UndeclaredCounterWrites;
 }
 
-/** Successful atomic declaration response. */
+/** Declaration response; callers must inspect every per-key result. */
 export interface DeclareCountersResponse {
   results: CounterDeclarationResult[];
+  policy: CounterWritePolicy;
+}
+
+/** Versioned organization policy for implicit counter creation. */
+export interface CounterWritePolicy {
   undeclaredCounterWrites: UndeclaredCounterWrites;
+  version: number;
+  explicit: boolean;
+  updatedAt?: Date;
+  updatedBy?: string;
+}
+
+/** Compare-and-set request for the organization policy. */
+export interface SetCounterWritePolicyRequest {
+  undeclaredCounterWrites: UndeclaredCounterWrites;
+  expectedVersion: number;
 }
 
 /** Options for enabling or disabling per-member time series. */

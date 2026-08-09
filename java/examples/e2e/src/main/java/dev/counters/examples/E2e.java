@@ -18,6 +18,7 @@ import dev.counters.sdk.Counter;
 import dev.counters.sdk.CounterHandle;
 import dev.counters.sdk.CounterDeclaration;
 import dev.counters.sdk.CounterPage;
+import dev.counters.sdk.CounterWritePolicy;
 import dev.counters.sdk.CountersApiException;
 import dev.counters.sdk.CountersClient;
 import dev.counters.sdk.DeclareCountersRequest;
@@ -38,6 +39,7 @@ import dev.counters.sdk.ReadOnlyCountersClient;
 import dev.counters.sdk.SeriesParams;
 import dev.counters.sdk.SeriesPoint;
 import dev.counters.sdk.SeriesResponse;
+import dev.counters.sdk.SetCounterWritePolicyRequest;
 import dev.counters.sdk.SubmitOptions;
 import dev.counters.sdk.Usage;
 import dev.counters.sdk.UndeclaredCounterWrites;
@@ -163,11 +165,15 @@ public final class E2e {
             checkEq(signups.key(), NS + "signups", "handle exposes its validated key");
             INVOKED.add("CounterHandle.key");
 
-            // Startup provisioning: create/verify the known key atomically while leaving implicit
-            // creation enabled for the rest of this broad surface tour.
+            CounterWritePolicy policy = client.getCounterWritePolicy();
+            INVOKED.add("CountersClient.getCounterWritePolicy");
+            client.setCounterWritePolicy(new SetCounterWritePolicyRequest(
+                    UndeclaredCounterWrites.ALLOW, policy.version()));
+            INVOKED.add("CountersClient.setCounterWritePolicy");
+
+            // Startup provisioning: create/verify the known key with a per-key result.
             DeclareCountersResponse declared = client.declare(new DeclareCountersRequest(
-                    List.of(new CounterDeclaration(NS + "signups", null, true)),
-                    UndeclaredCounterWrites.ALLOW));
+                    List.of(new CounterDeclaration(NS + "signups", null, true))));
             INVOKED.add("CountersClient.declare");
             checkEq(declared.results().get(0).status(), "created", "fresh startup declaration creates its counter");
             Counter signupDetail = signups.get();

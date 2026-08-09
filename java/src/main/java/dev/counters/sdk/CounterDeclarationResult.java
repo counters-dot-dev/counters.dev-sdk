@@ -6,9 +6,10 @@ import java.time.Instant;
 public record CounterDeclarationResult(
         String key,
         String status,
-        long epoch,
+        Long epoch,
         String memberMode,
-        boolean memberSeriesEnabled,
+        Boolean memberSeriesEnabled,
         Instant memberSeriesEnabledAt,
         String memberSeriesEnabledBy,
-        long memberCount) {}
+        Long memberCount,
+        Problem error) {}

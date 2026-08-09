@@ -4,7 +4,7 @@ import { CountersValidationError } from "../src/errors.js";
 import { jsonResponse, mockFetch } from "./helpers.js";
 
 describe("counter declarations", () => {
-  it("serializes an atomic full-set declaration and parses native dates", async () => {
+  it("serializes a bounded full-set declaration and parses native dates", async () => {
     let request!: RequestInit;
     const client = new CountersClient({
       apiKey: "k",
@@ -22,52 +22,75 @@ describe("counter declarations", () => {
             memberSeriesEnabledBy: "api_key:key-id",
             memberCount: 0,
           }],
-          undeclaredCounterWrites: "reject",
+          policy: {
+            undeclaredCounterWrites: "reject",
+            version: 2,
+            explicit: true,
+            updatedAt: "2026-08-10T00:01:00Z",
+            updatedBy: "api_key:key-id",
+          },
         });
       }),
     });
 
     const result = await client.declare({
       counters: [{ key: "requests", memberMode: "sum", memberSeriesEnabled: true }],
-      undeclaredCounterWrites: "reject",
     });
 
     expect(request.method).toBe("POST");
     expect(JSON.parse(String(request.body))).toEqual({
       counters: [{ key: "requests", memberMode: "sum", memberSeriesEnabled: true }],
-      undeclaredCounterWrites: "reject",
     });
     expect(result.results[0]?.memberSeriesEnabledAt).toEqual(
       new Date("2026-08-10T00:00:00Z"),
     );
-    expect(result.undeclaredCounterWrites).toBe("reject");
+    expect(result.policy.undeclaredCounterWrites).toBe("reject");
+    expect(result.policy.updatedAt).toEqual(new Date("2026-08-10T00:01:00Z"));
     await client.close();
   });
 
-  it("rejects empty, oversized, duplicate, and malformed declarations before I/O", async () => {
+  it("rejects only invalid request-wide declaration shapes before I/O", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const client = new CountersClient({ apiKey: "k", fetch });
 
-    expect(() => client.declare({ counters: [], undeclaredCounterWrites: "reject" })).toThrow(
+    expect(() => client.declare({ counters: [] })).toThrow(
       CountersValidationError,
     );
     expect(() => client.declare({
       counters: Array.from({ length: 1001 }, (_, i) => ({ key: `key-${i}` })),
-      undeclaredCounterWrites: "allow",
     })).toThrow(CountersValidationError);
     expect(() => client.declare({
-      counters: [{ key: "same" }, { key: "same" }],
-      undeclaredCounterWrites: "reject",
-    })).toThrow(/duplicate key/);
-    expect(() => client.declare({
-      counters: [{ key: "bad key" }],
-      undeclaredCounterWrites: "reject",
+      counters: [null as never],
     })).toThrow(CountersValidationError);
-    expect(() => client.declare({
-      counters: [{ key: "ok", memberMode: "median" as never }],
-      undeclaredCounterWrites: "reject",
-    })).toThrow(/memberMode/);
     expect(fetch).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("reads and compare-and-sets the organization policy", async () => {
+    let calls = 0;
+    const client = new CountersClient({
+      apiKey: "k",
+      baseUrl: "https://x/v1",
+      fetch: mockFetch((url, init) => {
+        calls++;
+        expect(url.pathname).toBe("/v1/counter-write-policy");
+        if (calls === 1) {
+          expect(init.method).toBe("GET");
+          return jsonResponse(200, { undeclaredCounterWrites: "allow", version: 1, explicit: true });
+        }
+        expect(init.method).toBe("PUT");
+        expect(JSON.parse(String(init.body))).toEqual({
+          undeclaredCounterWrites: "reject",
+          expectedVersion: 1,
+        });
+        return jsonResponse(200, { undeclaredCounterWrites: "reject", version: 2, explicit: true });
+      }),
+    });
+    expect((await client.getCounterWritePolicy()).version).toBe(1);
+    expect((await client.setCounterWritePolicy({
+      undeclaredCounterWrites: "reject",
+      expectedVersion: 1,
+    })).version).toBe(2);
     await client.close();
   });
 });

@@ -15,6 +15,7 @@ import {
   assertMemberKey,
   assertMetadata,
   assertSetMemberSeriesOptions,
+  assertSetCounterWritePolicyRequest,
   assertWindow,
   describeValue,
   toAmount,
@@ -27,6 +28,7 @@ import type {
   Counter,
   CounterDeclarationResult,
   CounterPage,
+  CounterWritePolicy,
   DeclareCountersRequest,
   DeclareCountersResponse,
   DerivedSeriesPoint,
@@ -50,6 +52,7 @@ import type {
   SeriesPoint,
   SeriesResponse,
   SetMemberSeriesOptions,
+  SetCounterWritePolicyRequest,
   SubmitOptions,
   Usage,
   Value,
@@ -169,12 +172,29 @@ export class CountersClient {
     );
   }
 
-  /** Atomically create or verify the complete known counter set and set the implicit-create policy. */
+  /** Create or verify the complete known counter set with per-key, bounded-batch results. */
   declare(request: DeclareCountersRequest): Promise<DeclareCountersResponse> {
     assertDeclareCountersRequest(request);
     return parseWireResponse(
       this.http.request<WireDeclareCountersResponse>("POST", "/counters", { body: request }),
       parseDeclareCountersResponse,
+    );
+  }
+
+  /** Read the organization-wide implicit-create policy and its compare-and-set version. */
+  getCounterWritePolicy(): Promise<CounterWritePolicy> {
+    return parseWireResponse(
+      this.http.request<WireCounterWritePolicy>("GET", "/counter-write-policy"),
+      parseCounterWritePolicy,
+    );
+  }
+
+  /** Compare-and-set the organization-wide implicit-create policy. */
+  setCounterWritePolicy(request: SetCounterWritePolicyRequest): Promise<CounterWritePolicy> {
+    assertSetCounterWritePolicyRequest(request);
+    return parseWireResponse(
+      this.http.request<WireCounterWritePolicy>("PUT", "/counter-write-policy", { body: request }),
+      parseCounterWritePolicy,
     );
   }
 
@@ -807,8 +827,13 @@ type WireCounterDeclarationResult = Omit<CounterDeclarationResult, "memberSeries
   memberSeriesEnabledAt?: string | null;
 };
 
-type WireDeclareCountersResponse = Omit<DeclareCountersResponse, "results"> & {
+type WireCounterWritePolicy = Omit<CounterWritePolicy, "updatedAt"> & {
+  updatedAt?: string | null;
+};
+
+type WireDeclareCountersResponse = Omit<DeclareCountersResponse, "results" | "policy"> & {
   results: WireCounterDeclarationResult[];
+  policy: WireCounterWritePolicy;
 };
 
 type WireMemberSeriesConfig = Omit<MemberSeriesConfig, "enabledAt"> & {
@@ -899,6 +924,7 @@ function parseCounter(counter: WireCounter): Counter {
 function parseDeclareCountersResponse(response: WireDeclareCountersResponse): DeclareCountersResponse {
   return {
     ...response,
+    policy: parseCounterWritePolicy(response.policy),
     results: response.results.map(({ memberSeriesEnabledAt, ...result }) => ({
       ...result,
       ...(memberSeriesEnabledAt == null
@@ -910,6 +936,14 @@ function parseDeclareCountersResponse(response: WireDeclareCountersResponse): De
             ),
           }),
     })),
+  };
+}
+
+function parseCounterWritePolicy(policy: WireCounterWritePolicy): CounterWritePolicy {
+  const { updatedAt, ...fields } = policy;
+  return {
+    ...fields,
+    ...(updatedAt == null ? {} : { updatedAt: parseDate(updatedAt, "policy.updatedAt") }),
   };
 }
 

@@ -45,9 +45,9 @@ class PublicApiShapeTest {
                         Instant.class, String.class, Long.class, Instant.class, Instant.class});
         assertRecordShape(CounterDeclarationResult.class,
                 new String[] {"key", "status", "epoch", "memberMode", "memberSeriesEnabled",
-                        "memberSeriesEnabledAt", "memberSeriesEnabledBy", "memberCount"},
-                new Class<?>[] {String.class, String.class, long.class, String.class, boolean.class,
-                        Instant.class, String.class, long.class});
+                        "memberSeriesEnabledAt", "memberSeriesEnabledBy", "memberCount", "error"},
+                new Class<?>[] {String.class, String.class, Long.class, String.class, Boolean.class,
+                        Instant.class, String.class, Long.class, Problem.class});
         assertRecordShape(MemberSeriesConfig.class,
                 new String[] {"key", "enabled", "memberCount", "maxMembersWithSeries", "mode", "enabledAt",
                         "enabledBy"},

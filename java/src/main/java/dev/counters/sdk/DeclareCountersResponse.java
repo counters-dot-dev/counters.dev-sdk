@@ -5,4 +5,4 @@ import java.util.List;
 /** Successful atomic counter declaration response. */
 public record DeclareCountersResponse(
         List<CounterDeclarationResult> results,
-        UndeclaredCounterWrites undeclaredCounterWrites) {}
+        CounterWritePolicy policy) {}
