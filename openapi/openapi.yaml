@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Counters API
-  version: 0.7.0
+  version: 0.9.0
   summary: Multi-tenant arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
@@ -19,6 +19,18 @@ info:
       `clear`) is rejected with `409 Conflict` rather than returning a result the second operation never produced.
     - **Auth:** SDK/machine calls use an organization API key (HTTP Bearer). All data is scoped to the key's organization.
     - **Counters may go negative.** `clear` resets to zero by starting a new epoch; historical series are retained.
+
+    ## Counter declaration and strict-key policy
+    - Clients may submit their full known counter set and desired settings at startup with one
+      `POST /counters`. The service processes bounded transaction batches and returns per-key results:
+      matching declarations are cheap no-ops, valid new keys land, and invalid or mismatched keys are
+      isolated errors. Newly created counters alone consume one monthly operation each.
+    - `undeclaredCounterWrites` is a per-organization safety policy with explicit polarity. `allow`
+      preserves implicit counter creation by ordinary writes. `reject` makes the declared counter rows
+      the allowlist: an ordinary write to an absent key fails with `409` and problem type
+      `urn:counters:problem:counter-not-declared`. Read it and update it with versioned CAS through
+      `/counter-write-policy`; startup declarations cannot overwrite it. A missing row is implicit
+      `allow` during rolling deployment. Declaration remains the only way to create a key under reject.
 
     ## Dashboard direct reads
     - Browser dashboard core reads for usage, counters, values, series, leaderboards, member state, and
@@ -266,6 +278,8 @@ paths:
         - name: groupBy
           in: query
           schema: { type: string, enum: [member] }
+        - $ref: '#/components/parameters/MemberSeriesTop'
+        - $ref: '#/components/parameters/MemberSeriesOther'
       responses:
         '200':
           description: Counter or member-dimensional series.
@@ -458,7 +472,89 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /counter-write-policy:
+    get:
+      operationId: getCounterWritePolicy
+      summary: Read the organization's implicit-create policy
+      description: |
+        Returns the organization-wide policy and its compare-and-set version. A policy-less
+        organization reads as implicit `allow`, version `0`, `explicit: false`; this preserves
+        create-on-write through rolling deployments until an administrator explicitly stores a
+        policy. Publishable tokens cannot call this operation.
+      tags: [counters]
+      responses:
+        '200':
+          description: Current explicit policy or the implicit version-zero default.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterWritePolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      operationId: setCounterWritePolicy
+      summary: Compare-and-set the organization's implicit-create policy
+      description: |
+        Stores the organization-wide policy only when `expectedVersion` matches the current version.
+        Read first, then supply the returned version; one of two concurrent updates wins and the other
+        receives `409`, so separate clients cannot silently clobber each other. Setting a policy on an
+        implicit policy-less organization requires `expectedVersion: 0` and creates version `1`.
+        Publishable tokens cannot call this operation.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetCounterWritePolicyRequest' }
+      responses:
+        '200':
+          description: The stored policy. An exact explicit replay is a storage no-op.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterWritePolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /counters:
+    post:
+      operationId: declareCounters
+      summary: Declare the organization's complete known counter set
+      description: |
+        Creates or verifies one to 1000 counter declarations for idempotent startup provisioning:
+        submit the client's full known key set and settings on every startup. Work is committed in
+        stable batches of at most 25 keys, bounding each transaction's advisory locks far below the
+        PostgreSQL lock-table budget. Every key retains its organization-generation and repair fence.
+
+        Each result is `created`, `unchanged`, or `error`. An invalid key, duplicate, tombstone, or
+        configuration mismatch affects only that result; valid keys still land. A cap, quota, or fence
+        failure rolls back only its bounded batch and appears on those results. Callers must inspect
+        every result. An exact match performs no counter/configuration write and consumes no monthly
+        op; a newly created counter consumes one monthly op. Board mode is immutable once declared,
+        including before member data exists. Enabling member series happens in the same fenced,
+        locked transaction as creation, before any member writes.
+
+        This operation never changes the organization-wide undeclared-write policy. Read and update
+        that versioned setting through `GET`/`PUT /counter-write-policy`; separating it from per-client
+        startup declarations prevents last-writer-wins policy changes across clients sharing an org.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeclareCountersRequest' }
+      responses:
+        '200':
+          description: One independent result per declaration plus the policy observed after completion.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeclareCountersResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
     get:
       operationId: listCounters
       summary: List counters in the organization
@@ -482,7 +578,10 @@ paths:
     get:
       operationId: getCounter
       summary: Get a counter's metadata and current value
-      description: The counter's key, current-epoch value, and epoch. 404 once deleted.
+      description: |
+        The counter's key, current-epoch value, epoch, member configuration, dimensional-series state,
+        most recent enable actor/time, and current member count. Optional configuration fields are
+        absent when not applicable. 404 once deleted.
       tags: [counters]
       responses:
         '200':
@@ -506,6 +605,42 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /counters/{counterKey}/member-series:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    put:
+      operationId: setCounterMemberSeries
+      summary: Enable or disable per-member time series
+      description: |
+        Sets the counter's per-member time-series policy using a full organization API key.
+        Publishable tokens cannot call this operation. Enabling is non-retroactive and is rejected
+        when the current-epoch member count exceeds the plan's dimensional-series cap. An optional
+        `expectedEpoch` makes the update conditional, so automation cannot silently configure a board
+        that was cleared underneath it.
+
+        `enabledAt` and `enabledBy` record the most recent disabled-to-enabled transition. They are
+        retained across disable, and an idempotent request that leaves the state unchanged does not
+        rewrite them. `enabledBy` identifies the calling API-key id; no plane-to-hub activity event is
+        emitted by this operation.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CounterMemberSeriesRequest' }
+      responses:
+        '200':
+          description: Current member-series configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberSeriesConfig' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /counters/{counterKey}/add:
     parameters:
       - $ref: '#/components/parameters/CounterKey'
@@ -513,7 +648,10 @@ paths:
     post:
       operationId: addToCounter
       summary: Add to a counter
-      description: Increments by a non-negative amount. Creates the counter if absent (subject to the plan's counter limit).
+      description: |
+        Increments by a non-negative amount. Creates the counter if absent (subject to the plan's
+        counter limit) when the organization's `undeclaredCounterWrites` policy is `allow`. Under
+        `reject`, an absent key fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -539,7 +677,10 @@ paths:
     post:
       operationId: subtractFromCounter
       summary: Subtract from a counter
-      description: Decrements by a non-negative amount. The counter may go negative.
+      description: |
+        Decrements by a non-negative amount. The counter may go negative. An absent key is implicitly
+        created only when the organization's `undeclaredCounterWrites` policy is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -647,10 +788,12 @@ paths:
         - name: groupBy
           in: query
           description: >-
-            `groupBy=member` returns a series for every member with data in range (member-series):
-            gapfilled dense on a sum board, sparse per member on a score board. Requires member series
-            enabled and `bucket` >= 1h. Mutually exclusive with `member`.
+            `groupBy=member` returns series for members with data in range (member-series), optionally
+            restricted by `top`: gapfilled dense on a sum board, sparse per member on a score board.
+            Requires member series enabled and `bucket` >= 1h. Mutually exclusive with `member`.
           schema: { type: string, enum: [member] }
+        - $ref: '#/components/parameters/MemberSeriesTop'
+        - $ref: '#/components/parameters/MemberSeriesOther'
       responses:
         '200':
           description: >-
@@ -772,7 +915,10 @@ paths:
     post:
       operationId: addToMember
       summary: Add to a member's value (sum board)
-      description: Accumulates a non-negative delta onto the member's value; configures the board as `sum` on first use.
+      description: |
+        Accumulates a non-negative delta onto the member's value; configures the board as `sum` on
+        first use. An absent counter is implicitly created only when `undeclaredCounterWrites` is
+        `allow`; under `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -799,7 +945,10 @@ paths:
     post:
       operationId: subtractFromMember
       summary: Subtract from a member's value (sum board)
-      description: Decrements the member's value by a non-negative delta. The member (and group) may go negative.
+      description: |
+        Decrements the member's value by a non-negative delta. The member (and group) may go negative.
+        An absent counter is implicitly created only when `undeclaredCounterWrites` is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -830,6 +979,8 @@ paths:
         Submits a signed score to a score board — `latest` overwrites, `min`/`max` keep-best. A
         worse-than-standing submit is still a successful, metered call returning the standing value
         with `memberAccepted: false`. `mode` is required on the first submit to an unconfigured board.
+        An absent counter is implicitly created only when `undeclaredCounterWrites` is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -876,7 +1027,8 @@ paths:
         The SDK's primary write path. Operations are coalesced client-side and submitted together. Each operation
         carries its own idempotency key (there is no batch-level key), so the batch is safe to retry. The HTTP call
         succeeding means the batch was accepted — inspect each per-operation result, including a possible `403`
-        live-idempotency-key-cap error.
+        live-idempotency-key-cap error. When `undeclaredCounterWrites` is `reject`, an operation for an
+        absent counter receives its own `409` `counter-not-declared` error result; other entries continue.
       tags: [operations]
       requestBody:
         required: true
@@ -1100,6 +1252,25 @@ components:
       in: query
       description: Season to read; defaults to the counter's current epoch. Past seasons stay readable after clear.
       schema: { type: integer, format: int64 }
+    MemberSeriesTop:
+      name: top
+      in: query
+      description: >-
+        With `groupBy=member`, select the top N members over the requested range. Ranking follows
+        board semantics: range sum for `sum`, range minimum for `min`, range maximum for `max`,
+        and the newest submitted value for `latest`. N must not exceed the organization's resolved
+        `maxMembersWithSeries` entitlement. The absolute response budget is 25,000 points, so
+        `top * bucketCount` (plus one series when `other=true`) must fit; reduce `top` or use a
+        coarser bucket when it does not. Requires `groupBy=member`.
+      schema: { type: integer, minimum: 1 }
+    MemberSeriesOther:
+      name: other
+      in: query
+      description: >-
+        With `groupBy=member&top=N` on a sum board, append a synthetic `$other` series containing
+        the per-bucket sum of all omitted members. Defaults to false. `other=true` is rejected on
+        `min`, `max`, and `latest` boards because a combined score series has no coherent meaning.
+      schema: { type: boolean, default: false }
 
   schemas:
     Amount:
@@ -1125,6 +1296,126 @@ components:
             instant instead of ingest time (for offline spools flushing late). Bounded: at most 5
             minutes in the future and no older than the plan's retention window (400 otherwise).
             Totals are unaffected — only series bucketing.
+    UndeclaredCounterWrites:
+      type: string
+      enum: [allow, reject]
+      description: |
+        Per-organization implicit-create policy with explicit polarity. `allow` lets ordinary data
+        writes create an absent counter (the backwards-compatible default for existing organizations).
+        `reject` makes live counter rows the strict-key allowlist: an absent key returns a typed `409`
+        until it is created through `POST /counters`. This is an organization safety policy, not a
+        plan entitlement or temporary grant.
+    CounterWritePolicy:
+      type: object
+      required: [undeclaredCounterWrites, version, explicit]
+      properties:
+        undeclaredCounterWrites:
+          $ref: '#/components/schemas/UndeclaredCounterWrites'
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: CAS version. Zero exists only for the implicit policy-row-absent default.
+        explicit:
+          type: boolean
+          description: False only when no policy row exists and implicit `allow` is in effect.
+        updatedAt:
+          type: string
+          format: date-time
+          description: Present for an explicitly stored policy.
+        updatedBy:
+          type: string
+          description: API-key actor that most recently changed the explicit policy.
+    SetCounterWritePolicyRequest:
+      type: object
+      required: [undeclaredCounterWrites, expectedVersion]
+      properties:
+        undeclaredCounterWrites:
+          $ref: '#/components/schemas/UndeclaredCounterWrites'
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Version returned by the latest GET. A stale value returns 409.
+    CounterDeclaration:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: '^[A-Za-z0-9._:-]+$'
+        memberMode:
+          description: >-
+            Desired member-board aggregation mode. Omit for an unconfigured scalar counter. A matching
+            repeat is a no-op; any mismatch on an existing counter returns an error for this key. The
+            mode is immutable once declared, even when the board has no member data.
+          allOf:
+            - $ref: '#/components/schemas/Mode'
+        memberSeriesEnabled:
+          type: boolean
+          default: false
+          description: >-
+            Whether per-member time series must be enabled. Enabling during creation happens before any
+            member writes and records this API key as the enabling actor.
+    DeclareCountersRequest:
+      type: object
+      required: [counters]
+      properties:
+        counters:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: >-
+            The client's full known counter set. Duplicate entries become per-key errors. Each bounded
+            transaction contains at most 25 keys; callers must inspect every result.
+          items: { $ref: '#/components/schemas/CounterDeclaration' }
+    CounterDeclarationResult:
+      type: object
+      required: [key, status]
+      properties:
+        key: { type: string }
+        status:
+          type: string
+          enum: [created, unchanged, error]
+          description: >-
+            `unchanged` means the declaration exactly matched and performed no counter/config write;
+            `error` means only this key (or its bounded transaction batch) failed.
+        epoch: { type: integer, format: int64 }
+        memberMode: { $ref: '#/components/schemas/Mode' }
+        memberSeriesEnabled: { type: boolean }
+        memberSeriesEnabledAt:
+          type: string
+          format: date-time
+          description: >-
+            Most recent disabled-to-enabled transition; absent until first enabled. When the actor has
+            `unknown:*` provenance, this is a migration or rolling-upgrade fallback timestamp rather
+            than the historical enable time.
+        memberSeriesEnabledBy:
+          type: string
+          description: >-
+            Actor responsible for `memberSeriesEnabledAt`; absent until first enabled. Normally
+            `api_key:<uuid>` or `user:<id>`; `unknown:pre-audit` and `unknown:rolling-upgrade` are honest
+            compatibility sentinels.
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count at declaration time.
+        error:
+          allOf:
+            - $ref: '#/components/schemas/Problem'
+          description: Present when status is `error`; includes an HTTP-style status and reason.
+    DeclareCountersResponse:
+      type: object
+      required: [results, policy]
+      properties:
+        results:
+          type: array
+          description: One result per declaration, in request order.
+          items: { $ref: '#/components/schemas/CounterDeclarationResult' }
+        policy:
+          $ref: '#/components/schemas/CounterWritePolicy'
     Counter:
       type: object
       required: [key, value, epoch]
@@ -1134,6 +1425,30 @@ components:
         epoch:
           type: integer
           description: Incremented by clear; the value sums deltas in the current epoch.
+        memberMode:
+          description: Board aggregation mode; present on the full-access counter detail read when configured.
+          allOf:
+            - $ref: '#/components/schemas/Mode'
+        memberSeriesEnabled:
+          type: boolean
+          description: Present on the full-access counter detail read.
+        memberSeriesEnabledAt:
+          type: string
+          format: date-time
+          description: >-
+            Most recent disabled-to-enabled transition; present on the full-access detail read after
+            member series has first been enabled and retained across disable. With an `unknown:*`
+            actor, this is a migration or rolling-upgrade fallback timestamp, not the historical enable time.
+        memberSeriesEnabledBy:
+          type: string
+          description: >-
+            Actor responsible for `memberSeriesEnabledAt`, e.g. `api_key:<uuid>` or `user:<id>`.
+            Compatibility values `unknown:pre-audit` and `unknown:rolling-upgrade` explicitly mean the
+            historical actor is unavailable.
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count; present on the full-access counter detail read.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     ValueResponse:
@@ -1387,6 +1702,41 @@ components:
       description: |
         Board aggregation mode. `sum` accumulates deltas (fully counter-integrated); `latest`/`min`/`max`
         submit replace/keep-best scores. Set by the first member write, then immutable.
+    CounterMemberSeriesRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        expectedEpoch:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Optional compare-and-set guard. The request fails with 409 if the counter's current epoch
+            differs, preventing automation from configuring a board that was concurrently cleared.
+    MemberSeriesConfig:
+      type: object
+      required: [key, enabled, memberCount, maxMembersWithSeries]
+      properties:
+        key: { type: string }
+        enabled: { type: boolean }
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count observed by the toggle.
+        maxMembersWithSeries:
+          type: integer
+          minimum: 0
+          description: The calling organization's resolved dimensional-series member cap.
+        mode: { $ref: '#/components/schemas/Mode' }
+        enabledAt:
+          type: string
+          format: date-time
+          description: Most recent disabled-to-enabled transition; absent until first enabled and retained across disable.
+        enabledBy:
+          type: string
+          description: Actor responsible for `enabledAt`, e.g. `api_key:<uuid>` or `user:<id>`.
     MemberAmountRequest:
       type: object
       required: [amount]
@@ -1549,7 +1899,7 @@ components:
         Per-member multi-series (`groupBy=member`). Sum boards are gapfilled dense; score boards return
         sparse per-member point lists (same rule as the single-member score series — a gap is "no
         submission", not zero).
-      required: [counterKey, bucket, mode, range, series]
+      required: [counterKey, bucket, mode, range, memberCount, selectedCount, truncated, series]
       properties:
         counterKey: { type: string }
         bucket: { type: string }
@@ -1565,6 +1915,20 @@ components:
           properties:
             from: { type: string, format: date-time }
             to: { type: string, format: date-time }
+        memberCount:
+          type: integer
+          minimum: 0
+          description: >-
+            Members with data in the requested range before top-N selection.
+        selectedCount:
+          type: integer
+          minimum: 0
+          description: >-
+            Real member series selected into the response; excludes the synthetic `$other` series.
+        truncated:
+          type: boolean
+          description: >-
+            True when top-N selection omitted at least one range member.
         series:
           type: array
           items: { $ref: '#/components/schemas/MemberSeriesEntry' }
@@ -1712,9 +2076,18 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/DashboardEntitlementsStale' }
     Conflict:
-      description: >-
-        The `Idempotency-Key` was first used for a different operation; replaying it here would return a
-        result this operation never produced. Retry with a fresh key (or the operation the key belongs to).
+      description: |
+        A state precondition was not met. Stable cases include:
+
+        - `urn:counters:problem:counter-not-declared`: the organization's
+          `undeclaredCounterWrites` policy is `reject` and an ordinary write targeted an absent key;
+          declare it with `POST /counters` before retrying.
+        - a bulk declaration's desired settings do not match existing counter state; the entire
+          declaration request was rolled back.
+        - `urn:counters:problem:counter-epoch-mismatch`: `expectedEpoch` differs from the counter's
+          current epoch.
+        - an `Idempotency-Key` was first used for a different operation; retry with a fresh key (or
+          the operation the key belongs to).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

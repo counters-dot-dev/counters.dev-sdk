@@ -63,6 +63,8 @@
     { "name": "member-series-garbage-key-401", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&member=w1", "auth": "garbage" }, "expect": { "status": 401 } },
     { "name": "member-series-member-and-groupby-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&member=w1&groupBy=member", "auth": "A" }, "expect": { "status": 400 } },
     { "name": "member-series-groupby-bad-value-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&groupBy=teams", "auth": "A" }, "expect": { "status": 400 } },
+    { "name": "member-series-top-without-groupby-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&top=1", "auth": "A" }, "expect": { "status": 400 } },
+    { "name": "member-series-other-invalid-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&groupBy=member&top=1&other=maybe", "auth": "A" }, "expect": { "status": 400 } },
     { "name": "window-leaderboard-no-auth-401", "request": { "method": "GET", "path": "/v1/counters/rocks/leaderboard?window=7d", "auth": null }, "expect": { "status": 401 } },
 
     { "name": "value-preflight-cors-204", "request": { "method": "OPTIONS", "path": "/v1/counters/anything/value", "auth": null }, "expect": { "status": 204, "headers": { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" } } },
