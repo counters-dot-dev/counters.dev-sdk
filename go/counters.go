@@ -250,10 +250,99 @@ type Counter struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Epoch int64  `json:"epoch"`
+	// MemberMode and dimensional-series fields are present on the full counter detail read.
+	MemberMode            string     `json:"memberMode,omitempty"`
+	MemberSeriesEnabled   *bool      `json:"memberSeriesEnabled,omitempty"`
+	MemberSeriesEnabledAt *time.Time `json:"memberSeriesEnabledAt,omitempty"`
+	MemberSeriesEnabledBy string     `json:"memberSeriesEnabledBy,omitempty"`
+	MemberCount           *int64     `json:"memberCount,omitempty"`
 	// CreatedAt/UpdatedAt are optional in the API (spec: date-time), so they are pointers: nil when
 	// the server omits them. time.Time parses the RFC 3339 wire format.
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
+}
+
+// UndeclaredCounterWrites controls whether ordinary writes may implicitly create absent counters.
+type UndeclaredCounterWrites string
+
+const (
+	// UndeclaredCounterWritesAllow permits ordinary writes to create absent counters.
+	UndeclaredCounterWritesAllow UndeclaredCounterWrites = "allow"
+	// UndeclaredCounterWritesReject rejects ordinary writes until the key is declared.
+	UndeclaredCounterWritesReject UndeclaredCounterWrites = "reject"
+)
+
+// CounterDeclaration is the desired immutable configuration for one counter.
+type CounterDeclaration struct {
+	Key                 string `json:"key"`
+	MemberMode          string `json:"memberMode,omitempty"`
+	MemberSeriesEnabled *bool  `json:"memberSeriesEnabled,omitempty"`
+}
+
+// DeclareCountersRequest declares the client's complete known counter set. The service commits
+// bounded batches and returns one result per declaration, so callers must inspect every result.
+type DeclareCountersRequest struct {
+	Counters []CounterDeclaration `json:"counters"`
+}
+
+// CounterDeclarationResult is one result from a bulk declaration, in request order.
+type CounterDeclarationResult struct {
+	Key                   string     `json:"key"`
+	Status                string     `json:"status"`
+	Epoch                 *int64     `json:"epoch,omitempty"`
+	MemberMode            string     `json:"memberMode,omitempty"`
+	MemberSeriesEnabled   *bool      `json:"memberSeriesEnabled,omitempty"`
+	MemberSeriesEnabledAt *time.Time `json:"memberSeriesEnabledAt,omitempty"`
+	MemberSeriesEnabledBy string     `json:"memberSeriesEnabledBy,omitempty"`
+	MemberCount           *int64     `json:"memberCount,omitempty"`
+	Error                 *Problem   `json:"error,omitempty"`
+}
+
+// DeclareCountersResponse contains per-key results and the current organization write policy.
+type DeclareCountersResponse struct {
+	Results []CounterDeclarationResult `json:"results"`
+	Policy  CounterWritePolicy         `json:"policy"`
+}
+
+// Problem is an RFC 9457-style error embedded in a per-key declaration result.
+type Problem struct {
+	Type     string `json:"type,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Status   *int   `json:"status,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// CounterWritePolicy is the versioned organization policy for implicit counter creation.
+// A policy-less organization reads as allow, version zero, with Explicit false.
+type CounterWritePolicy struct {
+	UndeclaredCounterWrites UndeclaredCounterWrites `json:"undeclaredCounterWrites"`
+	Version                 int64                   `json:"version"`
+	Explicit                bool                    `json:"explicit"`
+	UpdatedAt               *time.Time              `json:"updatedAt,omitempty"`
+	UpdatedBy               string                  `json:"updatedBy,omitempty"`
+}
+
+// SetCounterWritePolicyRequest compare-and-sets the organization-wide implicit-create policy.
+type SetCounterWritePolicyRequest struct {
+	UndeclaredCounterWrites UndeclaredCounterWrites `json:"undeclaredCounterWrites"`
+	ExpectedVersion         int64                   `json:"expectedVersion"`
+}
+
+// SetMemberSeriesOptions contains an optional compare-and-set epoch guard.
+type SetMemberSeriesOptions struct {
+	ExpectedEpoch *int64
+}
+
+// MemberSeriesConfig is the counter's current per-member time-series configuration.
+type MemberSeriesConfig struct {
+	Key                  string     `json:"key"`
+	Enabled              bool       `json:"enabled"`
+	MemberCount          int64      `json:"memberCount"`
+	MaxMembersWithSeries int64      `json:"maxMembersWithSeries"`
+	Mode                 string     `json:"mode,omitempty"`
+	EnabledAt            *time.Time `json:"enabledAt,omitempty"`
+	EnabledBy            string     `json:"enabledBy,omitempty"`
 }
 
 // ValueResponse is a counter's current value. Value is a signed arbitrary-precision integer
@@ -860,6 +949,53 @@ func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	return &out, nil
 }
 
+// Get reads full counter detail, including member mode and dimensional-series configuration.
+func (h *CounterHandle) Get(ctx context.Context) (*Counter, error) {
+	var out Counter
+	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key), nil, "", nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetMemberSeries enables or disables per-member time series. At most one options value may be
+// supplied; ExpectedEpoch makes the update fail if the counter was concurrently cleared.
+func (h *CounterHandle) SetMemberSeries(
+	ctx context.Context,
+	enabled bool,
+	opts ...SetMemberSeriesOptions,
+) (*MemberSeriesConfig, error) {
+	if len(opts) > 1 {
+		return nil, &ValidationError{"at most one SetMemberSeriesOptions value may be supplied"}
+	}
+	var expectedEpoch *int64
+	if len(opts) == 1 {
+		expectedEpoch = opts[0].ExpectedEpoch
+		if expectedEpoch != nil && *expectedEpoch < 0 {
+			return nil, &ValidationError{"expectedEpoch must be non-negative"}
+		}
+	}
+	body := map[string]any{"enabled": enabled}
+	if expectedEpoch != nil {
+		body["expectedEpoch"] = *expectedEpoch
+	}
+	var out MemberSeriesConfig
+	err := h.client.do(
+		ctx,
+		"PUT",
+		"/counters/"+url.PathEscape(h.Key)+"/member-series",
+		body,
+		"",
+		nil,
+		&out,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Series reads the counter's time series (delta per bucket) over [p.From, p.To).
 func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
 	q, err := seriesQuery(p)
@@ -1251,6 +1387,77 @@ func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPa
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Declare creates or verifies the client's complete known counter set in bounded server-side
+// batches. The request must contain 1..1000 declarations. Invalid keys, modes, and duplicates are
+// deliberately sent to the service so they can be reported without suppressing valid entries.
+func (c *Client) Declare(ctx context.Context, request DeclareCountersRequest) (*DeclareCountersResponse, error) {
+	if len(request.Counters) < 1 || len(request.Counters) > 1000 {
+		return nil, &ValidationError{"declare counters must contain between 1 and 1000 entries"}
+	}
+	var out DeclareCountersResponse
+	if err := c.do(ctx, "POST", "/counters", request, "", nil, &out); err != nil {
+		return nil, err
+	}
+	if err := validateCounterWritePolicy(out.Policy); err != nil {
+		return nil, err
+	}
+	for i, result := range out.Results {
+		if result.Status != "created" && result.Status != "unchanged" && result.Status != "error" {
+			return nil, &ValidationError{fmt.Sprintf(
+				"declaration result %d has invalid status: %s",
+				i,
+				result.Status,
+			)}
+		}
+	}
+	return &out, nil
+}
+
+// GetCounterWritePolicy reads the organization-wide implicit-create policy and its CAS version.
+func (c *Client) GetCounterWritePolicy(ctx context.Context) (*CounterWritePolicy, error) {
+	var out CounterWritePolicy
+	if err := c.do(ctx, "GET", "/counter-write-policy", nil, "", nil, &out); err != nil {
+		return nil, err
+	}
+	if err := validateCounterWritePolicy(out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetCounterWritePolicy compare-and-sets the organization-wide implicit-create policy.
+func (c *Client) SetCounterWritePolicy(
+	ctx context.Context,
+	request SetCounterWritePolicyRequest,
+) (*CounterWritePolicy, error) {
+	if request.UndeclaredCounterWrites != UndeclaredCounterWritesAllow &&
+		request.UndeclaredCounterWrites != UndeclaredCounterWritesReject {
+		return nil, &ValidationError{"undeclaredCounterWrites must be `allow` or `reject`"}
+	}
+	if request.ExpectedVersion < 0 {
+		return nil, &ValidationError{"expectedVersion must be non-negative"}
+	}
+	var out CounterWritePolicy
+	if err := c.do(ctx, "PUT", "/counter-write-policy", request, "", nil, &out); err != nil {
+		return nil, err
+	}
+	if err := validateCounterWritePolicy(out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validateCounterWritePolicy(policy CounterWritePolicy) error {
+	if policy.UndeclaredCounterWrites != UndeclaredCounterWritesAllow &&
+		policy.UndeclaredCounterWrites != UndeclaredCounterWritesReject {
+		return &ValidationError{"response undeclaredCounterWrites must be `allow` or `reject`"}
+	}
+	if policy.Version < 0 {
+		return &ValidationError{"response policy version must be non-negative"}
+	}
+	return nil
 }
 
 // Usage reads the organization's current quota state. Intended for periodic polling, not

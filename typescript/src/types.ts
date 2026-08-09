@@ -15,6 +15,8 @@ export type Granularity = "1m" | "5m" | "1h" | "1d" | "1w" | "1mo";
 export type OperationType = "add" | "subtract" | "clear" | "delete";
 /** Leaderboard aggregation mode. Set by the first member write to a board, then immutable. */
 export type Mode = "sum" | "latest" | "min" | "max";
+/** Whether ordinary writes may implicitly create a counter that has not been declared. */
+export type UndeclaredCounterWrites = "allow" | "reject";
 /** Trailing-window sizes for a windowed leaderboard read (`leaderboard?window=`). */
 export type Window = "1h" | "6h" | "12h" | "1d" | "7d" | "30d";
 /**
@@ -29,8 +31,83 @@ export interface Counter {
   key: string;
   value: Value;
   epoch: number;
+  /** Member-board aggregation mode, present on a configured counter detail read. */
+  memberMode?: Mode;
+  /** Whether per-member time series are currently enabled, present on a counter detail read. */
+  memberSeriesEnabled?: boolean;
+  /** Most recent disabled-to-enabled transition, retained across disable. */
+  memberSeriesEnabledAt?: Date;
+  /** Actor responsible for `memberSeriesEnabledAt`. */
+  memberSeriesEnabledBy?: string;
+  /** Current-epoch member count, present on a counter detail read. */
+  memberCount?: number;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/** Desired immutable settings for one counter in a bounded declaration request. */
+export interface CounterDeclaration {
+  key: string;
+  memberMode?: Mode;
+  memberSeriesEnabled?: boolean;
+}
+
+/** One result from a bulk declaration, in the same order as the request. */
+export interface CounterDeclarationResult {
+  key: string;
+  status: "created" | "unchanged" | "error";
+  epoch?: number;
+  memberMode?: Mode;
+  memberSeriesEnabled?: boolean;
+  memberSeriesEnabledAt?: Date;
+  memberSeriesEnabledBy?: string;
+  memberCount?: number;
+  error?: Problem;
+}
+
+/** Startup declaration request. The server returns one result per key and commits bounded batches. */
+export interface DeclareCountersRequest {
+  counters: CounterDeclaration[];
+}
+
+/** Declaration response; callers must inspect every per-key result. */
+export interface DeclareCountersResponse {
+  results: CounterDeclarationResult[];
+  policy: CounterWritePolicy;
+}
+
+/** Versioned organization policy for implicit counter creation. */
+export interface CounterWritePolicy {
+  undeclaredCounterWrites: UndeclaredCounterWrites;
+  version: number;
+  explicit: boolean;
+  updatedAt?: Date;
+  updatedBy?: string;
+}
+
+/** Compare-and-set request for the organization policy. */
+export interface SetCounterWritePolicyRequest {
+  undeclaredCounterWrites: UndeclaredCounterWrites;
+  expectedVersion: number;
+}
+
+/** Options for enabling or disabling per-member time series. */
+export interface SetMemberSeriesOptions {
+  /** Fail with 409 if the counter has been cleared to a different epoch. */
+  expectedEpoch?: number;
+}
+
+/** Current per-member time-series configuration. */
+export interface MemberSeriesConfig {
+  key: string;
+  enabled: boolean;
+  memberCount: number;
+  maxMembersWithSeries: number;
+  mode?: Mode;
+  /** Most recent disabled-to-enabled transition, retained across disable. */
+  enabledAt?: Date;
+  /** Actor responsible for `enabledAt`. */
+  enabledBy?: string;
 }
 
 export interface ValueResponse {

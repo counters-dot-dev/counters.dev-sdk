@@ -5,11 +5,14 @@ import {
   CountersTransportError,
   CountersValidationError,
   PublishableCountersClient,
+  type Counter,
   type CountersClientOptions,
+  type DeclareCountersResponse,
   type DerivedSeriesPoint,
   type MemberGroupSeriesResponse,
   type MemberSeriesMode,
   type MemberSeriesResponse,
+  type MemberSeriesConfig,
   type Mode,
   type PublishableCounterHandle,
   type PublishableMemberHandle,
@@ -116,7 +119,23 @@ void writableCounter.addNow(1, { idempotencyKey: "write-1" });
 void writableCounter.addNow(1, { occurredAt: "2026-01-01T00:00:00Z" });
 void writableCounter.clear({ idempotencyKey: "clear-1" });
 void writableCounter.delete({ idempotencyKey: "delete-1" });
+const detail: Promise<Counter> = writableCounter.get();
+const memberSeriesConfig: Promise<MemberSeriesConfig> = writableCounter.setMemberSeries(true, {
+  expectedEpoch: 0,
+});
+void detail;
+void memberSeriesConfig;
 void writable.list();
+const declaration: Promise<DeclareCountersResponse> = writable.declare({
+  counters: [{ key: "views", memberMode: "sum", memberSeriesEnabled: true }],
+});
+void declaration;
+void writable.getCounterWritePolicy();
+void writable.setCounterWritePolicy({ undeclaredCounterWrites: "reject", expectedVersion: 1 });
+// @ts-expect-error policy polarity is explicit.
+void writable.setCounterWritePolicy({ undeclaredCounterWrites: "deny", expectedVersion: 1 });
+// @ts-expect-error expectedEpoch must be a number.
+void writableCounter.setMemberSeries(true, { expectedEpoch: "0" });
 void writable.usage();
 void writable.derived("conversion").value();
 void writable.flush();

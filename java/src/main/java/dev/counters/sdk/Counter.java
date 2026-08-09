@@ -9,4 +9,14 @@ import java.time.Instant;
  * {@code long}/{@code double} unless you know it fits; use {@code new java.math.BigInteger(value)}.
  * {@code epoch} is incremented by {@code clear}; the value sums deltas in the current epoch.
  */
-public record Counter(String key, String value, long epoch, Instant createdAt, Instant updatedAt) {}
+public record Counter(
+        String key,
+        String value,
+        long epoch,
+        String memberMode,
+        Boolean memberSeriesEnabled,
+        Instant memberSeriesEnabledAt,
+        String memberSeriesEnabledBy,
+        Long memberCount,
+        Instant createdAt,
+        Instant updatedAt) {}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -405,6 +406,10 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 	timeType := reflect.TypeOf(time.Time{})
 	timePointerType := reflect.TypeOf((*time.Time)(nil))
 	stringPointerType := reflect.TypeOf((*string)(nil))
+	intPointerType := reflect.TypeOf((*int)(nil))
+	int64PointerType := reflect.TypeOf((*int64)(nil))
+	boolPointerType := reflect.TypeOf((*bool)(nil))
+	problemPointerType := reflect.TypeOf((*Problem)(nil))
 
 	for _, tc := range []struct {
 		owner reflect.Type
@@ -414,6 +419,15 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 	}{
 		{reflect.TypeOf(Counter{}), "CreatedAt", timePointerType, "createdAt,omitempty"},
 		{reflect.TypeOf(Counter{}), "UpdatedAt", timePointerType, "updatedAt,omitempty"},
+		{reflect.TypeOf(Counter{}), "MemberSeriesEnabledAt", timePointerType, "memberSeriesEnabledAt,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "Epoch", int64PointerType, "epoch,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "MemberSeriesEnabled", boolPointerType, "memberSeriesEnabled,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "MemberSeriesEnabledAt", timePointerType, "memberSeriesEnabledAt,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "MemberCount", int64PointerType, "memberCount,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "Error", problemPointerType, "error,omitempty"},
+		{reflect.TypeOf(CounterWritePolicy{}), "UpdatedAt", timePointerType, "updatedAt,omitempty"},
+		{reflect.TypeOf(Problem{}), "Status", intPointerType, "status,omitempty"},
+		{reflect.TypeOf(MemberSeriesConfig{}), "EnabledAt", timePointerType, "enabledAt,omitempty"},
 		{reflect.TypeOf(SeriesPoint{}), "Timestamp", timeType, "t"},
 		{reflect.TypeOf(LeaderboardEntry{}), "UpdatedAt", timeType, "updatedAt"},
 		{reflect.TypeOf(MemberSnapshot{}), "UpdatedAt", timeType, "updatedAt"},
@@ -1161,6 +1175,244 @@ func TestListPagination(t *testing.T) {
 	}
 	if p2.NextCursor != "" || len(p2.Data) != 1 || p2.Data[0].Key != "c" || p2.Data[0].Value != "3" {
 		t.Errorf("page2=%+v", p2)
+	}
+}
+
+func TestDeclareSerializesFullSetAndParsesNativeTimestamps(t *testing.T) {
+	enabled := true
+	var gotMethod, gotPath string
+	var gotBody DeclareCountersRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"key":"requests","status":"created","epoch":0,` +
+			`"memberMode":"sum","memberSeriesEnabled":true,` +
+			`"memberSeriesEnabledAt":"2026-08-10T00:00:00Z",` +
+			`"memberSeriesEnabledBy":"api_key:key-id","memberCount":0},` +
+			`{"key":"bad key","status":"error","error":{"type":"urn:problem:validation",` +
+			`"title":"Bad Request","status":400,"detail":"invalid counter key"}}],` +
+			`"policy":{"undeclaredCounterWrites":"reject","version":3,"explicit":true,` +
+			`"updatedAt":"2026-08-10T00:00:01Z","updatedBy":"api_key:key-id"}}`))
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	response, err := c.Declare(context.Background(), DeclareCountersRequest{
+		Counters: []CounterDeclaration{
+			{
+				Key:                 "requests",
+				MemberMode:          "sum",
+				MemberSeriesEnabled: &enabled,
+			},
+			{Key: "bad key"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/counters" {
+		t.Fatalf("request=%s %s", gotMethod, gotPath)
+	}
+	if len(gotBody.Counters) != 2 ||
+		gotBody.Counters[0].MemberSeriesEnabled == nil ||
+		!*gotBody.Counters[0].MemberSeriesEnabled {
+		t.Fatalf("request body=%+v", gotBody)
+	}
+	if response.Policy.UndeclaredCounterWrites != UndeclaredCounterWritesReject ||
+		response.Policy.Version != 3 ||
+		response.Policy.UpdatedAt == nil ||
+		response.Results[0].Status != "created" ||
+		response.Results[0].Epoch == nil ||
+		response.Results[0].MemberSeriesEnabledAt == nil ||
+		!response.Results[0].MemberSeriesEnabledAt.Equal(time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("response=%+v", response)
+	}
+	if response.Results[1].Status != "error" || response.Results[1].Error == nil ||
+		response.Results[1].Error.Status == nil || *response.Results[1].Error.Status != 400 {
+		t.Fatalf("per-key error result=%+v", response.Results[1])
+	}
+}
+
+func TestDeclareRejectsOnlyInvalidRequestWideShapesBeforeIO(t *testing.T) {
+	var requests atomic.Int64
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return jsonLoopbackResponse(500, `{}`), nil
+	})
+	tooMany := make([]CounterDeclaration, 1001)
+	for i := range tooMany {
+		tooMany[i].Key = fmt.Sprintf("key-%d", i)
+	}
+	tests := []DeclareCountersRequest{
+		{},
+		{Counters: tooMany},
+	}
+	for _, request := range tests {
+		if _, err := c.Declare(context.Background(), request); err == nil {
+			t.Errorf("Declare(%+v) succeeded", request)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid declarations made %d requests", requests.Load())
+	}
+}
+
+func TestDeclareSendsPerKeyValidationErrorsToService(t *testing.T) {
+	var got DeclareCountersRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[` +
+			`{"key":"same","status":"error","error":{"status":400,"detail":"duplicate"}},` +
+			`{"key":"same","status":"error","error":{"status":400,"detail":"duplicate"}},` +
+			`{"key":"bad key","status":"error","error":{"status":400,"detail":"invalid key"}},` +
+			`{"key":"mode","status":"error","error":{"status":400,"detail":"invalid mode"}}],` +
+			`"policy":{"undeclaredCounterWrites":"allow","version":0,"explicit":false}}`))
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	response, err := c.Declare(context.Background(), DeclareCountersRequest{Counters: []CounterDeclaration{
+		{Key: "same"},
+		{Key: "same"},
+		{Key: "bad key"},
+		{Key: "mode", MemberMode: "median"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Counters) != 4 || len(response.Results) != 4 {
+		t.Fatalf("request=%+v response=%+v", got, response)
+	}
+	for i, result := range response.Results {
+		if result.Status != "error" || result.Error == nil {
+			t.Errorf("result[%d]=%+v", i, result)
+		}
+	}
+}
+
+func TestCounterWritePolicyReadsAndCompareAndSets(t *testing.T) {
+	var requests int
+	var setBody SetCounterWritePolicyRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case "GET":
+			if r.URL.Path != "/v1/counter-write-policy" {
+				t.Errorf("GET path=%s", r.URL.Path)
+			}
+			_, _ = w.Write([]byte(`{"undeclaredCounterWrites":"allow","version":0,"explicit":false}`))
+		case "PUT":
+			if r.URL.Path != "/v1/counter-write-policy" {
+				t.Errorf("PUT path=%s", r.URL.Path)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&setBody); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"undeclaredCounterWrites":"reject","version":1,"explicit":true,` +
+				`"updatedAt":"2026-08-10T01:00:00Z","updatedBy":"api_key:key-id"}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	current, err := c.GetCounterWritePolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != 0 || current.Explicit {
+		t.Fatalf("implicit policy=%+v", current)
+	}
+	updated, err := c.SetCounterWritePolicy(context.Background(), SetCounterWritePolicyRequest{
+		UndeclaredCounterWrites: UndeclaredCounterWritesReject,
+		ExpectedVersion:         current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setBody.UndeclaredCounterWrites != UndeclaredCounterWritesReject || setBody.ExpectedVersion != 0 ||
+		updated.Version != 1 || !updated.Explicit || updated.UpdatedAt == nil {
+		t.Fatalf("request=%+v response=%+v", setBody, updated)
+	}
+	if _, err := c.SetCounterWritePolicy(context.Background(), SetCounterWritePolicyRequest{
+		UndeclaredCounterWrites: "deny",
+	}); err == nil {
+		t.Fatal("invalid policy succeeded")
+	}
+	if _, err := c.SetCounterWritePolicy(context.Background(), SetCounterWritePolicyRequest{
+		UndeclaredCounterWrites: UndeclaredCounterWritesAllow,
+		ExpectedVersion:         -1,
+	}); err == nil {
+		t.Fatal("negative expected version succeeded")
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
+	}
+}
+
+func TestCounterGetAndSetMemberSeries(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case "GET":
+			_, _ = w.Write([]byte(`{"key":"requests","value":"12","epoch":4,"memberMode":"sum",` +
+				`"memberSeriesEnabled":true,"memberSeriesEnabledAt":"2026-08-10T01:00:00Z",` +
+				`"memberSeriesEnabledBy":"api_key:key-id","memberCount":3}`))
+		case "PUT":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			if body["enabled"] != true || body["expectedEpoch"] != float64(4) {
+				t.Errorf("member-series request=%v", body)
+			}
+			_, _ = w.Write([]byte(`{"key":"requests","enabled":true,"memberCount":3,` +
+				`"maxMembersWithSeries":100,"mode":"sum","enabledAt":"2026-08-10T01:00:00Z",` +
+				`"enabledBy":"api_key:key-id"}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	h, _ := c.Counter("requests")
+	detail, err := h.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.MemberMode != "sum" || detail.MemberSeriesEnabled == nil || !*detail.MemberSeriesEnabled ||
+		detail.MemberSeriesEnabledAt == nil || detail.MemberCount == nil || *detail.MemberCount != 3 {
+		t.Fatalf("counter detail=%+v", detail)
+	}
+	epoch := int64(4)
+	config, err := h.SetMemberSeries(context.Background(), true, SetMemberSeriesOptions{ExpectedEpoch: &epoch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.EnabledAt == nil || config.EnabledBy != "api_key:key-id" || config.MaxMembersWithSeries != 100 {
+		t.Fatalf("member-series config=%+v", config)
+	}
+	badEpoch := int64(-1)
+	if _, err := h.SetMemberSeries(
+		context.Background(),
+		true,
+		SetMemberSeriesOptions{ExpectedEpoch: &badEpoch},
+	); err == nil {
+		t.Fatal("negative expected epoch succeeded")
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
 	}
 }
 

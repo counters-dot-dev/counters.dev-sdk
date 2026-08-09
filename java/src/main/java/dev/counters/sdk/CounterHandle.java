@@ -174,6 +174,21 @@ public final class CounterHandle implements ReadOnlyCounterHandle {
         return client.getValue(key);
     }
 
+    /** Full counter detail, including member mode and dimensional-series configuration. */
+    public Counter get() {
+        return client.getCounter(key);
+    }
+
+    /** Enable or disable per-member time series. */
+    public MemberSeriesConfig setMemberSeries(boolean enabled) {
+        return setMemberSeries(enabled, null);
+    }
+
+    /** Enable or disable per-member time series, guarded by the current epoch when non-null. */
+    public MemberSeriesConfig setMemberSeries(boolean enabled, Long expectedEpoch) {
+        return client.setMemberSeries(key, enabled, expectedEpoch);
+    }
+
     /** Time series (delta per bucket). */
     public SeriesResponse series(SeriesParams params) {
         return client.getSeries(key, params);

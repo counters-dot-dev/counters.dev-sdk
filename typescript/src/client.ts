@@ -11,8 +11,11 @@ import { resolveIdempotencyKey } from "./idempotency.js";
 import {
   assertBucket,
   assertCounterKey,
+  assertDeclareCountersRequest,
   assertMemberKey,
   assertMetadata,
+  assertSetMemberSeriesOptions,
+  assertSetCounterWritePolicyRequest,
   assertWindow,
   describeValue,
   toAmount,
@@ -23,7 +26,11 @@ import type {
   ApplyOptions,
   BatchResponse,
   Counter,
+  CounterDeclarationResult,
   CounterPage,
+  CounterWritePolicy,
+  DeclareCountersRequest,
+  DeclareCountersResponse,
   DerivedSeriesPoint,
   DerivedSeriesParams,
   DerivedSeriesResponse,
@@ -35,6 +42,7 @@ import type {
   MemberGetParams,
   MemberGroupSeriesResponse,
   MemberRemoved,
+  MemberSeriesConfig,
   MemberSeriesEntry,
   MemberSeriesResponse,
   MemberSnapshot,
@@ -43,6 +51,8 @@ import type {
   SeriesParams,
   SeriesPoint,
   SeriesResponse,
+  SetMemberSeriesOptions,
+  SetCounterWritePolicyRequest,
   SubmitOptions,
   Usage,
   Value,
@@ -162,6 +172,32 @@ export class CountersClient {
     );
   }
 
+  /** Create or verify the complete known counter set with per-key, bounded-batch results. */
+  declare(request: DeclareCountersRequest): Promise<DeclareCountersResponse> {
+    assertDeclareCountersRequest(request);
+    return parseWireResponse(
+      this.http.request<WireDeclareCountersResponse>("POST", "/counters", { body: request }),
+      parseDeclareCountersResponse,
+    );
+  }
+
+  /** Read the organization-wide implicit-create policy and its compare-and-set version. */
+  getCounterWritePolicy(): Promise<CounterWritePolicy> {
+    return parseWireResponse(
+      this.http.request<WireCounterWritePolicy>("GET", "/counter-write-policy"),
+      parseCounterWritePolicy,
+    );
+  }
+
+  /** Compare-and-set the organization-wide implicit-create policy. */
+  setCounterWritePolicy(request: SetCounterWritePolicyRequest): Promise<CounterWritePolicy> {
+    assertSetCounterWritePolicyRequest(request);
+    return parseWireResponse(
+      this.http.request<WireCounterWritePolicy>("PUT", "/counter-write-policy", { body: request }),
+      parseCounterWritePolicy,
+    );
+  }
+
   /** Current quota state for the organization (month-to-date operations, counter headroom, plan limits). */
   usage(): Promise<Usage> {
     return parseWireResponse(this.http.request<WireUsage>("GET", "/usage"), parseUsage);
@@ -230,6 +266,35 @@ export class CountersClient {
   /** @internal */
   getValue(key: string): Promise<ValueResponse> {
     return this.http.request<ValueResponse>("GET", `/counters/${enc(key)}/value`);
+  }
+
+  /** @internal */
+  getCounter(key: string): Promise<Counter> {
+    return parseWireResponse(
+      this.http.request<WireCounter>("GET", `/counters/${enc(key)}`),
+      parseCounter,
+    );
+  }
+
+  /** @internal */
+  setMemberSeries(
+    key: string,
+    enabled: boolean,
+    options?: SetMemberSeriesOptions,
+  ): Promise<MemberSeriesConfig> {
+    if (typeof enabled !== "boolean") {
+      throw new CountersValidationError("member-series enabled must be a boolean");
+    }
+    assertSetMemberSeriesOptions(options);
+    return parseWireResponse(
+      this.http.request<WireMemberSeriesConfig>("PUT", `/counters/${enc(key)}/member-series`, {
+        body: {
+          enabled,
+          ...(options?.expectedEpoch === undefined ? {} : { expectedEpoch: options.expectedEpoch }),
+        },
+      }),
+      parseMemberSeriesConfig,
+    );
   }
 
   /** @internal */
@@ -649,6 +714,19 @@ export class CounterHandle {
     return this.client.getValue(this.key);
   }
 
+  /** Full counter detail, including member mode and dimensional-series configuration. */
+  get(): Promise<Counter> {
+    return this.client.getCounter(this.key);
+  }
+
+  /** Enable or disable per-member time series, optionally guarded by the current epoch. */
+  setMemberSeries(
+    enabled: boolean,
+    options?: SetMemberSeriesOptions,
+  ): Promise<MemberSeriesConfig> {
+    return this.client.setMemberSeries(this.key, enabled, options);
+  }
+
   /** One member's series (delta per bucket on a sum board; sparse best/latest scores on a score board). Requires member series enabled. */
   series(params: SeriesParams & { member: string }): Promise<MemberSeriesResponse>;
   /** The per-member multi-series (dense on a sum board, sparse per member on a score board). Requires member series enabled. */
@@ -739,9 +817,27 @@ function enc(key: string): string {
   return encodeURIComponent(key);
 }
 
-type WireCounter = Omit<Counter, "createdAt" | "updatedAt"> & {
+type WireCounter = Omit<Counter, "createdAt" | "updatedAt" | "memberSeriesEnabledAt"> & {
   createdAt?: string | null;
   updatedAt?: string | null;
+  memberSeriesEnabledAt?: string | null;
+};
+
+type WireCounterDeclarationResult = Omit<CounterDeclarationResult, "memberSeriesEnabledAt"> & {
+  memberSeriesEnabledAt?: string | null;
+};
+
+type WireCounterWritePolicy = Omit<CounterWritePolicy, "updatedAt"> & {
+  updatedAt?: string | null;
+};
+
+type WireDeclareCountersResponse = Omit<DeclareCountersResponse, "results" | "policy"> & {
+  results: WireCounterDeclarationResult[];
+  policy: WireCounterWritePolicy;
+};
+
+type WireMemberSeriesConfig = Omit<MemberSeriesConfig, "enabledAt"> & {
+  enabledAt?: string | null;
 };
 
 type WireCounterPage = Omit<CounterPage, "data"> & { data: WireCounter[] };
@@ -809,11 +905,55 @@ type WireOperation = Omit<Operation, "operation" | "occurredAt"> & {
 };
 
 function parseCounter(counter: WireCounter): Counter {
-  const { createdAt, updatedAt, ...fields } = counter;
+  const { createdAt, updatedAt, memberSeriesEnabledAt, ...fields } = counter;
   return {
     ...fields,
     ...(createdAt == null ? {} : { createdAt: parseDate(createdAt, "counter.createdAt") }),
     ...(updatedAt == null ? {} : { updatedAt: parseDate(updatedAt, "counter.updatedAt") }),
+    ...(memberSeriesEnabledAt == null
+      ? {}
+      : {
+          memberSeriesEnabledAt: parseDate(
+            memberSeriesEnabledAt,
+            "counter.memberSeriesEnabledAt",
+          ),
+        }),
+  };
+}
+
+function parseDeclareCountersResponse(response: WireDeclareCountersResponse): DeclareCountersResponse {
+  return {
+    ...response,
+    policy: parseCounterWritePolicy(response.policy),
+    results: response.results.map(({ memberSeriesEnabledAt, ...result }) => ({
+      ...result,
+      ...(memberSeriesEnabledAt == null
+        ? {}
+        : {
+            memberSeriesEnabledAt: parseDate(
+              memberSeriesEnabledAt,
+              "declaration result.memberSeriesEnabledAt",
+            ),
+          }),
+    })),
+  };
+}
+
+function parseCounterWritePolicy(policy: WireCounterWritePolicy): CounterWritePolicy {
+  const { updatedAt, ...fields } = policy;
+  return {
+    ...fields,
+    ...(updatedAt == null ? {} : { updatedAt: parseDate(updatedAt, "policy.updatedAt") }),
+  };
+}
+
+function parseMemberSeriesConfig(config: WireMemberSeriesConfig): MemberSeriesConfig {
+  const { enabledAt, ...fields } = config;
+  return {
+    ...fields,
+    ...(enabledAt == null
+      ? {}
+      : { enabledAt: parseDate(enabledAt, "member-series configuration.enabledAt") }),
   };
 }
 

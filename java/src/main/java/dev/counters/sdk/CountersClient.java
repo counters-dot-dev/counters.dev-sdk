@@ -75,6 +75,55 @@ public final class CountersClient implements ReadOnlyCountersClient {
         return toCounterPage(asMap(http.request("GET", "/counters", null, null, query)));
     }
 
+    /** Create or verify the complete known counter set with bounded, per-key results. */
+    public DeclareCountersResponse declare(DeclareCountersRequest request) {
+        if (request == null) throw new CountersValidationException("declare request is required");
+        List<CounterDeclaration> declarations = request.counters();
+        if (declarations == null || declarations.isEmpty() || declarations.size() > 1000) {
+            throw new CountersValidationException("declare counters must contain between 1 and 1000 entries");
+        }
+        List<Map<String, Object>> wireDeclarations = new ArrayList<>(declarations.size());
+        for (int i = 0; i < declarations.size(); i++) {
+            CounterDeclaration declaration = declarations.get(i);
+            if (declaration == null) {
+                throw new CountersValidationException("declare counters[" + i + "] is required");
+            }
+            if (declaration.key() == null) {
+                throw new CountersValidationException("declare counters[" + i + "].key is required");
+            }
+            Map<String, Object> wire = new LinkedHashMap<>();
+            wire.put("key", declaration.key());
+            if (declaration.memberMode() != null) wire.put("memberMode", declaration.memberMode());
+            if (declaration.memberSeriesEnabled() != null) {
+                wire.put("memberSeriesEnabled", declaration.memberSeriesEnabled());
+            }
+            wireDeclarations.add(wire);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("counters", wireDeclarations);
+        return toDeclareCountersResponse(asMap(http.request("POST", "/counters", body, null, null)));
+    }
+
+    /** Read the organization-wide implicit-create policy and its compare-and-set version. */
+    public CounterWritePolicy getCounterWritePolicy() {
+        return toCounterWritePolicy(asMap(http.request("GET", "/counter-write-policy", null, null, null)));
+    }
+
+    /** Compare-and-set the organization-wide implicit-create policy. */
+    public CounterWritePolicy setCounterWritePolicy(SetCounterWritePolicyRequest request) {
+        if (request == null) throw new CountersValidationException("counter write policy request is required");
+        if (request.undeclaredCounterWrites() == null) {
+            throw new CountersValidationException("undeclaredCounterWrites is required");
+        }
+        if (request.expectedVersion() < 0) {
+            throw new CountersValidationException("expectedVersion must be zero or greater");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("undeclaredCounterWrites", request.undeclaredCounterWrites().wireValue());
+        body.put("expectedVersion", request.expectedVersion());
+        return toCounterWritePolicy(asMap(http.request("PUT", "/counter-write-policy", body, null, null)));
+    }
+
     /** Current quota state for the organization. */
     public Usage usage() {
         return toUsage(asMap(http.request("GET", "/usage", null, null, null)));
@@ -148,6 +197,24 @@ public final class CountersClient implements ReadOnlyCountersClient {
         Map<String, Object> m = asMap(http.request(
                 "GET", "/counters/" + Http.encodePathSegment(key) + "/value", null, null, null));
         return new ValueResponse(str(m, "key"), str(m, "value"), longVal(m, "epoch"));
+    }
+
+    Counter getCounter(String key) {
+        return toCounter(asMap(http.request(
+                "GET", "/counters/" + Http.encodePathSegment(key), null, null, null)));
+    }
+
+    MemberSeriesConfig setMemberSeries(String key, boolean enabled, Long expectedEpoch) {
+        if (expectedEpoch != null && expectedEpoch < 0) {
+            throw new CountersValidationException("expectedEpoch must be non-negative");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("enabled", enabled);
+        if (expectedEpoch != null) body.put("expectedEpoch", expectedEpoch);
+        Object response = http.request(
+                "PUT", "/counters/" + Http.encodePathSegment(key) + "/member-series",
+                body, null, null);
+        return toMemberSeriesConfig(asMap(response));
     }
 
     SeriesResponse getSeries(String key, SeriesParams params) {
@@ -422,6 +489,10 @@ public final class CountersClient implements ReadOnlyCountersClient {
         return m.get(key) instanceof Boolean b && b;
     }
 
+    private static Boolean nullableBoolean(Map<String, Object> m, String key) {
+        return m.get(key) instanceof Boolean b ? b : null;
+    }
+
     private static Map<String, String> seriesQuery(SeriesParams params) {
         if (params == null) throw new CountersValidationException("series params are required");
         Map<String, String> query = new LinkedHashMap<>();
@@ -445,8 +516,73 @@ public final class CountersClient implements ReadOnlyCountersClient {
     }
 
     private static Counter toCounter(Map<String, Object> m) {
-        return new Counter(str(m, "key"), str(m, "value"), longVal(m, "epoch"),
-                instant(m, "createdAt"), instant(m, "updatedAt"));
+        return new Counter(
+                str(m, "key"),
+                str(m, "value"),
+                longVal(m, "epoch"),
+                str(m, "memberMode"),
+                nullableBoolean(m, "memberSeriesEnabled"),
+                instant(m, "memberSeriesEnabledAt"),
+                str(m, "memberSeriesEnabledBy"),
+                nullableLong(m, "memberCount"),
+                instant(m, "createdAt"),
+                instant(m, "updatedAt"));
+    }
+
+    private static DeclareCountersResponse toDeclareCountersResponse(Map<String, Object> m) {
+        List<CounterDeclarationResult> results = new ArrayList<>();
+        for (Object item : asList(m.get("results"))) {
+            Map<String, Object> result = asMap(item);
+            String status = str(result, "status");
+            if (!("created".equals(status) || "unchanged".equals(status) || "error".equals(status))) {
+                throw new CountersValidationException("declaration result has an invalid status: " + status);
+            }
+            results.add(new CounterDeclarationResult(
+                    str(result, "key"),
+                    status,
+                    nullableLong(result, "epoch"),
+                    str(result, "memberMode"),
+                    nullableBoolean(result, "memberSeriesEnabled"),
+                    instant(result, "memberSeriesEnabledAt"),
+                    str(result, "memberSeriesEnabledBy"),
+                    nullableLong(result, "memberCount"),
+                    toProblem(result.get("error"))));
+        }
+        return new DeclareCountersResponse(
+                List.copyOf(results),
+                toCounterWritePolicy(asMap(m.get("policy"))));
+    }
+
+    private static CounterWritePolicy toCounterWritePolicy(Map<String, Object> m) {
+        return new CounterWritePolicy(
+                UndeclaredCounterWrites.fromWire(str(m, "undeclaredCounterWrites")),
+                longVal(m, "version"),
+                boolVal(m, "explicit"),
+                instant(m, "updatedAt"),
+                str(m, "updatedBy"));
+    }
+
+    private static Problem toProblem(Object value) {
+        if (value == null) return null;
+        Map<String, Object> m = asMap(value);
+        Long status = nullableLong(m, "status");
+        return new Problem(
+                str(m, "type"),
+                str(m, "title"),
+                status == null ? null : status.intValue(),
+                str(m, "detail"),
+                str(m, "instance"));
+    }
+
+    private static MemberSeriesConfig toMemberSeriesConfig(Map<String, Object> m) {
+        return new MemberSeriesConfig(
+                str(m, "key"),
+                boolVal(m, "enabled"),
+                longVal(m, "memberCount"),
+                longVal(m, "maxMembersWithSeries"),
+                str(m, "mode"),
+                instant(m, "enabledAt"),
+                str(m, "enabledBy"));
     }
 
     private static CounterPage toCounterPage(Map<String, Object> m) {

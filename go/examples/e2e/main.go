@@ -166,6 +166,42 @@ func tour() {
 	// A typed handle per counter. Keys are validated client-side.
 	signups := mustCounter(client, ns+"signups")
 
+	// The implicit-create policy is organization-wide and versioned. Read before compare-and-setting
+	// it so concurrent clients cannot silently clobber one another. Keep allow for this broad tour.
+	policy, err := client.GetCounterWritePolicy(ctx)
+	invoked["Client.GetCounterWritePolicy"] = true
+	check(err, "get counter write policy")
+	policy, err = client.SetCounterWritePolicy(ctx, counters.SetCounterWritePolicyRequest{
+		UndeclaredCounterWrites: counters.UndeclaredCounterWritesAllow,
+		ExpectedVersion:         policy.Version,
+	})
+	invoked["Client.SetCounterWritePolicy"] = true
+	check(err, "set counter write policy")
+	assertEq(policy.UndeclaredCounterWrites, counters.UndeclaredCounterWritesAllow,
+		"counter write policy allows implicit creation")
+
+	// Startup provisioning: create/verify the known key and inspect its per-key result.
+	enabled := true
+	declared, err := client.Declare(ctx, counters.DeclareCountersRequest{
+		Counters: []counters.CounterDeclaration{{
+			Key:                 ns + "signups",
+			MemberSeriesEnabled: &enabled,
+		}},
+	})
+	invoked["Client.Declare"] = true
+	check(err, "declare startup counters")
+	assertEq(declared.Results[0].Status, "created", "fresh startup declaration creates its counter")
+	detail, err := signups.Get(ctx)
+	invoked["CounterHandle.Get"] = true
+	check(err, "get counter detail")
+	assert(detail.MemberSeriesEnabled != nil && *detail.MemberSeriesEnabled,
+		"detail exposes declared member-series state")
+	epoch := int64(0)
+	seriesConfig, err := signups.SetMemberSeries(ctx, true, counters.SetMemberSeriesOptions{ExpectedEpoch: &epoch})
+	invoked["CounterHandle.SetMemberSeries"] = true
+	check(err, "set member series")
+	assert(seriesConfig.Enabled, "API key can idempotently enable member series")
+
 	// Confirmed writes: apply immediately, return the new state. Supplying the idempotency key
 	// before the attempt lets a caller reuse it after a transport failure.
 	firstWriteKey := counters.NewIdempotencyKey()

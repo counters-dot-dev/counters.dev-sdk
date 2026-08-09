@@ -38,6 +38,21 @@ class PublicApiShapeTest {
 
     @Test
     void allDateTimesAndWireNamesUseNativeErgonomicPublicShapes() {
+        assertRecordShape(Counter.class,
+                new String[] {"key", "value", "epoch", "memberMode", "memberSeriesEnabled",
+                        "memberSeriesEnabledAt", "memberSeriesEnabledBy", "memberCount", "createdAt", "updatedAt"},
+                new Class<?>[] {String.class, String.class, long.class, String.class, Boolean.class,
+                        Instant.class, String.class, Long.class, Instant.class, Instant.class});
+        assertRecordShape(CounterDeclarationResult.class,
+                new String[] {"key", "status", "epoch", "memberMode", "memberSeriesEnabled",
+                        "memberSeriesEnabledAt", "memberSeriesEnabledBy", "memberCount", "error"},
+                new Class<?>[] {String.class, String.class, Long.class, String.class, Boolean.class,
+                        Instant.class, String.class, Long.class, Problem.class});
+        assertRecordShape(MemberSeriesConfig.class,
+                new String[] {"key", "enabled", "memberCount", "maxMembersWithSeries", "mode", "enabledAt",
+                        "enabledBy"},
+                new Class<?>[] {String.class, boolean.class, long.class, long.class, String.class,
+                        Instant.class, String.class});
         assertRecordShape(SeriesParams.class,
                 new String[] {"from", "to", "bucket", "mode", "timeZone", "gapfill"},
                 new Class<?>[] {Instant.class, Instant.class, String.class, String.class, String.class, Boolean.class});
