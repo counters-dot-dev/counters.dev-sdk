@@ -312,6 +312,11 @@ class ClientTest {
                             .groupSeries(params);
                     assertEquals(expect.get("counterKey"), s.counterKey(), name);
                     assertEquals(expect.get("bucket"), s.bucket(), name);
+                    if (body.containsKey("memberCount")) {
+                        assertEquals(((Number) body.get("memberCount")).longValue(), s.memberCount(), name);
+                        assertEquals(((Number) body.get("selectedCount")).longValue(), s.selectedCount(), name);
+                        assertEquals(body.get("truncated"), s.truncated(), name);
+                    }
                     List<?> expectedSeries = (List<?>) expect.get("series");
                     assertEquals(expectedSeries.size(), s.series().size(), name);
                     for (int i = 0; i < expectedSeries.size(); i++) {

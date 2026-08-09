@@ -348,6 +348,7 @@ class ExpandedSurfaceTest {
     void groupSeriesSendsGroupByAndParses() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200,
                 "{\"counterKey\":\"board\",\"bucket\":\"1h\",\"mode\":\"delta\","
+                        + "\"memberCount\":3,\"selectedCount\":1,\"truncated\":true,"
                         + "\"range\":{\"from\":\"2026-01-01T00:00:00Z\",\"to\":\"2026-01-01T01:00:00Z\"},"
                         + "\"series\":[{\"member\":\"alice\",\"points\":[{\"t\":\"2026-01-01T00:00:00Z\",\"v\":\"5\"}]}]}"));
         try (CountersClient c = client(baseUrl)) {
@@ -355,6 +356,9 @@ class ExpandedSurfaceTest {
                     new SeriesParams(at(), at().plus(1, ChronoUnit.HOURS), "1h"));
             assertEquals("member", parseQuery(recorded.get(0).query()).get("groupBy"));
             assertEquals("delta", s.mode());
+            assertEquals(3L, s.memberCount());
+            assertEquals(1L, s.selectedCount());
+            assertTrue(s.truncated());
             assertEquals("alice", s.series().get(0).member());
             assertNull(s.timeZone());
             assertEquals(Instant.parse("2026-01-01T00:00:00Z"),

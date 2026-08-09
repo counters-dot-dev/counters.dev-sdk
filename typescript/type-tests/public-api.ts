@@ -56,6 +56,9 @@ declare const groupSeries: MemberGroupSeriesResponse;
 // The spec requires a top-level `mode` on the grouped series (delta on sum boards, else the board mode).
 const groupSeriesMode: MemberSeriesMode = groupSeries.mode;
 void groupSeriesMode;
+groupSeries.memberCount.toFixed();
+groupSeries.selectedCount.toFixed();
+groupSeries.truncated.valueOf();
 
 declare const usage: Usage;
 usage.operations.resetsAt.toISOString();

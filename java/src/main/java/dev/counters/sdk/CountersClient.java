@@ -568,7 +568,9 @@ public final class CountersClient implements ReadOnlyCountersClient {
         }
         return new MemberGroupSeriesResponse(str(m, "counterKey"), str(m, "bucket"), str(m, "mode"),
                 str(m, "tz"),
-                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")), List.copyOf(series));
+                new SeriesResponse.Range(instant(range, "from"), instant(range, "to")),
+                longVal(m, "memberCount"), longVal(m, "selectedCount"), boolVal(m, "truncated"),
+                List.copyOf(series));
     }
 
     private static DerivedValueResponse toDerivedValue(Map<String, Object> m) {

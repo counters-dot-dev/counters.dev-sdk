@@ -467,6 +467,9 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 	// window total is optional (absent on score boards) — so it must be a pointer.
 	assertStructField(t, reflect.TypeOf(MemberSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
 	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "Mode", reflect.TypeOf(""), "mode")
+	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "MemberCount", reflect.TypeOf(0), "memberCount")
+	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "SelectedCount", reflect.TypeOf(0), "selectedCount")
+	assertStructField(t, reflect.TypeOf(MemberGroupSeriesResponse{}), "Truncated", reflect.TypeOf(false), "truncated")
 	assertStructField(t, reflect.TypeOf(WindowLeaderboard{}), "Total", stringPointerType, "total,omitempty")
 
 	for _, old := range []struct {
@@ -1325,6 +1328,13 @@ func TestSeriesConformance(t *testing.T) {
 				}
 				if s.CounterKey != exp["counterKey"].(string) || s.Bucket != exp["bucket"].(string) {
 					t.Errorf("member group series=%+v", s)
+				}
+				if memberCount, ok := body["memberCount"]; ok {
+					if s.MemberCount != intFromAny(memberCount) ||
+						s.SelectedCount != intFromAny(body["selectedCount"]) ||
+						s.Truncated != body["truncated"].(bool) {
+						t.Errorf("member group selection metadata=%+v", s)
+					}
 				}
 				assertTimeRange(t, s.Range.From, s.Range.To, rng)
 				expSeries := exp["series"].([]any)

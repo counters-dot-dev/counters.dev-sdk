@@ -502,7 +502,10 @@ type MemberGroupSeriesResponse struct {
 		From time.Time `json:"from"`
 		To   time.Time `json:"to"`
 	} `json:"range"`
-	Series []MemberSeriesEntry `json:"series"`
+	MemberCount   int                 `json:"memberCount"`
+	SelectedCount int                 `json:"selectedCount"`
+	Truncated     bool                `json:"truncated"`
+	Series        []MemberSeriesEntry `json:"series"`
 }
 
 // DerivedSeriesParams are the read parameters for a derived series over [From, To). Only

@@ -71,9 +71,10 @@ class PublicApiShapeTest {
                 new Class<?>[] {String.class, String.class, String.class, String.class, String.class,
                         SeriesResponse.Range.class, List.class});
         assertRecordShape(MemberGroupSeriesResponse.class,
-                new String[] {"counterKey", "bucket", "mode", "timeZone", "range", "series"},
+                new String[] {"counterKey", "bucket", "mode", "timeZone", "range", "memberCount",
+                        "selectedCount", "truncated", "series"},
                 new Class<?>[] {String.class, String.class, String.class, String.class,
-                        SeriesResponse.Range.class, List.class});
+                        SeriesResponse.Range.class, long.class, long.class, boolean.class, List.class});
         assertRecordShape(DerivedSeriesPoint.class,
                 new String[] {"timestamp", "value"},
                 new Class<?>[] {Instant.class, String.class});
