@@ -112,6 +112,96 @@ class ExpandedSurfaceTest {
     }
 
     @Test
+    void declareSerializesFullSetAndParsesNativeTimestamps() throws IOException {
+        String baseUrl = startServer((ex, r) -> json(ex, 200,
+                "{\"results\":[{\"key\":\"requests\",\"status\":\"created\",\"epoch\":0,"
+                        + "\"memberMode\":\"sum\",\"memberSeriesEnabled\":true,"
+                        + "\"memberSeriesEnabledAt\":\"2026-08-10T00:00:00Z\","
+                        + "\"memberSeriesEnabledBy\":\"api_key:key-id\",\"memberCount\":0}],"
+                        + "\"undeclaredCounterWrites\":\"reject\"}"));
+        try (CountersClient c = client(baseUrl)) {
+            DeclareCountersResponse response = c.declare(new DeclareCountersRequest(
+                    List.of(new CounterDeclaration("requests", "sum", true)),
+                    UndeclaredCounterWrites.REJECT));
+
+            assertEquals("POST", recorded.get(0).method());
+            assertEquals("/v1/counters", recorded.get(0).rawPath());
+            Map<String, Object> body = parseBody(recorded.get(0).body());
+            assertEquals("reject", body.get("undeclaredCounterWrites"));
+            assertEquals(
+                    Map.of("key", "requests", "memberMode", "sum", "memberSeriesEnabled", true),
+                    ((List<?>) body.get("counters")).get(0));
+            assertEquals(UndeclaredCounterWrites.REJECT, response.undeclaredCounterWrites());
+            assertEquals("created", response.results().get(0).status());
+            assertEquals(
+                    Instant.parse("2026-08-10T00:00:00Z"),
+                    response.results().get(0).memberSeriesEnabledAt());
+        }
+    }
+
+    @Test
+    void declareRejectsInvalidAndDuplicateEntriesBeforeRequest() throws IOException {
+        String baseUrl = startServer((ex, r) -> json(ex, 500, "{}"));
+        try (CountersClient c = client(baseUrl)) {
+            List<CounterDeclaration> tooMany = new ArrayList<>();
+            for (int i = 0; i < 1001; i++) tooMany.add(new CounterDeclaration("key-" + i));
+            assertThrows(CountersValidationException.class, () -> c.declare(
+                    new DeclareCountersRequest(List.of(), UndeclaredCounterWrites.REJECT)));
+            assertThrows(CountersValidationException.class, () -> c.declare(
+                    new DeclareCountersRequest(tooMany, UndeclaredCounterWrites.REJECT)));
+            assertThrows(CountersValidationException.class, () -> c.declare(
+                    new DeclareCountersRequest(
+                            List.of(new CounterDeclaration("same"), new CounterDeclaration("same")),
+                            UndeclaredCounterWrites.REJECT)));
+            assertThrows(CountersValidationException.class, () -> c.declare(
+                    new DeclareCountersRequest(
+                            List.of(new CounterDeclaration("bad key")),
+                            UndeclaredCounterWrites.ALLOW)));
+            assertThrows(CountersValidationException.class, () -> c.declare(
+                    new DeclareCountersRequest(
+                            List.of(new CounterDeclaration("ok", "median")),
+                            UndeclaredCounterWrites.ALLOW)));
+            assertTrue(recorded.isEmpty());
+        }
+    }
+
+    @Test
+    void counterDetailAndMemberSeriesConfigurationUseNativeTimestamps() throws IOException {
+        String baseUrl = startServer((ex, r) -> {
+            if ("GET".equals(r.method())) {
+                json(ex, 200, "{\"key\":\"requests\",\"value\":\"12\",\"epoch\":4,"
+                        + "\"memberMode\":\"sum\",\"memberSeriesEnabled\":true,"
+                        + "\"memberSeriesEnabledAt\":\"2026-08-10T01:00:00Z\","
+                        + "\"memberSeriesEnabledBy\":\"api_key:key-id\",\"memberCount\":3}");
+            } else {
+                json(ex, 200, "{\"key\":\"requests\",\"enabled\":true,\"memberCount\":3,"
+                        + "\"maxMembersWithSeries\":100,\"mode\":\"sum\","
+                        + "\"enabledAt\":\"2026-08-10T01:00:00Z\","
+                        + "\"enabledBy\":\"api_key:key-id\"}");
+            }
+        });
+        try (CountersClient c = client(baseUrl)) {
+            CounterHandle handle = c.counter("requests");
+            Counter detail = handle.get();
+            assertEquals("GET", recorded.get(0).method());
+            assertEquals("/v1/counters/requests", recorded.get(0).rawPath());
+            assertEquals("sum", detail.memberMode());
+            assertEquals(Boolean.TRUE, detail.memberSeriesEnabled());
+            assertEquals(Instant.parse("2026-08-10T01:00:00Z"), detail.memberSeriesEnabledAt());
+            assertEquals(3L, detail.memberCount());
+
+            MemberSeriesConfig config = handle.setMemberSeries(true, 4L);
+            assertEquals("PUT", recorded.get(1).method());
+            assertEquals("/v1/counters/requests/member-series", recorded.get(1).rawPath());
+            assertEquals(Map.of("enabled", true, "expectedEpoch", 4L), parseBody(recorded.get(1).body()));
+            assertEquals(Instant.parse("2026-08-10T01:00:00Z"), config.enabledAt());
+            assertEquals("api_key:key-id", config.enabledBy());
+            assertThrows(CountersValidationException.class, () -> handle.setMemberSeries(true, -1L));
+            assertEquals(2, recorded.size());
+        }
+    }
+
+    @Test
     void usageSendsAndParses() throws IOException {
         String baseUrl = startServer((ex, r) -> json(ex, 200,
                 "{\"month\":\"2026-07\",\"ops\":{\"used\":12,\"quota\":null,\"resetsAt\":\"2026-08-01T00:00:00Z\"},"

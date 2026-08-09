@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -414,6 +415,9 @@ func TestRemainingDateTimeAndWireNamePublicShapes(t *testing.T) {
 	}{
 		{reflect.TypeOf(Counter{}), "CreatedAt", timePointerType, "createdAt,omitempty"},
 		{reflect.TypeOf(Counter{}), "UpdatedAt", timePointerType, "updatedAt,omitempty"},
+		{reflect.TypeOf(Counter{}), "MemberSeriesEnabledAt", timePointerType, "memberSeriesEnabledAt,omitempty"},
+		{reflect.TypeOf(CounterDeclarationResult{}), "MemberSeriesEnabledAt", timePointerType, "memberSeriesEnabledAt,omitempty"},
+		{reflect.TypeOf(MemberSeriesConfig{}), "EnabledAt", timePointerType, "enabledAt,omitempty"},
 		{reflect.TypeOf(SeriesPoint{}), "Timestamp", timeType, "t"},
 		{reflect.TypeOf(LeaderboardEntry{}), "UpdatedAt", timeType, "updatedAt"},
 		{reflect.TypeOf(MemberSnapshot{}), "UpdatedAt", timeType, "updatedAt"},
@@ -1161,6 +1165,139 @@ func TestListPagination(t *testing.T) {
 	}
 	if p2.NextCursor != "" || len(p2.Data) != 1 || p2.Data[0].Key != "c" || p2.Data[0].Value != "3" {
 		t.Errorf("page2=%+v", p2)
+	}
+}
+
+func TestDeclareSerializesFullSetAndParsesNativeTimestamps(t *testing.T) {
+	enabled := true
+	var gotMethod, gotPath string
+	var gotBody DeclareCountersRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"key":"requests","status":"created","epoch":0,` +
+			`"memberMode":"sum","memberSeriesEnabled":true,` +
+			`"memberSeriesEnabledAt":"2026-08-10T00:00:00Z",` +
+			`"memberSeriesEnabledBy":"api_key:key-id","memberCount":0}],` +
+			`"undeclaredCounterWrites":"reject"}`))
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	response, err := c.Declare(context.Background(), DeclareCountersRequest{
+		Counters: []CounterDeclaration{{
+			Key:                 "requests",
+			MemberMode:          "sum",
+			MemberSeriesEnabled: &enabled,
+		}},
+		UndeclaredCounterWrites: UndeclaredCounterWritesReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/counters" {
+		t.Fatalf("request=%s %s", gotMethod, gotPath)
+	}
+	if gotBody.UndeclaredCounterWrites != UndeclaredCounterWritesReject ||
+		len(gotBody.Counters) != 1 ||
+		gotBody.Counters[0].MemberSeriesEnabled == nil ||
+		!*gotBody.Counters[0].MemberSeriesEnabled {
+		t.Fatalf("request body=%+v", gotBody)
+	}
+	if response.UndeclaredCounterWrites != UndeclaredCounterWritesReject ||
+		response.Results[0].Status != "created" ||
+		response.Results[0].MemberSeriesEnabledAt == nil ||
+		!response.Results[0].MemberSeriesEnabledAt.Equal(time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestDeclareRejectsInvalidRequestsBeforeIO(t *testing.T) {
+	var requests atomic.Int64
+	c := loopbackClient(t, func(r *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return jsonLoopbackResponse(500, `{}`), nil
+	})
+	tooMany := make([]CounterDeclaration, 1001)
+	for i := range tooMany {
+		tooMany[i].Key = fmt.Sprintf("key-%d", i)
+	}
+	tests := []DeclareCountersRequest{
+		{UndeclaredCounterWrites: UndeclaredCounterWritesReject},
+		{Counters: tooMany, UndeclaredCounterWrites: UndeclaredCounterWritesReject},
+		{Counters: []CounterDeclaration{{Key: "same"}, {Key: "same"}}, UndeclaredCounterWrites: UndeclaredCounterWritesReject},
+		{Counters: []CounterDeclaration{{Key: "bad key"}}, UndeclaredCounterWrites: UndeclaredCounterWritesAllow},
+		{Counters: []CounterDeclaration{{Key: "ok", MemberMode: "median"}}, UndeclaredCounterWrites: UndeclaredCounterWritesAllow},
+		{Counters: []CounterDeclaration{{Key: "ok"}}, UndeclaredCounterWrites: "deny"},
+	}
+	for _, request := range tests {
+		if _, err := c.Declare(context.Background(), request); err == nil {
+			t.Errorf("Declare(%+v) succeeded", request)
+		}
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid declarations made %d requests", requests.Load())
+	}
+}
+
+func TestCounterGetAndSetMemberSeries(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case "GET":
+			_, _ = w.Write([]byte(`{"key":"requests","value":"12","epoch":4,"memberMode":"sum",` +
+				`"memberSeriesEnabled":true,"memberSeriesEnabledAt":"2026-08-10T01:00:00Z",` +
+				`"memberSeriesEnabledBy":"api_key:key-id","memberCount":3}`))
+		case "PUT":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			if body["enabled"] != true || body["expectedEpoch"] != float64(4) {
+				t.Errorf("member-series request=%v", body)
+			}
+			_, _ = w.Write([]byte(`{"key":"requests","enabled":true,"memberCount":3,` +
+				`"maxMembersWithSeries":100,"mode":"sum","enabledAt":"2026-08-10T01:00:00Z",` +
+				`"enabledBy":"api_key:key-id"}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(Options{APIKey: "k", BaseURL: srv.URL + "/v1"})
+	h, _ := c.Counter("requests")
+	detail, err := h.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.MemberMode != "sum" || detail.MemberSeriesEnabled == nil || !*detail.MemberSeriesEnabled ||
+		detail.MemberSeriesEnabledAt == nil || detail.MemberCount == nil || *detail.MemberCount != 3 {
+		t.Fatalf("counter detail=%+v", detail)
+	}
+	epoch := int64(4)
+	config, err := h.SetMemberSeries(context.Background(), true, SetMemberSeriesOptions{ExpectedEpoch: &epoch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.EnabledAt == nil || config.EnabledBy != "api_key:key-id" || config.MaxMembersWithSeries != 100 {
+		t.Fatalf("member-series config=%+v", config)
+	}
+	badEpoch := int64(-1)
+	if _, err := h.SetMemberSeries(
+		context.Background(),
+		true,
+		SetMemberSeriesOptions{ExpectedEpoch: &badEpoch},
+	); err == nil {
+		t.Fatal("negative expected epoch succeeded")
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
 	}
 }
 

@@ -250,10 +250,73 @@ type Counter struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Epoch int64  `json:"epoch"`
+	// MemberMode and dimensional-series fields are present on the full counter detail read.
+	MemberMode            string     `json:"memberMode,omitempty"`
+	MemberSeriesEnabled   *bool      `json:"memberSeriesEnabled,omitempty"`
+	MemberSeriesEnabledAt *time.Time `json:"memberSeriesEnabledAt,omitempty"`
+	MemberSeriesEnabledBy string     `json:"memberSeriesEnabledBy,omitempty"`
+	MemberCount           *int64     `json:"memberCount,omitempty"`
 	// CreatedAt/UpdatedAt are optional in the API (spec: date-time), so they are pointers: nil when
 	// the server omits them. time.Time parses the RFC 3339 wire format.
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
+}
+
+// UndeclaredCounterWrites controls whether ordinary writes may implicitly create absent counters.
+type UndeclaredCounterWrites string
+
+const (
+	// UndeclaredCounterWritesAllow permits ordinary writes to create absent counters.
+	UndeclaredCounterWritesAllow UndeclaredCounterWrites = "allow"
+	// UndeclaredCounterWritesReject rejects ordinary writes until the key is declared.
+	UndeclaredCounterWritesReject UndeclaredCounterWrites = "reject"
+)
+
+// CounterDeclaration is the desired immutable configuration for one counter.
+type CounterDeclaration struct {
+	Key                 string `json:"key"`
+	MemberMode          string `json:"memberMode,omitempty"`
+	MemberSeriesEnabled *bool  `json:"memberSeriesEnabled,omitempty"`
+}
+
+// DeclareCountersRequest atomically declares the client's complete known counter set.
+type DeclareCountersRequest struct {
+	Counters                []CounterDeclaration    `json:"counters"`
+	UndeclaredCounterWrites UndeclaredCounterWrites `json:"undeclaredCounterWrites"`
+}
+
+// CounterDeclarationResult is one result from a bulk declaration, in request order.
+type CounterDeclarationResult struct {
+	Key                   string     `json:"key"`
+	Status                string     `json:"status"`
+	Epoch                 int64      `json:"epoch"`
+	MemberMode            string     `json:"memberMode,omitempty"`
+	MemberSeriesEnabled   bool       `json:"memberSeriesEnabled"`
+	MemberSeriesEnabledAt *time.Time `json:"memberSeriesEnabledAt,omitempty"`
+	MemberSeriesEnabledBy string     `json:"memberSeriesEnabledBy,omitempty"`
+	MemberCount           int64      `json:"memberCount"`
+}
+
+// DeclareCountersResponse is returned after every declaration matched or was created.
+type DeclareCountersResponse struct {
+	Results                 []CounterDeclarationResult `json:"results"`
+	UndeclaredCounterWrites UndeclaredCounterWrites    `json:"undeclaredCounterWrites"`
+}
+
+// SetMemberSeriesOptions contains an optional compare-and-set epoch guard.
+type SetMemberSeriesOptions struct {
+	ExpectedEpoch *int64
+}
+
+// MemberSeriesConfig is the counter's current per-member time-series configuration.
+type MemberSeriesConfig struct {
+	Key                  string     `json:"key"`
+	Enabled              bool       `json:"enabled"`
+	MemberCount          int64      `json:"memberCount"`
+	MaxMembersWithSeries int64      `json:"maxMembersWithSeries"`
+	Mode                 string     `json:"mode,omitempty"`
+	EnabledAt            *time.Time `json:"enabledAt,omitempty"`
+	EnabledBy            string     `json:"enabledBy,omitempty"`
 }
 
 // ValueResponse is a counter's current value. Value is a signed arbitrary-precision integer
@@ -860,6 +923,53 @@ func (h *CounterHandle) Value(ctx context.Context) (*ValueResponse, error) {
 	return &out, nil
 }
 
+// Get reads full counter detail, including member mode and dimensional-series configuration.
+func (h *CounterHandle) Get(ctx context.Context) (*Counter, error) {
+	var out Counter
+	err := h.client.do(ctx, "GET", "/counters/"+url.PathEscape(h.Key), nil, "", nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetMemberSeries enables or disables per-member time series. At most one options value may be
+// supplied; ExpectedEpoch makes the update fail if the counter was concurrently cleared.
+func (h *CounterHandle) SetMemberSeries(
+	ctx context.Context,
+	enabled bool,
+	opts ...SetMemberSeriesOptions,
+) (*MemberSeriesConfig, error) {
+	if len(opts) > 1 {
+		return nil, &ValidationError{"at most one SetMemberSeriesOptions value may be supplied"}
+	}
+	var expectedEpoch *int64
+	if len(opts) == 1 {
+		expectedEpoch = opts[0].ExpectedEpoch
+		if expectedEpoch != nil && *expectedEpoch < 0 {
+			return nil, &ValidationError{"expectedEpoch must be non-negative"}
+		}
+	}
+	body := map[string]any{"enabled": enabled}
+	if expectedEpoch != nil {
+		body["expectedEpoch"] = *expectedEpoch
+	}
+	var out MemberSeriesConfig
+	err := h.client.do(
+		ctx,
+		"PUT",
+		"/counters/"+url.PathEscape(h.Key)+"/member-series",
+		body,
+		"",
+		nil,
+		&out,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Series reads the counter's time series (delta per bucket) over [p.From, p.To).
 func (h *CounterHandle) Series(ctx context.Context, p SeriesParams) (*SeriesResponse, error) {
 	q, err := seriesQuery(p)
@@ -1249,6 +1359,61 @@ func (c *Client) List(ctx context.Context, cursor string, limit int) (*CounterPa
 	err := c.do(ctx, "GET", "/counters", nil, "", q, &out)
 	if err != nil {
 		return nil, err
+	}
+	return &out, nil
+}
+
+// Declare atomically creates or verifies the client's complete known counter set and applies the
+// explicit implicit-create policy. The request must contain 1..1000 unique declarations.
+func (c *Client) Declare(ctx context.Context, request DeclareCountersRequest) (*DeclareCountersResponse, error) {
+	if len(request.Counters) < 1 || len(request.Counters) > 1000 {
+		return nil, &ValidationError{"declare counters must contain between 1 and 1000 entries"}
+	}
+	if request.UndeclaredCounterWrites != UndeclaredCounterWritesAllow &&
+		request.UndeclaredCounterWrites != UndeclaredCounterWritesReject {
+		return nil, &ValidationError{"undeclaredCounterWrites must be `allow` or `reject`"}
+	}
+	keys := make(map[string]struct{}, len(request.Counters))
+	for i, declaration := range request.Counters {
+		if !IsValidCounterKey(declaration.Key) {
+			return nil, &ValidationError{fmt.Sprintf(
+				"declare counters[%d] has invalid counter key: %s",
+				i,
+				declaration.Key,
+			)}
+		}
+		if declaration.MemberMode != "" &&
+			declaration.MemberMode != "sum" &&
+			declaration.MemberMode != "latest" &&
+			declaration.MemberMode != "min" &&
+			declaration.MemberMode != "max" {
+			return nil, &ValidationError{fmt.Sprintf(
+				"declare counters[%d] has invalid member mode: %s",
+				i,
+				declaration.MemberMode,
+			)}
+		}
+		if _, duplicate := keys[declaration.Key]; duplicate {
+			return nil, &ValidationError{"declare counters contains duplicate key: " + declaration.Key}
+		}
+		keys[declaration.Key] = struct{}{}
+	}
+	var out DeclareCountersResponse
+	if err := c.do(ctx, "POST", "/counters", request, "", nil, &out); err != nil {
+		return nil, err
+	}
+	if out.UndeclaredCounterWrites != UndeclaredCounterWritesAllow &&
+		out.UndeclaredCounterWrites != UndeclaredCounterWritesReject {
+		return nil, &ValidationError{"response undeclaredCounterWrites must be `allow` or `reject`"}
+	}
+	for i, result := range out.Results {
+		if result.Status != "created" && result.Status != "unchanged" {
+			return nil, &ValidationError{fmt.Sprintf(
+				"declaration result %d has invalid status: %s",
+				i,
+				result.Status,
+			)}
+		}
 	}
 	return &out, nil
 }

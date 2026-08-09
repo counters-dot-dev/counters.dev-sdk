@@ -16,9 +16,12 @@ package dev.counters.examples;
 
 import dev.counters.sdk.Counter;
 import dev.counters.sdk.CounterHandle;
+import dev.counters.sdk.CounterDeclaration;
 import dev.counters.sdk.CounterPage;
 import dev.counters.sdk.CountersApiException;
 import dev.counters.sdk.CountersClient;
+import dev.counters.sdk.DeclareCountersRequest;
+import dev.counters.sdk.DeclareCountersResponse;
 import dev.counters.sdk.DerivedHandle;
 import dev.counters.sdk.DerivedSeriesParams;
 import dev.counters.sdk.Leaderboard;
@@ -27,6 +30,7 @@ import dev.counters.sdk.LeaderboardParams;
 import dev.counters.sdk.MemberGetParams;
 import dev.counters.sdk.MemberHandle;
 import dev.counters.sdk.MemberRemoved;
+import dev.counters.sdk.MemberSeriesConfig;
 import dev.counters.sdk.MemberSnapshot;
 import dev.counters.sdk.MemberValue;
 import dev.counters.sdk.MemberWriteOptions;
@@ -36,6 +40,7 @@ import dev.counters.sdk.SeriesPoint;
 import dev.counters.sdk.SeriesResponse;
 import dev.counters.sdk.SubmitOptions;
 import dev.counters.sdk.Usage;
+import dev.counters.sdk.UndeclaredCounterWrites;
 import dev.counters.sdk.ValueResponse;
 import dev.counters.sdk.WindowLeaderboardParams;
 
@@ -157,6 +162,20 @@ public final class E2e {
             INVOKED.add("CountersClient.counter");
             checkEq(signups.key(), NS + "signups", "handle exposes its validated key");
             INVOKED.add("CounterHandle.key");
+
+            // Startup provisioning: create/verify the known key atomically while leaving implicit
+            // creation enabled for the rest of this broad surface tour.
+            DeclareCountersResponse declared = client.declare(new DeclareCountersRequest(
+                    List.of(new CounterDeclaration(NS + "signups", null, true)),
+                    UndeclaredCounterWrites.ALLOW));
+            INVOKED.add("CountersClient.declare");
+            checkEq(declared.results().get(0).status(), "created", "fresh startup declaration creates its counter");
+            Counter signupDetail = signups.get();
+            INVOKED.add("CounterHandle.get");
+            checkEq(signupDetail.memberSeriesEnabled(), true, "detail exposes declared member-series state");
+            MemberSeriesConfig signupSeries = signups.setMemberSeries(true, 0L);
+            INVOKED.add("CounterHandle.setMemberSeries");
+            check(signupSeries.enabled(), "API key can idempotently enable member series");
 
             // Confirmed writes: apply immediately, return the new state.
             Counter first = signups.addNow(5);

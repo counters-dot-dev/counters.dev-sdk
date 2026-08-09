@@ -1,5 +1,13 @@
 import { CountersValidationError } from "./errors.js";
-import type { AmountInput, ValueInput } from "./types.js";
+import type {
+  AmountInput,
+  CounterDeclaration,
+  DeclareCountersRequest,
+  Mode,
+  SetMemberSeriesOptions,
+  UndeclaredCounterWrites,
+  ValueInput,
+} from "./types.js";
 
 /** Allowed counter-key shape. Kept in lockstep with the server + OpenAPI (conformance/counter-keys.json). */
 export const COUNTER_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -11,6 +19,62 @@ export function isValidCounterKey(key: string): boolean {
 export function assertCounterKey(key: string): void {
   if (!isValidCounterKey(key)) {
     throw new CountersValidationError(`invalid counter key: ${describeValue(key)}`);
+  }
+}
+
+const MODES: readonly Mode[] = ["sum", "latest", "min", "max"];
+const UNDECLARED_WRITE_POLICIES: readonly UndeclaredCounterWrites[] = ["allow", "reject"];
+
+/** Validate an atomic declaration before any request is made. */
+export function assertDeclareCountersRequest(request: DeclareCountersRequest): void {
+  if (request == null || typeof request !== "object" || Array.isArray(request)) {
+    throw new CountersValidationError("declare request must be an object");
+  }
+  if (!Array.isArray(request.counters) || request.counters.length < 1 || request.counters.length > 1000) {
+    throw new CountersValidationError("declare counters must contain between 1 and 1000 entries");
+  }
+  if (!UNDECLARED_WRITE_POLICIES.includes(request.undeclaredCounterWrites)) {
+    throw new CountersValidationError("undeclaredCounterWrites must be `allow` or `reject`");
+  }
+  const keys = new Set<string>();
+  for (const [index, declaration] of request.counters.entries()) {
+    assertCounterDeclaration(declaration, index);
+    if (keys.has(declaration.key)) {
+      throw new CountersValidationError(`declare counters contains duplicate key: ${declaration.key}`);
+    }
+    keys.add(declaration.key);
+  }
+}
+
+function assertCounterDeclaration(declaration: CounterDeclaration, index: number): void {
+  if (declaration == null || typeof declaration !== "object" || Array.isArray(declaration)) {
+    throw new CountersValidationError(`declare counters[${index}] must be an object`);
+  }
+  assertCounterKey(declaration.key);
+  if (declaration.memberMode !== undefined && !MODES.includes(declaration.memberMode)) {
+    throw new CountersValidationError(`declare counters[${index}].memberMode is invalid`);
+  }
+  if (
+    declaration.memberSeriesEnabled !== undefined
+    && typeof declaration.memberSeriesEnabled !== "boolean"
+  ) {
+    throw new CountersValidationError(
+      `declare counters[${index}].memberSeriesEnabled must be a boolean`,
+    );
+  }
+}
+
+/** Validate member-series compare-and-set options before any request is made. */
+export function assertSetMemberSeriesOptions(options?: SetMemberSeriesOptions): void {
+  if (options === undefined) return;
+  if (options == null || typeof options !== "object" || Array.isArray(options)) {
+    throw new CountersValidationError("member-series options must be an object");
+  }
+  if (
+    options.expectedEpoch !== undefined
+    && (!Number.isSafeInteger(options.expectedEpoch) || options.expectedEpoch < 0)
+  ) {
+    throw new CountersValidationError("expectedEpoch must be a non-negative safe integer");
   }
 }
 

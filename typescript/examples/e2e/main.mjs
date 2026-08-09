@@ -87,6 +87,21 @@ async function tour() {
   const signups = client.counter(`${ns}signups`);
   invoked.add("CountersClient.counter");
 
+  // Startup provisioning: atomically create/verify the known key and keep backwards-compatible
+  // implicit creation enabled for the rest of this broad surface tour.
+  const declared = await client.declare({
+    counters: [{ key: `${ns}signups`, memberSeriesEnabled: true }],
+    undeclaredCounterWrites: "allow",
+  });
+  invoked.add("CountersClient.declare");
+  assertEq(declared.results[0].status, "created", "fresh startup declaration creates its counter");
+  const signupDetail = await signups.get();
+  invoked.add("CounterHandle.get");
+  assertEq(signupDetail.memberSeriesEnabled, true, "detail exposes declared member-series state");
+  const signupSeriesConfig = await signups.setMemberSeries(true, { expectedEpoch: 0 });
+  invoked.add("CounterHandle.setMemberSeries");
+  assertEq(signupSeriesConfig.enabled, true, "API key can idempotently enable member series");
+
   // Confirmed writes: apply immediately, return the new state.
   const first = await signups.addNow(5);
   invoked.add("CounterHandle.addNow");
@@ -479,8 +494,8 @@ async function replayVectors() {
 
 function surfaceGate() {
   const documented = {
-    CountersClient: ["counter", "list", "usage", "derived", "flush", "close"],
-    CounterHandle: ["add", "subtract", "addNow", "subtractNow", "clear", "delete", "value", "series", "leaderboard", "member"],
+    CountersClient: ["counter", "declare", "list", "usage", "derived", "flush", "close"],
+    CounterHandle: ["add", "subtract", "addNow", "subtractNow", "clear", "delete", "value", "get", "setMemberSeries", "series", "leaderboard", "member"],
     MemberHandle: ["get", "remove", "add", "subtract", "submit"],
     DerivedHandle: ["value", "series"],
     PublishableCountersClient: ["counter", "close"],
@@ -489,7 +504,7 @@ function surfaceGate() {
   const internals = {
     CountersClient: new Set([
       "constructor", "enqueue", "addNow", "subtractNow", "clearCounter", "deleteCounter", "getValue",
-      "getSeries", "fireSingle", "submitBatch", "getLeaderboard", "getMember",
+      "getCounter", "setMemberSeries", "getSeries", "fireSingle", "submitBatch", "getLeaderboard", "getMember",
       "removeMember", "addToMember", "subtractFromMember", "submitMember", "memberDelta",
       "getDerivedValue", "getDerivedSeries",
     ]),

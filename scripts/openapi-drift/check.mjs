@@ -44,7 +44,9 @@ for (const op of operations) {
 // behavior drift (that is what conformance/http + the example-app E2E are for).
 // Op segments may be a path literal ("/add") or a quoted op token passed to a shared helper ("add").
 const SIGNATURES = {
+  declareCounters: [/\/counters\b/, /declare/i],
   listCounters: [/\/counters\b/],
+  getCounter: [/\/counters\//],
   deleteCounter: [/\/counters\b/, /delete/i],
   addToCounter: [/(\/add\b|["'`]add["'`])/],
   subtractFromCounter: [/(\/subtract\b|["'`]subtract["'`])/],
@@ -54,6 +56,7 @@ const SIGNATURES = {
   batchOperations: [/\/batch\b/],
   getUsage: [/\/usage\b/],
   getCounterLeaderboard: [/\/leaderboard\b/],
+  setCounterMemberSeries: [/\/member-series\b/, /put/i],
   getMember: [/\/members\//],
   removeMember: [/\/members\//, /delete/i],
   addToMember: [/\/members\//, /(\/add\b|["'`]add["'`])/],
@@ -64,18 +67,26 @@ const SIGNATURES = {
 };
 
 const PARAM_SIGNATURES = {
+  declareCounters: [
+    { name: "undeclaredCounterWrites", signatures: [/undeclaredCounterWrites/i] },
+    { name: "memberMode", signatures: [/memberMode/i] },
+    { name: "memberSeriesEnabled", signatures: [/memberSeriesEnabled/i] },
+  ],
   getCounterSeries: [
     { name: "groupBy/group_by", signatures: [/groupBy|group_by/i] },
     { name: "member", signatures: [/\bmember\b/i] },
     { name: "mode", signatures: [/\bmode\b/i] },
   ],
   getCounterLeaderboard: [{ name: "window", signatures: [/window/i] }],
+  setCounterMemberSeries: [
+    { name: "enabled", signatures: [/enabled/i] },
+    { name: "expectedEpoch", signatures: [/expectedEpoch/i] },
+  ],
 };
 
 // Spec operations the SDKs intentionally do NOT implement. Adding an operationId here is a product
 // decision — record why.
 const NOT_SDK_SURFACE = {
-  getCounter: "metadata GET duplicates value() today; revisit if the spec grows metadata-only fields",
   getDashboardReadCounter: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadCounterLeaderboard: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadCounterSeries: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
