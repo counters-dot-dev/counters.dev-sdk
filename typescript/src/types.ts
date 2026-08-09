@@ -323,6 +323,12 @@ export interface MemberGroupSeriesResponse {
   /** IANA time zone used for calendar bucket boundaries. */
   timeZone?: string;
   range: { from: Date; to: Date };
+  /** Number of members with activity in the requested range before selection. */
+  memberCount: number;
+  /** Number of real member series selected (excluding a synthetic `$other` series). */
+  selectedCount: number;
+  /** Whether selection omitted one or more real members. */
+  truncated: boolean;
   series: MemberSeriesEntry[];
 }
 

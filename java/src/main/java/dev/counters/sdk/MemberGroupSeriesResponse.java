@@ -14,4 +14,7 @@ public record MemberGroupSeriesResponse(
         String mode,
         String timeZone,
         SeriesResponse.Range range,
+        long memberCount,
+        long selectedCount,
+        boolean truncated,
         List<MemberSeriesEntry> series) {}

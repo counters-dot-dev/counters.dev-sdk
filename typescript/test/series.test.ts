@@ -102,6 +102,11 @@ describe("series conformance (conformance/series)", () => {
       // The spec requires a top-level `mode` on a group series; the current conformance vector
       // predates it (flagged upstream), so assert exact passthrough of whatever the body carried.
       expect((r as unknown as { mode?: unknown }).mode).toBe((c.body as { mode?: string }).mode);
+      if ("memberCount" in c.body) {
+        expect(r.memberCount).toBe(c.body.memberCount);
+        expect(r.selectedCount).toBe(c.body.selectedCount);
+        expect(r.truncated).toBe(c.body.truncated);
+      }
       assertRange(r.range, range);
       expect(r.series).toHaveLength(ex.series.length);
       r.series.forEach((s, i) => {
@@ -164,6 +169,9 @@ describe("series conformance (conformance/series)", () => {
           counterKey: "best-lap",
           bucket: "1h",
           mode: "min",
+          memberCount: 2,
+          selectedCount: 1,
+          truncated: true,
           range,
           series: [{ member: "alice", points: [{ t: "2026-07-01T09:00:00Z", v: "1417" }] }],
         }),
@@ -171,6 +179,9 @@ describe("series conformance (conformance/series)", () => {
     });
     const groupSeries = await grouped.counter("best-lap").series({ from, to, bucket: "1h", groupBy: "member" });
     expect(groupSeries.mode).toBe("min");
+    expect(groupSeries.memberCount).toBe(2);
+    expect(groupSeries.selectedCount).toBe(1);
+    expect(groupSeries.truncated).toBe(true);
   });
 });
 
