@@ -153,9 +153,3 @@ jobs:
           fi
           echo "publishing $tarball"
           npm publish "$tarball" --access public
-        env:
-          # Provenance is generated automatically under trusted publishing, but npm refuses to
-          # attest a package whose source repository is private — provenance from private repos
-          # has been unsupported since 2023. Drop this line when counters.dev-sdk goes public;
-          # provenance is worth having and costs nothing once the repo is visible.
-          NPM_CONFIG_PROVENANCE: "false"
