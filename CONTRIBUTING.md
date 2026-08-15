@@ -21,6 +21,13 @@ language's directory change. On your pull request it runs:
 
 Results are posted back as a sticky comment on the pull request.
 
+On pushes to `main`, the three SDK test jobs and the OpenAPI validation job report CI metrics to
+counters.dev. Configuring `COUNTERS_API_KEY` as a repository secret enables the live writes. The
+metrics helper is fail-open and short-circuits when the secret is absent, so pull requests and
+pre-provisioning runs are inert. Per-app time series requires dashboard member-series enablement for
+the CI counters before the secret is turned on; leaderboards and total counter series work without
+that manual enablement.
+
 ### Why there are no end-to-end tests here
 
 Each SDK's example app can be run against a **live counters.dev service** to replay the shared HTTP

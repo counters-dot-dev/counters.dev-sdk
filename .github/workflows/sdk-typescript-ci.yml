@@ -25,6 +25,12 @@ jobs:
       run:
         working-directory: typescript
     steps:
+      - name: Metrics — mark start
+        if: github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        working-directory: .
+        run: echo "CI_T0=$(date +%s)" >> "$GITHUB_ENV" || echo "::warning::failed to mark CI metrics start time (ignored)"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -38,19 +44,54 @@ jobs:
         run: npm run test:coverage 2>&1 | tee /tmp/unit.log
       - run: npm run build
       - name: Unit summary
+        if: always()
         id: sum
         shell: bash
         run: |
           # test runners force ANSI colors on GitHub Actions; strip them or the greps miss
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+          if [ -f /tmp/unit.log ]; then
+            sed 's/\x1b\[[0-9;]*m//g' /tmp/unit.log > /tmp/unit.txt
+            tests_line="$(grep -m1 -E '^[[:space:]]*Tests[[:space:]]+' /tmp/unit.txt || true)"
+            passed="$(printf '%s\n' "$tests_line" | sed -nE 's/.*[[:space:]]([0-9]+) passed.*/\1/p')"
+            failed="$(printf '%s\n' "$tests_line" | sed -nE 's/.*[[:space:]]([0-9]+) failed.*/\1/p')"
+            passed="${passed:-0}"
+            failed="${failed:-0}"
+          else
+            : > /tmp/unit.txt
+            tests_line=""
+            passed=""
+            failed=""
+          fi
+          coverage_line="$(grep -m1 'All files' /tmp/unit.txt || true)"
           {
             echo 'summary<<EOF_SUMMARY'
-            echo "- unit: \`$(grep -m1 -E 'Tests {2}[0-9]+ passed' /tmp/unit.txt | xargs)\`"
-            grep -m1 'All files' /tmp/unit.txt \
-              | awk -F'|' '{gsub(/ /,"",$2); gsub(/ /,"",$3); gsub(/ /,"",$4); gsub(/ /,"",$5);
-                            printf "- coverage: %s%% stmts · %s%% branch · %s%% funcs · %s%% lines\n", $2, $3, $4, $5}'
+            echo "- unit: \`${tests_line:-not available}\`"
+            if [ -n "$coverage_line" ]; then
+              printf '%s\n' "$coverage_line" \
+                | awk -F'|' '{gsub(/ /,"",$2); gsub(/ /,"",$3); gsub(/ /,"",$4); gsub(/ /,"",$5);
+                              printf "- coverage: %s%% stmts · %s%% branch · %s%% funcs · %s%% lines\n", $2, $3, $4, $5}'
+            else
+              echo "- coverage: _not available_"
+            fi
             echo 'EOF_SUMMARY'
+            if [ -n "${passed}${failed}" ]; then
+              echo "passed=$passed"
+              echo "failed=$failed"
+            fi
           } >> "$GITHUB_OUTPUT"
+      - name: Metrics — report to counters.dev
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        shell: bash
+        working-directory: .
+        env:
+          COUNTERS_API_KEY: ${{ secrets.COUNTERS_API_KEY }}
+          APP: sdk-typescript
+          BUILD_OUTCOME: ${{ job.status }}
+          PASSED: ${{ steps.sum.outputs.passed }}
+          FAILED: ${{ steps.sum.outputs.failed }}
+          IDEM_SCOPE: ${{ github.repository }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/ci/counters-count.sh
 
   example:
     # Compile the example apps against the SDK just built. They are deliberately NOT executed: running them
