@@ -105,6 +105,18 @@ const NOT_SDK_SURFACE = {
   mintDashboardPlaneToken: "dashboard-only WorkOS-authenticated mint endpoint — consumed by dashboard web, not machine SDKs",
   previewDashboardReadDerived: "dashboard-only direct-to-plane read-only evaluation — consumed by dashboard web, not machine SDKs",
   getPublicCounterValue: "keyless public demo endpoint — website-only by design",
+  listMachineAlertRules: "hub machine API-key surface for alert rules (SDK clients land separately)",
+  createMachineAlertRule: "hub machine API-key surface for alert rules (SDK clients land separately)",
+  getMachineAlertRule: "hub machine API-key surface for alert rules (SDK clients land separately)",
+  updateMachineAlertRule: "hub machine API-key surface for alert rules (SDK clients land separately)",
+  deleteMachineAlertRule: "hub machine API-key surface for alert rules (SDK clients land separately)",
+  acknowledgeMachineAlertIncident: "hub machine API-key surface for alert incidents (SDK clients land separately)",
+  listMachineDerivedDefinitions: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  createMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  getMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  updateMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  deleteMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  previewMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
   tapPublicCounter: "keyless public demo endpoint — website-only by design",
 };
 
@@ -215,6 +227,19 @@ const NOT_SDK_SCHEMAS = new Set([
   "DashboardPlaneToken", // dashboard-only surface
   "DashboardUsage", // dashboard-only surface
   "DerivedPreviewRequest", // dashboard-only surface (previewDashboardReadDerived)
+  "MachineAckRequest", // hub machine surface (acknowledgeMachineAlertIncident)
+  "MachineAlertIncident", // hub machine surface (acknowledgeMachineAlertIncident)
+  "MachineAlertRule", // hub machine surface (listMachineAlertRules)
+  "MachineAlertRuleList", // hub machine surface (listMachineAlertRules)
+  "MachineAlertTargetType", // hub machine surface (createMachineAlertRule)
+  "MachineCommandPending", // hub machine surface (acknowledgeMachineAlertIncident)
+  "MachineCreateAlertRuleRequest", // hub machine surface (createMachineAlertRule)
+  "MachineCreateDerivedDefinitionRequest", // hub machine surface (createMachineDerivedDefinition)
+  "MachineDerivedDefinition", // hub machine surface (listMachineDerivedDefinitions)
+  "MachineDerivedDefinitionList", // hub machine surface (listMachineDerivedDefinitions)
+  "MachinePreviewDerivedRequest", // hub machine surface (previewMachineDerivedDefinition)
+  "MachineUpdateAlertRuleRequest", // hub machine surface (updateMachineAlertRule)
+  "MachineUpdateDerivedDefinitionRequest", // hub machine surface (updateMachineDerivedDefinition)
 ]);
 
 // Wire names the SDKs deliberately expand on their public types. A required wire property is
