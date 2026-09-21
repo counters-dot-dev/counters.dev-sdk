@@ -92,6 +92,11 @@ const PARAM_SIGNATURES = {
 // Spec operations the SDKs intentionally do NOT implement. Adding an operationId here is a product
 // decision — record why.
 const NOT_SDK_SURFACE = {
+  createDashboardBoard: "dashboard-only WorkOS-authenticated board storage — consumed by dashboard web; SDK coverage lands with key-authed board access",
+  deleteDashboardBoard: "dashboard-only WorkOS-authenticated board storage — consumed by dashboard web; SDK coverage lands with key-authed board access",
+  getDashboardBoard: "dashboard-only WorkOS-authenticated board storage — consumed by dashboard web; SDK coverage lands with key-authed board access",
+  listDashboardBoards: "dashboard-only WorkOS-authenticated board storage — consumed by dashboard web; SDK coverage lands with key-authed board access",
+  updateDashboardBoard: "dashboard-only WorkOS-authenticated board storage — consumed by dashboard web; SDK coverage lands with key-authed board access",
   getDashboardReadCounter: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadCounterLeaderboard: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
   getDashboardReadCounterSeries: "dashboard-only direct-to-plane read surface — consumed by dashboard web, not machine SDKs",
@@ -209,6 +214,9 @@ for (const [lang, text] of Object.entries(sources)) {
 
 // Spec schemas the SDKs intentionally do NOT model (mirror NOT_SDK_SURFACE for schemas).
 const NOT_SDK_SCHEMAS = new Set([
+  "DashboardBoard", // dashboard-only surface (per-board storage); SDK coverage lands with key-authed board access
+  "DashboardBoardList", // dashboard-only surface (listDashboardBoards)
+  "DashboardBoardWidget", // dashboard-only surface (per-board storage)
   "DashboardEntitlementBoost", // dashboard-only surface (getDashboardReadEntitlements)
   "DashboardEntitlementDimension", // dashboard-only surface (getDashboardReadEntitlements)
   "DashboardEntitlementsUsage", // dashboard-only surface (getDashboardReadEntitlements)
