@@ -22,6 +22,18 @@
       "expect": { "taxonomy": "api", "status": 401 }
     },
     {
+      "name": "scope-denied-problem-json",
+      "note": "API-key scope enforcement in enforce mode: 403 with the stable type scope_denied and the required scope as an extension member. The key's own scope set is never echoed. Surfaces as the api type with status 403 and the title; the required/type members ride along as problem details.",
+      "response": { "status": 403, "body": { "type": "scope_denied", "title": "missing required scope: counter:manage", "status": 403, "required": "counter:manage" } },
+      "expect": { "taxonomy": "api", "status": 403, "title": "missing required scope: counter:manage" }
+    },
+    {
+      "name": "expired-api-key",
+      "note": "An expired API key authenticates as invalid: uniform 401, indistinguishable from an unknown key (no expiry oracle).",
+      "response": { "status": 401, "body": { "title": "invalid api key", "status": 401 } },
+      "expect": { "taxonomy": "api", "status": 401, "title": "invalid api key" }
+    },
+    {
       "name": "bad-request-empty-body",
       "response": { "status": 400, "body": null },
       "expect": { "taxonomy": "api", "status": 400 }

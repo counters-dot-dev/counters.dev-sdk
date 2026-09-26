@@ -29,26 +29,29 @@ params and the decimal/`null` response shapes — is pinned client-side in
 [`conformance/derived/`](../derived/README.md); every SDK implements the read surface.
 
 **Dimensional member series** (`series?member=`, `series?groupBy=member`,
-`leaderboard?window=`) have no `cases.json` happy-path vectors for the *same* reason: reads require
-the counter to have member series *enabled*, and the toggle
-(`PUT /dashboard/counters/{key}/member-series`) is dashboard-plane (JWT) — unreachable by the
-API-key-only runners here. Their HTTP contract is covered by the `member-series-*` /
+`leaderboard?window=`) have no `cases.json` happy-path vectors. Member series can be enabled through
+either the full-API-key operation `PUT /v1/counters/{key}/member-series` or the audited dashboard
+operation `PUT /dashboard/counters/{key}/member-series`; OpenAPI owns the former's exact configuration
+contract. The dimensional-read HTTP contract is covered by the `member-series-*` /
 `window-leaderboard-*` entries in `requests.json` (401 + route-level 400 guards: opt-in required,
-`member`+`groupBy` mutually exclusive, bad `groupBy`), plus the service's own suites (auth classes,
-rate limiting, the `pk_` read surface, and the full happy path through the dashboard-plane toggle:
-bucket exactness, groupBy, windowed ranking, `pk_` embed + CORS, bucket floor, window labels,
+`member`+`groupBy` mutually exclusive, bad `groupBy`, top without groupBy, invalid `other`), plus the
+service's own suites (auth classes, API-key configuration and epoch/provenance semantics, rate
+limiting, the `pk_` read surface, and the full dimensional-read happy path:
+bucket exactness, mode-aware top-N selection, point-budget preflight, the sum-only `$other` tail,
+selection metadata, windowed ranking, `pk_` embed + CORS, bucket floor, window labels, and
 cross-tenant isolation). The
-SDK-facing encode/parse contract for these variants is pinned client-side instead: the
+SDK-facing base dimensional encode/parse contract is pinned client-side instead: the
 `member`/`groupBy` query cases and `MemberSeriesResponse`/`MemberGroupSeriesResponse` parse cases in
 [`conformance/series/`](../series/README.md), and the leaderboard `window=` read + `WindowLeaderboard`
-parse cases in [`conformance/leaderboard/`](../leaderboard/README.md). Every SDK implements the
-dimensional surface (drift guard: the reads are query-param variants of
+parse cases in [`conformance/leaderboard/`](../leaderboard/README.md). The REST-only `top`/`other`
+parameters are owned by OpenAPI and the service suites. Every SDK implements the base dimensional
+surface (drift guard: the reads are query-param variants of
 `getCounterSeries`/`getCounterLeaderboard`, so no new operationIds).
 
 **Score-mode dimensional reads** (`min`/`max`/`latest` member series
-and windowed boards) inherit that same resolution: they still require member series *enabled* (the
-dashboard-plane toggle these runners cannot reach), so there are no `cases.json` happy-path vectors for
-them either. Their end-to-end contract — mode-correct aggregation (per-bucket min/max/latest), the
+and windowed boards) inherit that same resolution: they still require member series *enabled*, so
+there are no `cases.json` happy-path vectors for them either. Their end-to-end contract — mode-correct
+aggregation (per-bucket min/max/latest), the
 `mode` response field (`min`/`max`/`latest` on score series vs `delta` on sum; the board mode on the
 window board), score-series `gapfill=true` → 400, sparse `groupBy` points, mode-driven default order
 (`asc` on `min` windows), and the omitted (`null`) score `total` — is pinned by the service's own

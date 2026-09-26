@@ -38,7 +38,9 @@
   - `kind: "memberSeries"` — a `MemberSeriesResponse` (`series?member=`): the plain series shape plus
     a top-level `member`.
   - `kind: "memberGroupSeries"` — a `MemberGroupSeriesResponse` (`series?groupBy=member`): a `series`
-    array of `{member, points}`, with **no** top-level `mode`.
+    array of `{member, points}` plus `memberCount`, `selectedCount`, and `truncated` selection metadata.
+    Its top-level `mode` is the point value-type: `delta` on sum boards, or `min`/`max`/`latest` on
+    score boards.
   Every case's `expect` lists exactly the fields a loader asserts; fields present on the wire body but
   absent from `expect` (e.g. `range`) are not asserted.
 

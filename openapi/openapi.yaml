@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Counters API
-  version: 0.7.0
+  version: 0.14.0
   summary: Multi-tenant arbitrary-precision counter service.
   description: |
     The public REST API for Counters, and the shape source of truth for the hand-written SDKs
@@ -18,7 +18,58 @@ info:
       operation that first used it; reusing the same key for a **different** operation (e.g. an `add` key replayed on a
       `clear`) is rejected with `409 Conflict` rather than returning a result the second operation never produced.
     - **Auth:** SDK/machine calls use an organization API key (HTTP Bearer). All data is scoped to the key's organization.
+
+    ## API-key scopes and expiry
+    - Every organization API key carries a scope set. `x-api-key-scope` on each operation names the scope
+      that operation requires; `POST /batch` scopes per contained operation (`counter:write` each, and
+      `counter:manage` for contained deletes — a batch containing any operation the key may not run is
+      rejected whole with `403` before anything executes).
+    - The vocabulary: `counter:read|write|manage`, `otlp:write`, plus `board:*`, `alert:*`, and
+      `derived:*` families (`derived:*` governs derived-counter *definitions*; reading derived *values*
+      stays under `counter:read`), and `key:mint` (minting new keys on the hub machine surface —
+      outside the read/write/manage ladder, never implied by any other scope). Keys minted before
+      scopes existed behave as the legacy quartet `counter:read`, `counter:write`, `counter:manage`,
+      `otlp:write`.
+    - Scope enforcement rolls out per environment and per organization (`off` → `warn` → `enforce`);
+      while enforcement is off, scopes are validated at issuance and projected, but not consulted at
+      request time. In `enforce`, a missing scope is a `403` with problem `type: "scope_denied"` naming
+      the **required** scope (the key's own scope set is never echoed).
+    - Keys may carry an `expiresAt`; an expired key authenticates as invalid (`401`), indistinguishable
+      from an unknown key.
+    - **Machine surface (alerts, derived definitions, boards, keys):** `GET/POST /alerts`,
+      `/alerts/{ruleId}`, `POST /alerts/incidents/{incidentId}/ack`, `/derived` (+ `/{key}`),
+      `GET/POST /boards` (+ `/{boardId}`), `POST /keys`, and `DELETE /keys/self` are served
+      from the **hub host** (`https://hub.counters.dev/v1`) for organization API keys — a separate
+      surface from the WorkOS-only dashboard routes. Publishable (`pk_`) tokens are rejected here
+      before any scope check. Unlike the data-plane operations above, the machine surface's scope
+      gates are **always enforced**, regardless of the `off`/`warn`/`enforce` rollout mode: new
+      routes have no legacy key behaviour to protect. The surface is on by default for every
+      organization (only an operator-disabled organization sees `404` on every machine route),
+      is rate-limited
+      per key (20 rps, burst 40), sends no CORS headers, and audits every mutation as the `api_key`
+      actor. Machine `POST` creates accept an `Idempotency-Key` (a lowercase v1–v5 UUID): retrying with
+      the same key replays the recorded rule/definition/board (`200`) instead of double-creating; the same
+      key with a different body is `409`, and a replay whose original resource has since been deleted
+      (or, for a derived definition, changed) is `409` with problem type `idempotency_key_reused`
+      (a replay never re-creates). A key-mint replay (`200`) carries the minted key's metadata but
+      never its secret — the secret is returned exactly once, on the initial `201`. Board updates
+      take `If-Match` on the current revision; a stale revision is `409`, never a silent overwrite.
+      Agents building boards from existing counters list them with data-plane `GET /v1/counters`
+      under `counter:read`, then write the board here —
+      see `docs/AGENT-BOARDS-GUIDE.md` for the widget reference, worked examples, key delegation recipes, and self-destruct.
     - **Counters may go negative.** `clear` resets to zero by starting a new epoch; historical series are retained.
+
+    ## Counter declaration and strict-key policy
+    - Clients may submit their full known counter set and desired settings at startup with one
+      `POST /counters`. The service processes bounded transaction batches and returns per-key results:
+      matching declarations are cheap no-ops, valid new keys land, and invalid or mismatched keys are
+      isolated errors. Newly created counters alone consume one monthly operation each.
+    - `undeclaredCounterWrites` is a per-organization safety policy with explicit polarity. `allow`
+      preserves implicit counter creation by ordinary writes. `reject` makes the declared counter rows
+      the allowlist: an ordinary write to an absent key fails with `409` and problem type
+      `urn:counters:problem:counter-not-declared`. Read it and update it with versioned CAS through
+      `/counter-write-policy`; startup declarations cannot overwrite it. A missing row is implicit
+      `allow` during rolling deployment. Declaration remains the only way to create a key under reject.
 
     ## Dashboard direct reads
     - Browser dashboard core reads for usage, counters, values, series, leaderboards, member state, and
@@ -66,6 +117,27 @@ tags:
     description: |
       Dashboard-only browser surfaces. These are documented here for contract visibility but are
       not part of the machine (/v1, SDK) contract; the SDKs do not implement them.
+  - name: alerts
+    description: |
+      Alert rules and incident acknowledgement on the hub machine surface. Organization API key
+      authentication; every operation names its required scope in `x-api-key-scope`, always enforced.
+  - name: boards
+    description: |
+      Per-board dashboard storage on the hub machine surface — the same BoardV1 rows and wire
+      shape the web app reads and writes. Organization API key authentication; every operation
+      names its required scope in `x-api-key-scope`, always enforced. Agent how-to (widget
+      reference, worked counters-to-board example): `docs/AGENT-BOARDS-GUIDE.md`.
+  - name: derived
+    description: |
+      Derived-counter definitions on the hub machine surface. Organization API key authentication;
+      every operation names its required scope in `x-api-key-scope`, always enforced. (Reading
+      derived *values* stays on the data plane under `counter:read`.)
+  - name: keys
+    description: |
+      Machine key management on the hub machine surface: minting scoped keys (`POST /keys`
+      requires `key:mint`, always enforced) and self-destruct (`DELETE /keys/self` requires no
+      scope — any valid organization API key may destroy itself). Agent how-to (delegation
+      recipe, required scopes, what to ask the human for): `docs/AGENT-BOARDS-GUIDE.md`.
 
 paths:
   /dashboard/plane-token:
@@ -92,6 +164,160 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /dashboard/boards/v2:
+    servers:
+      - url: https://api.counters.dev
+        description: Dashboard hub endpoints live at the API origin root, not under /v1.
+    get:
+      operationId: listDashboardBoards
+      summary: List the organization's boards
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: |
+        WorkOS-authenticated dashboard endpoint. Returns every board (BoardV1 plus revision
+        metadata) in stable creation order. When the organization still carries a legacy
+        single-blob boards document and has never listed v2 boards, the first call imports the
+        blob's boards into rows (idempotent; the blob itself is left untouched).
+      responses:
+        '200':
+          description: The organization's boards (empty when none exist).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoardList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createDashboardBoard
+      summary: Create a board
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: |
+        WorkOS-authenticated dashboard endpoint (write role: owner/admin/member). The request
+        carries only `{name, widgets}` — every other member is rejected, and the server mints
+        `id`, timestamps, and `revision: 1`. An `Idempotency-Key` header makes the create
+        replay-safe: repeating the same body with the same key returns the original board
+        (`200`); reusing the key with a different body is `409 Conflict`.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Optional client-supplied key for replay-safe creates. The key lives on the board row
+            until the board is deleted: a replay with the identical body returns the original
+            board, while a different body under the same key is rejected with `409 Conflict`.
+          schema: { type: string, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, widgets]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                widgets:
+                  type: array
+                  maxItems: 12
+                  items: { $ref: '#/components/schemas/DashboardBoardWidget' }
+      responses:
+        '201':
+          description: The created board.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '200':
+          description: Idempotent replay — the board the key already created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+
+  /dashboard/boards/v2/{boardId}:
+    servers:
+      - url: https://api.counters.dev
+        description: Dashboard hub endpoints live at the API origin root, not under /v1.
+    parameters:
+      - $ref: '#/components/parameters/BoardId'
+    get:
+      operationId: getDashboardBoard
+      summary: Read one board
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: WorkOS-authenticated dashboard endpoint. Returns one board with its revision metadata.
+      responses:
+        '200':
+          description: The board.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: updateDashboardBoard
+      summary: Replace a board under optimistic concurrency
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: |
+        WorkOS-authenticated dashboard endpoint (write role: owner/admin/member). Replaces the
+        board's `name`/`widgets` (same `{name, widgets}` shape and validation as create) iff the
+        `If-Match` revision equals the stored revision, bumping it by one. A stale revision is
+        `412 Precondition Failed` — re-read the board and retry.
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: The board's current revision, as last read.
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, widgets]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                widgets:
+                  type: array
+                  maxItems: 12
+                  items: { $ref: '#/components/schemas/DashboardBoardWidget' }
+      responses:
+        '200':
+          description: The updated board with its bumped revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+    delete:
+      operationId: deleteDashboardBoard
+      summary: Delete a board
+      security:
+        - workOs: []
+      tags: [dashboard]
+      description: 'WorkOS-authenticated dashboard endpoint (write role: owner/admin/member).'
+      responses:
+        '204':
+          description: The board was deleted.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /dashboard-read/usage:
     servers:
@@ -266,6 +492,8 @@ paths:
         - name: groupBy
           in: query
           schema: { type: string, enum: [member] }
+        - $ref: '#/components/parameters/MemberSeriesTop'
+        - $ref: '#/components/parameters/MemberSeriesOther'
       responses:
         '200':
           description: Counter or member-dimensional series.
@@ -458,9 +686,95 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /counter-write-policy:
+    get:
+      operationId: getCounterWritePolicy
+      x-api-key-scope: counter:read
+      summary: Read the organization's implicit-create policy
+      description: |
+        Returns the organization-wide policy and its compare-and-set version. A policy-less
+        organization reads as implicit `allow`, version `0`, `explicit: false`; this preserves
+        create-on-write through rolling deployments until an administrator explicitly stores a
+        policy. Publishable tokens cannot call this operation.
+      tags: [counters]
+      responses:
+        '200':
+          description: Current explicit policy or the implicit version-zero default.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterWritePolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      operationId: setCounterWritePolicy
+      x-api-key-scope: counter:manage
+      summary: Compare-and-set the organization's implicit-create policy
+      description: |
+        Stores the organization-wide policy only when `expectedVersion` matches the current version.
+        Read first, then supply the returned version; one of two concurrent updates wins and the other
+        receives `409`, so separate clients cannot silently clobber each other. Setting a policy on an
+        implicit policy-less organization requires `expectedVersion: 0` and creates version `1`.
+        Publishable tokens cannot call this operation.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetCounterWritePolicyRequest' }
+      responses:
+        '200':
+          description: The stored policy. An exact explicit replay is a storage no-op.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CounterWritePolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /counters:
+    post:
+      operationId: declareCounters
+      x-api-key-scope: counter:write
+      summary: Declare the organization's complete known counter set
+      description: |
+        Creates or verifies one to 1000 counter declarations for idempotent startup provisioning:
+        submit the client's full known key set and settings on every startup. Work is committed in
+        stable batches of at most 25 keys, bounding each transaction's advisory locks far below the
+        PostgreSQL lock-table budget. Every key retains its organization-generation and repair fence.
+
+        Each result is `created`, `unchanged`, or `error`. An invalid key, duplicate, tombstone, or
+        configuration mismatch affects only that result; valid keys still land. A cap, quota, or fence
+        failure rolls back only its bounded batch and appears on those results. Callers must inspect
+        every result. An exact match performs no counter/configuration write and consumes no monthly
+        op; a newly created counter consumes one monthly op. Board mode is immutable once declared,
+        including before member data exists. Enabling member series happens in the same fenced,
+        locked transaction as creation, before any member writes.
+
+        This operation never changes the organization-wide undeclared-write policy. Read and update
+        that versioned setting through `GET`/`PUT /counter-write-policy`; separating it from per-client
+        startup declarations prevents last-writer-wins policy changes across clients sharing an org.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeclareCountersRequest' }
+      responses:
+        '200':
+          description: One independent result per declaration plus the policy observed after completion.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeclareCountersResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
     get:
       operationId: listCounters
+      x-api-key-scope: counter:read
       summary: List counters in the organization
       description: Pages through the organization's counters in key order; follow `nextCursor` until absent.
       tags: [counters]
@@ -481,8 +795,12 @@ paths:
       - $ref: '#/components/parameters/CounterKey'
     get:
       operationId: getCounter
+      x-api-key-scope: counter:read
       summary: Get a counter's metadata and current value
-      description: The counter's key, current-epoch value, and epoch. 404 once deleted.
+      description: |
+        The counter's key, current-epoch value, epoch, member configuration, dimensional-series state,
+        most recent enable actor/time, and current member count. Optional configuration fields are
+        absent when not applicable. 404 once deleted.
       tags: [counters]
       responses:
         '200':
@@ -494,6 +812,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       operationId: deleteCounter
+      x-api-key-scope: counter:manage
       summary: Delete (tombstone) a counter
       description: Marks the counter deleted and stops serving it; events are purged asynchronously per retention.
       tags: [operations]
@@ -506,14 +825,55 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /counters/{counterKey}/member-series:
+    parameters:
+      - $ref: '#/components/parameters/CounterKey'
+    put:
+      operationId: setCounterMemberSeries
+      x-api-key-scope: counter:write
+      summary: Enable or disable per-member time series
+      description: |
+        Sets the counter's per-member time-series policy using a full organization API key.
+        Publishable tokens cannot call this operation. Enabling is non-retroactive and is rejected
+        when the current-epoch member count exceeds the plan's dimensional-series cap. An optional
+        `expectedEpoch` makes the update conditional, so automation cannot silently configure a board
+        that was cleared underneath it.
+
+        `enabledAt` and `enabledBy` record the most recent disabled-to-enabled transition. They are
+        retained across disable, and an idempotent request that leaves the state unchanged does not
+        rewrite them. `enabledBy` identifies the calling API-key id; no plane-to-hub activity event is
+        emitted by this operation.
+      tags: [counters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CounterMemberSeriesRequest' }
+      responses:
+        '200':
+          description: Current member-series configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberSeriesConfig' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /counters/{counterKey}/add:
     parameters:
       - $ref: '#/components/parameters/CounterKey'
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: addToCounter
+      x-api-key-scope: counter:write
       summary: Add to a counter
-      description: Increments by a non-negative amount. Creates the counter if absent (subject to the plan's counter limit).
+      description: |
+        Increments by a non-negative amount. Creates the counter if absent (subject to the plan's
+        counter limit) when the organization's `undeclaredCounterWrites` policy is `allow`. Under
+        `reject`, an absent key fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -538,8 +898,12 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: subtractFromCounter
+      x-api-key-scope: counter:write
       summary: Subtract from a counter
-      description: Decrements by a non-negative amount. The counter may go negative.
+      description: |
+        Decrements by a non-negative amount. The counter may go negative. An absent key is implicitly
+        created only when the organization's `undeclaredCounterWrites` policy is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -564,6 +928,7 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: clearCounter
+      x-api-key-scope: counter:write
       summary: Clear a counter (reset to zero)
       description: Starts a new epoch; the current value becomes zero. Historical series are retained.
       tags: [operations]
@@ -583,6 +948,7 @@ paths:
       - $ref: '#/components/parameters/CounterKey'
     get:
       operationId: getCounterValue
+      x-api-key-scope: counter:read
       summary: Get a counter's current value
       description: The value in the current epoch, as a decimal string. Publishable (`pk_`) bearers get CORS + cache headers.
       tags: [read]
@@ -600,6 +966,7 @@ paths:
       - $ref: '#/components/parameters/CounterKey'
     get:
       operationId: getCounterSeries
+      x-api-key-scope: counter:read
       summary: Get a counter's time series (delta per bucket)
       description: |
         Returns the per-bucket change in the counter over [from, to). Granularity (`bucket`) is constrained by the
@@ -647,10 +1014,12 @@ paths:
         - name: groupBy
           in: query
           description: >-
-            `groupBy=member` returns a series for every member with data in range (member-series):
-            gapfilled dense on a sum board, sparse per member on a score board. Requires member series
-            enabled and `bucket` >= 1h. Mutually exclusive with `member`.
+            `groupBy=member` returns series for members with data in range (member-series), optionally
+            restricted by `top`: gapfilled dense on a sum board, sparse per member on a score board.
+            Requires member series enabled and `bucket` >= 1h. Mutually exclusive with `member`.
           schema: { type: string, enum: [member] }
+        - $ref: '#/components/parameters/MemberSeriesTop'
+        - $ref: '#/components/parameters/MemberSeriesOther'
       responses:
         '200':
           description: >-
@@ -676,6 +1045,7 @@ paths:
       - $ref: '#/components/parameters/CounterKey'
     get:
       operationId: getCounterLeaderboard
+      x-api-key-scope: counter:read
       summary: Read a counter's ranked member leaderboard
       description: |
         Ranked page of members with values (top-N). Identical across board modes. `total` (the group
@@ -725,6 +1095,7 @@ paths:
       - $ref: '#/components/parameters/MemberKey'
     get:
       operationId: getMember
+      x-api-key-scope: counter:read
       summary: Get a member's rank and percentile
       description: |
         The member's value, competition rank, and percentile (share of members at-or-behind, e.g.
@@ -746,6 +1117,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       operationId: removeMember
+      x-api-key-scope: counter:manage
       summary: Remove a member from the current board
       description: |
         Removes the member from the current epoch. On `sum` boards a non-zero value is compensated
@@ -771,8 +1143,12 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: addToMember
+      x-api-key-scope: counter:write
       summary: Add to a member's value (sum board)
-      description: Accumulates a non-negative delta onto the member's value; configures the board as `sum` on first use.
+      description: |
+        Accumulates a non-negative delta onto the member's value; configures the board as `sum` on
+        first use. An absent counter is implicitly created only when `undeclaredCounterWrites` is
+        `allow`; under `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -798,8 +1174,12 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: subtractFromMember
+      x-api-key-scope: counter:write
       summary: Subtract from a member's value (sum board)
-      description: Decrements the member's value by a non-negative delta. The member (and group) may go negative.
+      description: |
+        Decrements the member's value by a non-negative delta. The member (and group) may go negative.
+        An absent counter is implicitly created only when `undeclaredCounterWrites` is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -825,11 +1205,14 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
     post:
       operationId: submitMember
+      x-api-key-scope: counter:write
       summary: Submit a member's score (latest/min/max board)
       description: |
         Submits a signed score to a score board — `latest` overwrites, `min`/`max` keep-best. A
         worse-than-standing submit is still a successful, metered call returning the standing value
         with `memberAccepted: false`. `mode` is required on the first submit to an unconfigured board.
+        An absent counter is implicitly created only when `undeclaredCounterWrites` is `allow`; under
+        `reject`, it fails with `409` and must first be declared with `POST /counters`.
       tags: [operations]
       requestBody:
         required: true
@@ -851,6 +1234,7 @@ paths:
   /usage:
     get:
       operationId: getUsage
+      x-api-key-scope: counter:read
       summary: Read current quota state
       tags: [counters]
       description: |
@@ -871,12 +1255,18 @@ paths:
   /batch:
     post:
       operationId: batchOperations
+      x-api-key-scope: counter:write
       summary: Apply a batch of operations
       description: |
         The SDK's primary write path. Operations are coalesced client-side and submitted together. Each operation
         carries its own idempotency key (there is no batch-level key), so the batch is safe to retry. The HTTP call
         succeeding means the batch was accepted — inspect each per-operation result, including a possible `403`
-        live-idempotency-key-cap error.
+        live-idempotency-key-cap error. When `undeclaredCounterWrites` is `reject`, an operation for an
+        absent counter receives its own `409` `counter-not-declared` error result; other entries continue.
+
+        Scope enforcement (when on) gates per contained operation: every operation needs `counter:write`,
+        except a contained `delete`, which needs `counter:manage` instead. A batch containing any operation the
+        key may not run is rejected whole with `403` `scope_denied` before anything executes.
       tags: [operations]
       requestBody:
         required: true
@@ -898,6 +1288,7 @@ paths:
       - $ref: '#/components/parameters/DerivedKey'
     get:
       operationId: getDerivedValue
+      x-api-key-scope: counter:read
       summary: Evaluate a derived counter's current value
       description: |
         A derived counter is a stored, named, read-only expression over the organization's counters
@@ -925,6 +1316,7 @@ paths:
       - $ref: '#/components/parameters/DerivedKey'
     get:
       operationId: getDerivedSeries
+      x-api-key-scope: counter:read
       summary: Evaluate a derived counter as a per-bucket time series
       description: |
         Evaluates the derived expression per bucket over [from, to). Each referenced counter's series
@@ -957,6 +1349,582 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DerivedSeriesResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /boards:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    get:
+      operationId: listMachineBoards
+      x-api-key-scope: board:read
+      summary: List the organization's boards
+      description: |
+        Returns every board (BoardV1 plus revision metadata) in stable creation order — the same
+        rows and wire shape as the dashboard's `/dashboard/boards/v2`. When the organization
+        still carries a legacy single-blob boards document and has never listed v2 boards, the
+        first call imports the blob's boards into rows (idempotent; the blob itself is left
+        untouched). Requires a full-access organization API key with `board:read` — always
+        enforced, regardless of the scope-enforcement rollout mode. Reads are not audited.
+      tags: [boards]
+      responses:
+        '200':
+          description: The organization's boards (empty when none exist).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoardList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      operationId: createMachineBoard
+      x-api-key-scope: board:write
+      summary: Create a board
+      description: |
+        Creates one board from `{name, widgets}` — every other member is rejected, and the
+        server mints `id`, timestamps, and `revision: 1`. Widget `counterKey` values are the
+        organization's counter keys (a derived-counter key when `isDerived` is true);
+        format-validated only, so list the org's counters first with data-plane
+        `GET /v1/counters` under `counter:read`. Requires a full-access organization API key
+        with `board:write` — always enforced, regardless of the scope-enforcement rollout mode.
+        Audited as the `api_key` actor (`boards.created`).
+      tags: [boards]
+      parameters:
+        - $ref: '#/components/parameters/MachineIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, widgets]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                widgets:
+                  type: array
+                  maxItems: 12
+                  items: { $ref: '#/components/schemas/DashboardBoardWidget' }
+      responses:
+        '201':
+          description: The created board.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '200':
+          description: |
+            Idempotent replay: the same `Idempotency-Key` with a byte-identical body returns the
+            recorded board instead of creating a second one.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /boards/{boardId}:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    parameters:
+      - $ref: '#/components/parameters/BoardId'
+    get:
+      operationId: getMachineBoard
+      x-api-key-scope: board:read
+      summary: Read one board
+      description: |
+        Returns one board with its revision metadata. A peer organization's id is a 404, never a
+        leak. Requires a full-access organization API key with `board:read` — always enforced.
+        Reads are not audited.
+      tags: [boards]
+      responses:
+        '200':
+          description: The board.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      operationId: updateMachineBoard
+      x-api-key-scope: board:write
+      summary: Replace a board under optimistic concurrency
+      description: |
+        Replaces the board's `name`/`widgets` (same `{name, widgets}` shape and validation as
+        create) iff the `If-Match` revision equals the stored revision, bumping it by one.
+        A stale revision is `409 Conflict` — re-read the board and retry; the stored board is
+        never silently overwritten. Requires a full-access organization API key with
+        `board:write` — always enforced. Audited as the `api_key` actor (`boards.updated`).
+      tags: [boards]
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: The board's current revision, as last read.
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, widgets]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                widgets:
+                  type: array
+                  maxItems: 12
+                  items: { $ref: '#/components/schemas/DashboardBoardWidget' }
+      responses:
+        '200':
+          description: The updated board with its bumped revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardBoard' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      operationId: deleteMachineBoard
+      x-api-key-scope: board:manage
+      summary: Delete a board
+      description: |
+        Deletes one board. Requires a full-access organization API key with `board:manage` —
+        always enforced. Audited as the `api_key` actor (`boards.deleted`).
+      tags: [boards]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /alerts:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    get:
+      operationId: listMachineAlertRules
+      x-api-key-scope: alert:read
+      summary: List the organization's alert rules
+      description: |
+        Keyset-paginated alert rules across counter, member, and derived targets. Filter by
+        `counterKey` (a counter key, or a derived key with `targetType=derived`) and/or
+        `targetType`. Requires a full-access organization API key with `alert:read` — always
+        enforced, regardless of the scope-enforcement rollout mode. Reads are not audited.
+      tags: [alerts]
+      parameters:
+        - name: counterKey
+          in: query
+          description: Only rules targeting this counter (or derived) key.
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: targetType
+          in: query
+          description: Only rules of this target kind.
+          schema: { type: string, enum: [counter, member, derived] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: The rule page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertRuleList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      operationId: createMachineAlertRule
+      x-api-key-scope: alert:write
+      summary: Create an alert rule
+      description: |
+        Creates one alert rule on a counter, member, or derived target. The rule counts against the
+        organization's `maxAlertRules` entitlement; a derived target must name an existing derived
+        definition. Requires a full-access organization API key with `alert:write` — always enforced,
+        regardless of the scope-enforcement rollout mode. Audited as the `api_key` actor
+        (`alert_rule.created`).
+      tags: [alerts]
+      parameters:
+        - $ref: '#/components/parameters/MachineIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineCreateAlertRuleRequest' }
+      responses:
+        '201':
+          description: The created rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertRule' }
+        '200':
+          description: |
+            Idempotent replay: the same `Idempotency-Key` with a byte-identical body returns the
+            recorded rule instead of creating a second one.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /alerts/{ruleId}:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    parameters:
+      - name: ruleId
+        in: path
+        required: true
+        description: Alert rule id.
+        schema: { type: string, format: uuid }
+    get:
+      operationId: getMachineAlertRule
+      x-api-key-scope: alert:read
+      summary: Get one alert rule
+      description: |
+        Fetches a single alert rule by id. A peer organization's id is a 404, never a leak. Requires
+        a full-access organization API key with `alert:read` — always enforced. Reads are not audited.
+      tags: [alerts]
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      operationId: updateMachineAlertRule
+      x-api-key-scope: alert:write
+      summary: Update an alert rule
+      description: |
+        Partial update; kind, counter key, and target are immutable (delete and recreate to change
+        them). Reminder semantics are tri-state: omit `reminderIntervalSeconds` to leave it unchanged,
+        send null to turn reminders off, send a value to set it. Requires a full-access organization
+        API key with `alert:write` — always enforced. Audited as the `api_key` actor
+        (`alert_rule.updated`).
+      tags: [alerts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineUpdateAlertRuleRequest' }
+      responses:
+        '200':
+          description: The updated rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      operationId: deleteMachineAlertRule
+      x-api-key-scope: alert:manage
+      summary: Delete an alert rule
+      description: |
+        Deletes one alert rule. Requires a full-access organization API key with `alert:manage` —
+        always enforced. Audited as the `api_key` actor (`alert_rule.deleted`).
+      tags: [alerts]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /alerts/incidents/{incidentId}/ack:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    parameters:
+      - name: incidentId
+        in: path
+        required: true
+        description: Alert incident id.
+        schema: { type: string, format: uuid }
+    post:
+      operationId: acknowledgeMachineAlertIncident
+      x-api-key-scope: alert:write
+      summary: Acknowledge an alert incident
+      description: |
+        Marks an open incident acknowledged ("seen, stop reminding") without resolving it. Idempotent:
+        re-acking a still-open incident returns it unchanged; a resolved incident is rejected (400 on
+        local composition, 409 on a split hub where the plane reports it). Requires a
+        full-access organization API key with `alert:write` — always enforced. The `reason` is required
+        free text for the audit trail; there is no confirmation word. `Idempotency-Key` is required and
+        correlates the acknowledgement. Audited as the `api_key` actor (`alert.acknowledged`). On a
+        split hub the acknowledgement travels as a signed hub-to-plane management command and may
+        answer `202` (pending) instead of `200`.
+      tags: [alerts]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Lowercase UUID correlating this acknowledgement.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineAckRequest' }
+      responses:
+        '200':
+          description: The acknowledged incident.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineAlertIncident' }
+        '202':
+          description: Accepted on a split hub; poll the incident until acknowledged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineCommandPending' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /derived:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    get:
+      operationId: listMachineDerivedDefinitions
+      x-api-key-scope: derived:read
+      summary: List derived-counter definitions
+      description: |
+        Keyset-paginated derived-counter definitions. Requires a full-access organization API key with
+        `derived:read` — always enforced, regardless of the scope-enforcement rollout mode. Reads are
+        not audited. (Reading derived *values* stays on the data plane under `counter:read`.)
+      tags: [derived]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: The definition page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineDerivedDefinitionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      operationId: createMachineDerivedDefinition
+      x-api-key-scope: derived:write
+      summary: Create a derived-counter definition
+      description: |
+        Creates one derived-counter definition; the expression is parsed and the plan's
+        `maxDerivedCounters` cap enforced. Requires a full-access organization API key with
+        `derived:write` — always enforced. Audited as the `api_key` actor
+        (`derived_counter.created`). The definition projects to the data plane through the signed
+        config snapshot, like dashboard-authored definitions.
+      tags: [derived]
+      parameters:
+        - $ref: '#/components/parameters/MachineIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineCreateDerivedDefinitionRequest' }
+      responses:
+        '201':
+          description: The created definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineDerivedDefinition' }
+        '200':
+          description: |
+            Idempotent replay: the same `Idempotency-Key` with a byte-identical body returns the
+            recorded definition instead of creating a second one.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineDerivedDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /derived/{derivedKey}:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    parameters:
+      - $ref: '#/components/parameters/DerivedKey'
+    get:
+      operationId: getMachineDerivedDefinition
+      x-api-key-scope: derived:read
+      summary: Get one derived-counter definition
+      description: |
+        Fetches a single derived-counter definition by key. Requires a full-access organization API
+        key with `derived:read` — always enforced. Reads are not audited.
+      tags: [derived]
+      responses:
+        '200':
+          description: The definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineDerivedDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      operationId: updateMachineDerivedDefinition
+      x-api-key-scope: derived:write
+      summary: Update a derived-counter definition
+      description: |
+        Updates a definition's expression and/or scale (at least one is required). Requires a
+        full-access organization API key with `derived:write` — always enforced. Audited as the
+        `api_key` actor (`derived_counter.updated`).
+      tags: [derived]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineUpdateDerivedDefinitionRequest' }
+      responses:
+        '200':
+          description: The updated definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineDerivedDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      operationId: deleteMachineDerivedDefinition
+      x-api-key-scope: derived:manage
+      summary: Delete a derived-counter definition
+      description: |
+        Deletes one derived-counter definition. Requires a full-access organization API key with
+        `derived:manage` — always enforced. Audited as the `api_key` actor
+        (`derived_counter.deleted`).
+      tags: [derived]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /keys:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    post:
+      operationId: mintMachineApiKey
+      x-api-key-scope: key:mint
+      summary: Mint a scoped organization API key
+      description: |
+        Mints a new organization API key owned by the caller's organization — the delegation
+        primitive for handing a narrower key to a sub-agent. Requires a full-access organization
+        API key with `key:mint` — always enforced, regardless of the scope-enforcement rollout
+        mode. No escalation: every requested scope must already be on the calling key (a superset
+        request is `403` with problem `type: "scope_denied"` and a `disallowed` member naming each
+        requested scope outside the caller's set). An `expiresAt` later than the calling key's own
+        expiry is rejected with `400` (never silently clamped); a caller that never expires may
+        mint any future expiry or none (when the calling key has an expiry, omitting `expiresAt`
+        or passing null is rejected with `400`). The response carries the new key's secret exactly once —
+        an idempotent replay (`200`, same `Idempotency-Key` with a byte-identical body) returns
+        the recorded metadata with `secret` null. The minting key's id is stored as
+        `createdByKeyId` lineage; revoking the minting key does NOT cascade to keys it minted.
+        Audited as the `api_key` actor (`api_key.created`).
+      tags: [keys]
+      parameters:
+        - $ref: '#/components/parameters/MachineIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MachineMintKeyRequest' }
+      responses:
+        '201':
+          description: The minted key, with its secret (shown exactly once).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineMintKeyResponse' }
+        '200':
+          description: |
+            Idempotent replay: the same `Idempotency-Key` with a byte-identical body returns the
+            recorded key metadata with `secret` null instead of minting a second key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MachineMintKeyResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: |
+            Missing `key:mint` (a `scope_denied` problem naming it in `required`), or a superset
+            request (a `scope_denied` problem naming each out-of-reach scope in `disallowed`).
+          content:
+            application/problem+json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Problem'
+                  - $ref: '#/components/schemas/KeyMintDeniedProblem'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /keys/self:
+    servers:
+      - url: https://hub.counters.dev/v1
+        description: Machine surface lives on the hub host; data-plane /v1 stays on api.counters.dev.
+    delete:
+      operationId: revokeOwnMachineApiKey
+      summary: Revoke the calling API key (self-destruct)
+      description: |
+        Revokes exactly the calling organization API key — the end-of-work primitive for an agent
+        handed a key by a human: when the work is done, call this and the key dies with it. Needs
+        no scope: any valid organization API key may destroy itself. The response is `204`; the
+        key's next request on any surface (hub and data plane) is `401`, and a second call with
+        the revoked key is `401`. Revocation is durable in the hub row at once; the data plane
+        stops accepting the key once it applies the published credential snapshot (poke-driven,
+        polling fallback — up to a minute in the worst case). Audited as the `api_key` actor
+        (`api_key.revoked`).
+      tags: [keys]
+      responses:
+        '204': { description: Revoked. }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -1063,6 +2031,12 @@ components:
       required: true
       description: Derived-counter identifier, unique within the organization (separate namespace from counter keys).
       schema: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+    BoardId:
+      name: boardId
+      in: path
+      required: true
+      description: Board identifier (server-minted UUID).
+      schema: { type: string, format: uuid }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1080,6 +2054,22 @@ components:
         that operation. No `Retry-After` header is sent because the service does not promise an exact recovery time.
         Do not retry automatically; retry only after older keys have left the six-hour window.
       schema: { type: string, maxLength: 255 }
+    MachineIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Lowercase RFC 4122 UUID (versions 1-5) for effectively-once machine creates. Retrying a create with the same key
+        and a byte-identical body replays the recorded rule/definition (`200`) instead of creating
+        a second one; the same key with a different body (or a different machine operation) is
+        `409 Conflict`. If the resource the key originally created has since been deleted (or, for a
+        derived definition, changed), the replay is `409` with problem type `idempotency_key_reused`
+        and creates nothing. Optional on creates; required on incident acknowledgement, where it
+        correlates the acknowledgement.
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     Cursor:
       name: cursor
       in: query
@@ -1100,6 +2090,25 @@ components:
       in: query
       description: Season to read; defaults to the counter's current epoch. Past seasons stay readable after clear.
       schema: { type: integer, format: int64 }
+    MemberSeriesTop:
+      name: top
+      in: query
+      description: >-
+        With `groupBy=member`, select the top N members over the requested range. Ranking follows
+        board semantics: range sum for `sum`, range minimum for `min`, range maximum for `max`,
+        and the newest submitted value for `latest`. N must not exceed the organization's resolved
+        `maxMembersWithSeries` entitlement. The absolute response budget is 25,000 points, so
+        `top * bucketCount` (plus one series when `other=true`) must fit; reduce `top` or use a
+        coarser bucket when it does not. Requires `groupBy=member`.
+      schema: { type: integer, minimum: 1 }
+    MemberSeriesOther:
+      name: other
+      in: query
+      description: >-
+        With `groupBy=member&top=N` on a sum board, append a synthetic `$other` series containing
+        the per-bucket sum of all omitted members. Defaults to false. `other=true` is rejected on
+        `min`, `max`, and `latest` boards because a combined score series has no coherent meaning.
+      schema: { type: boolean, default: false }
 
   schemas:
     Amount:
@@ -1125,6 +2134,126 @@ components:
             instant instead of ingest time (for offline spools flushing late). Bounded: at most 5
             minutes in the future and no older than the plan's retention window (400 otherwise).
             Totals are unaffected — only series bucketing.
+    UndeclaredCounterWrites:
+      type: string
+      enum: [allow, reject]
+      description: |
+        Per-organization implicit-create policy with explicit polarity. `allow` lets ordinary data
+        writes create an absent counter (the backwards-compatible default for existing organizations).
+        `reject` makes live counter rows the strict-key allowlist: an absent key returns a typed `409`
+        until it is created through `POST /counters`. This is an organization safety policy, not a
+        plan entitlement or temporary grant.
+    CounterWritePolicy:
+      type: object
+      required: [undeclaredCounterWrites, version, explicit]
+      properties:
+        undeclaredCounterWrites:
+          $ref: '#/components/schemas/UndeclaredCounterWrites'
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: CAS version. Zero exists only for the implicit policy-row-absent default.
+        explicit:
+          type: boolean
+          description: False only when no policy row exists and implicit `allow` is in effect.
+        updatedAt:
+          type: string
+          format: date-time
+          description: Present for an explicitly stored policy.
+        updatedBy:
+          type: string
+          description: API-key actor that most recently changed the explicit policy.
+    SetCounterWritePolicyRequest:
+      type: object
+      required: [undeclaredCounterWrites, expectedVersion]
+      properties:
+        undeclaredCounterWrites:
+          $ref: '#/components/schemas/UndeclaredCounterWrites'
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Version returned by the latest GET. A stale value returns 409.
+    CounterDeclaration:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: '^[A-Za-z0-9._:-]+$'
+        memberMode:
+          description: >-
+            Desired member-board aggregation mode. Omit for an unconfigured scalar counter. A matching
+            repeat is a no-op; any mismatch on an existing counter returns an error for this key. The
+            mode is immutable once declared, even when the board has no member data.
+          allOf:
+            - $ref: '#/components/schemas/Mode'
+        memberSeriesEnabled:
+          type: boolean
+          default: false
+          description: >-
+            Whether per-member time series must be enabled. Enabling during creation happens before any
+            member writes and records this API key as the enabling actor.
+    DeclareCountersRequest:
+      type: object
+      required: [counters]
+      properties:
+        counters:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: >-
+            The client's full known counter set. Duplicate entries become per-key errors. Each bounded
+            transaction contains at most 25 keys; callers must inspect every result.
+          items: { $ref: '#/components/schemas/CounterDeclaration' }
+    CounterDeclarationResult:
+      type: object
+      required: [key, status]
+      properties:
+        key: { type: string }
+        status:
+          type: string
+          enum: [created, unchanged, error]
+          description: >-
+            `unchanged` means the declaration exactly matched and performed no counter/config write;
+            `error` means only this key (or its bounded transaction batch) failed.
+        epoch: { type: integer, format: int64 }
+        memberMode: { $ref: '#/components/schemas/Mode' }
+        memberSeriesEnabled: { type: boolean }
+        memberSeriesEnabledAt:
+          type: string
+          format: date-time
+          description: >-
+            Most recent disabled-to-enabled transition; absent until first enabled. When the actor has
+            `unknown:*` provenance, this is a migration or rolling-upgrade fallback timestamp rather
+            than the historical enable time.
+        memberSeriesEnabledBy:
+          type: string
+          description: >-
+            Actor responsible for `memberSeriesEnabledAt`; absent until first enabled. Normally
+            `api_key:<uuid>` or `user:<id>`; `unknown:pre-audit` and `unknown:rolling-upgrade` are honest
+            compatibility sentinels.
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count at declaration time.
+        error:
+          allOf:
+            - $ref: '#/components/schemas/Problem'
+          description: Present when status is `error`; includes an HTTP-style status and reason.
+    DeclareCountersResponse:
+      type: object
+      required: [results, policy]
+      properties:
+        results:
+          type: array
+          description: One result per declaration, in request order.
+          items: { $ref: '#/components/schemas/CounterDeclarationResult' }
+        policy:
+          $ref: '#/components/schemas/CounterWritePolicy'
     Counter:
       type: object
       required: [key, value, epoch]
@@ -1134,6 +2263,30 @@ components:
         epoch:
           type: integer
           description: Incremented by clear; the value sums deltas in the current epoch.
+        memberMode:
+          description: Board aggregation mode; present on the full-access counter detail read when configured.
+          allOf:
+            - $ref: '#/components/schemas/Mode'
+        memberSeriesEnabled:
+          type: boolean
+          description: Present on the full-access counter detail read.
+        memberSeriesEnabledAt:
+          type: string
+          format: date-time
+          description: >-
+            Most recent disabled-to-enabled transition; present on the full-access detail read after
+            member series has first been enabled and retained across disable. With an `unknown:*`
+            actor, this is a migration or rolling-upgrade fallback timestamp, not the historical enable time.
+        memberSeriesEnabledBy:
+          type: string
+          description: >-
+            Actor responsible for `memberSeriesEnabledAt`, e.g. `api_key:<uuid>` or `user:<id>`.
+            Compatibility values `unknown:pre-audit` and `unknown:rolling-upgrade` explicitly mean the
+            historical actor is unavailable.
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count; present on the full-access counter detail read.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     ValueResponse:
@@ -1158,6 +2311,95 @@ components:
           type: string
           format: date-time
           description: Token expiry; at most 10 minutes after issue time.
+    DashboardBoardWidget:
+      type: object
+      required: [id, type, counterKey, size, options]
+      description: One BoardV1 widget. Unknown members are rejected, never stored.
+      properties:
+        id:
+          type: string
+          maxLength: 200
+          description: Widget id, unique within the board.
+        type:
+          type: string
+          enum: [stat, ticker, delta-chart, goal, table]
+        counterKey:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: '^[A-Za-z0-9._:-]+$'
+          description: Counter key the widget reads (a derived-counter key when `isDerived` is true). Format-validated only; the counter need not exist.
+        title:
+          type: string
+          maxLength: 200
+          description: Optional display title.
+        size:
+          type: string
+          enum: [s, m, l]
+        options:
+          type: object
+          description: Widget options; unknown members are rejected, never stored.
+          properties:
+            format:
+              type: string
+              maxLength: 200
+            bucket:
+              type: string
+              maxLength: 200
+            rangePreset:
+              type: string
+              maxLength: 200
+            target:
+              type: string
+              maxLength: 1100
+              pattern: '^-?[0-9]+(\.[0-9]+)?$'
+              description: Goal target as a decimal string.
+            limit:
+              type: integer
+              minimum: 1
+              maximum: 1000
+              description: Row limit for a table widget.
+        isDerived:
+          type: boolean
+          description: True when `counterKey` names a derived counter.
+    DashboardBoard:
+      type: object
+      required: [version, id, name, createdAt, updatedAt, revision, widgets]
+      description: One BoardV1 board plus the revision metadata the optimistic-concurrency protocol needs.
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        id:
+          type: string
+          format: uuid
+          description: Server-minted board id.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last mutation instant.
+        revision:
+          type: integer
+          minimum: 1
+          description: Optimistic-concurrency revision, starting at 1. Echo it in `If-Match` on update.
+        widgets:
+          type: array
+          maxItems: 12
+          items: { $ref: '#/components/schemas/DashboardBoardWidget' }
+    DashboardBoardList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/DashboardBoard' }
     DashboardUsage:
       type: object
       required: [month, opsUsed, opsQuota]
@@ -1387,6 +2629,41 @@ components:
       description: |
         Board aggregation mode. `sum` accumulates deltas (fully counter-integrated); `latest`/`min`/`max`
         submit replace/keep-best scores. Set by the first member write, then immutable.
+    CounterMemberSeriesRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        expectedEpoch:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Optional compare-and-set guard. The request fails with 409 if the counter's current epoch
+            differs, preventing automation from configuring a board that was concurrently cleared.
+    MemberSeriesConfig:
+      type: object
+      required: [key, enabled, memberCount, maxMembersWithSeries]
+      properties:
+        key: { type: string }
+        enabled: { type: boolean }
+        memberCount:
+          type: integer
+          minimum: 0
+          description: Current-epoch member count observed by the toggle.
+        maxMembersWithSeries:
+          type: integer
+          minimum: 0
+          description: The calling organization's resolved dimensional-series member cap.
+        mode: { $ref: '#/components/schemas/Mode' }
+        enabledAt:
+          type: string
+          format: date-time
+          description: Most recent disabled-to-enabled transition; absent until first enabled and retained across disable.
+        enabledBy:
+          type: string
+          description: Actor responsible for `enabledAt`, e.g. `api_key:<uuid>` or `user:<id>`.
     MemberAmountRequest:
       type: object
       required: [amount]
@@ -1549,7 +2826,7 @@ components:
         Per-member multi-series (`groupBy=member`). Sum boards are gapfilled dense; score boards return
         sparse per-member point lists (same rule as the single-member score series — a gap is "no
         submission", not zero).
-      required: [counterKey, bucket, mode, range, series]
+      required: [counterKey, bucket, mode, range, memberCount, selectedCount, truncated, series]
       properties:
         counterKey: { type: string }
         bucket: { type: string }
@@ -1565,6 +2842,20 @@ components:
           properties:
             from: { type: string, format: date-time }
             to: { type: string, format: date-time }
+        memberCount:
+          type: integer
+          minimum: 0
+          description: >-
+            Members with data in the requested range before top-N selection.
+        selectedCount:
+          type: integer
+          minimum: 0
+          description: >-
+            Real member series selected into the response; excludes the synthetic `$other` series.
+        truncated:
+          type: boolean
+          description: >-
+            True when top-N selection omitted at least one range member.
         series:
           type: array
           items: { $ref: '#/components/schemas/MemberSeriesEntry' }
@@ -1610,6 +2901,263 @@ components:
         entries:
           type: array
           items: { $ref: '#/components/schemas/WindowEntry' }
+    MachineAlertRule:
+      type: object
+      required: [ruleId, counterKey, targetType, name, kind, forChecks, checkIntervalSeconds, notifyOnResolve, channelId, channelIds, enabled, state, breaches, nextCheckAt, createdAt]
+      description: An alert rule (machine surface response; mirrors the dashboard rule shape).
+      properties:
+        ruleId: { type: string, format: uuid }
+        counterKey:
+          type: string
+          description: Target counter key — or the derived key for `derived` rules.
+        targetType: { type: string, enum: [counter, member, derived] }
+        derivedKey:
+          type: [string, 'null']
+          description: Echoes `counterKey` for `derived` rules; null otherwise.
+        member:
+          type: [string, 'null']
+          description: The leaderboard member the rule scopes to (`member` targets only).
+        name: { type: string }
+        kind: { type: string, description: 'Alert condition kind (for example value_above or rate_change).' }
+        threshold:
+          type: [string, 'null']
+          description: Integer string for counter rules; decimal string for derived rules.
+        percent:
+          type: [string, 'null']
+          description: Decimal string for percentage kinds.
+        direction: { type: [string, 'null'] }
+        baseline: { type: [string, 'null'] }
+        minBaseline: { type: [string, 'null'] }
+        window: { type: [string, 'null'], description: Rate-window label for rate kinds. }
+        forChecks: { type: integer }
+        checkIntervalSeconds: { type: integer }
+        notifyOnResolve: { type: boolean }
+        reminderIntervalSeconds:
+          type: ['integer', 'null']
+          description: Re-notification interval while open; null means off.
+        channelId: { type: string, format: uuid }
+        channelIds:
+          type: array
+          items: { type: string, format: uuid }
+        enabled: { type: boolean }
+        state: { type: string, description: 'Live evaluator state (for example ok or firing).' }
+        breaches: { type: integer }
+        nextCheckAt: { type: string, format: date-time }
+        lastCheckedAt: { type: [string, 'null'], format: date-time }
+        lastObserved: { description: Raw JSON of what the evaluator last saw. }
+        createdAt: { type: string, format: date-time }
+    MachineAlertRuleList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/MachineAlertRule' }
+        nextCursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null when exhausted.
+    MachineAlertTargetType:
+      type: string
+      enum: [counter, member, derived]
+      description: Which namespace the rule's key lives in.
+    MachineCreateAlertRuleRequest:
+      type: object
+      required: [counterKey, kind]
+      properties:
+        targetType:
+          allOf:
+            - $ref: '#/components/schemas/MachineAlertTargetType'
+          default: counter
+        counterKey:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Target counter key — or an existing derived key for `derived` rules.
+        member:
+          type: [string, 'null']
+          description: Required exactly for `member` targets; forbidden otherwise.
+        kind: { type: string, description: 'Alert condition kind (for example value_above or rate_change).' }
+        name: { type: string, maxLength: 200 }
+        threshold: { type: string, description: Integer string (counter) or decimal string (derived). }
+        percent: { type: string }
+        direction: { type: string }
+        baseline: { type: string }
+        minBaseline: { type: string }
+        window: { type: string, description: Rate-window label for rate kinds. }
+        forChecks: { type: integer }
+        checkIntervalSeconds: { type: integer }
+        notifyOnResolve: { type: boolean }
+        reminderIntervalSeconds:
+          type: ['integer', 'null']
+          description: Omit or null for off.
+        channelId: { type: string, format: uuid }
+        channelIds:
+          type: array
+          items: { type: string, format: uuid }
+        enabled: { type: boolean }
+    MachineUpdateAlertRuleRequest:
+      type: object
+      description: |
+        Partial update; kind, key, and target are immutable. Reminder semantics are tri-state: omit
+        to leave unchanged, null to turn off, a value to set.
+      properties:
+        name: { type: string, maxLength: 200 }
+        threshold: { type: string }
+        percent: { type: string }
+        direction: { type: string }
+        baseline: { type: string }
+        minBaseline: { type: string }
+        window: { type: string }
+        forChecks: { type: integer }
+        checkIntervalSeconds: { type: integer }
+        notifyOnResolve: { type: boolean }
+        reminderIntervalSeconds: { type: ['integer', 'null'] }
+        channelId: { type: string, format: uuid }
+        channelIds:
+          type: array
+          items: { type: string, format: uuid }
+        enabled: { type: boolean }
+    MachineAlertIncident:
+      type: object
+      required: [incidentId, ruleId, openedAt, openContext]
+      properties:
+        incidentId: { type: string, format: uuid }
+        ruleId: { type: string, format: uuid }
+        openedAt: { type: string, format: date-time }
+        acknowledgedAt: { type: [string, 'null'], format: date-time }
+        acknowledgedBy: { type: [string, 'null'] }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        openContext: { description: Raw JSON of the breaching observation. }
+        resolveContext: { description: 'Raw JSON of the resolving observation, when resolved.' }
+    MachineAckRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Required free-text reason, kept in the audit trail. No confirmation word.
+    MachineMintKeyRequest:
+      type: object
+      required: [name, scopes]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Display name for the minted key (1–120 bytes, no control characters).
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: |
+            The minted key's scope set — every entry must name a scope in the API-key vocabulary,
+            and every entry must already be on the calling key (no escalation). `key:mint` may be
+            included only when the caller carries it.
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            Optional RFC 3339 expiry; must be a future instant, and must not be later than the
+            calling key's own expiry (rejected with `400`, never clamped). Null (absent) means
+            the minted key never expires (allowed only when the calling key itself never expires).
+    MachineMintKeyResponse:
+      type: object
+      required: [id, name, scopes]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The minted key's id.
+        name:
+          type: string
+          description: The minted key's display name.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: The minted key's scope set, sorted.
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+          description: The minted key's expiry, second resolution; null means it never expires.
+        createdByKeyId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Lineage — the id of the key that minted this one. Informational only: revoking the
+            minting key does not cascade.
+        secret:
+          type: [string, 'null']
+          description: |
+            The new key's secret (`sk_live_...`), shown exactly once on the initial `201`. An
+            idempotent replay (`200`) returns null — the plaintext is stored nowhere and cannot
+            be re-served. The response carries `Cache-Control: private, no-store`.
+    KeyMintDeniedProblem:
+      description: |
+        A key-mint escalation (403) problem. `type` is always `scope_denied`; `disallowed` names
+        every requested scope outside the calling key's own set (sorted). Echoing these is safe:
+        they are caller-supplied request members, never the key's own scope set.
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [type, title, status, disallowed]
+          properties:
+            disallowed:
+              type: array
+              items:
+                type: string
+    MachineCommandPending:
+      type: object
+      required: [commandId, correlationId]
+      description: Split-hub acknowledgement accepted but not yet applied; retry the ack or poll the incident.
+      properties:
+        commandId: { type: string, format: uuid }
+        correlationId: { type: string, format: uuid }
+    MachineDerivedDefinition:
+      type: object
+      required: [derivedKey, expression, scale, refs, createdAt, updatedAt]
+      description: A named expression over the organization's counters.
+      properties:
+        derivedKey: { type: string }
+        expression: { type: string }
+        scale: { type: integer }
+        refs:
+          type: array
+          items: { type: string }
+          description: Counter keys the expression references.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    MachineDerivedDefinitionList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/MachineDerivedDefinition' }
+        nextCursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null when exhausted.
+    MachineCreateDerivedDefinitionRequest:
+      type: object
+      required: [derivedKey, expression]
+      properties:
+        derivedKey:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: '^[A-Za-z0-9._:-]+$'
+        expression: { type: string, description: Expression over counters (e.g. "c('a') / c('b')"). }
+        scale: { type: integer, description: Decimal scale; defaults server-side when omitted. }
+    MachineUpdateDerivedDefinitionRequest:
+      type: object
+      description: At least one of expression/scale is required.
+      properties:
+        expression: { type: string }
+        scale: { type: integer }
     Problem:
       type: object
       description: Error details, per RFC 9457 (application/problem+json).
@@ -1665,7 +3213,7 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Unauthorized:
-      description: Missing or invalid API key.
+      description: Missing, invalid, or expired API key (an expired key is indistinguishable from an unknown one).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -1675,7 +3223,14 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Forbidden:
-      description: The request exceeds the plan's entitlements, or the credential lacks full access.
+      description: |
+        The request exceeds the plan's entitlements, or the credential lacks full access, or — once
+        scope enforcement is enforced for the organization — the API key lacks the operation's required
+        scope (`x-api-key-scope`). A scope denial is a Problem body with `type: "scope_denied"`, the
+        HTTP `status`, a human-readable `title`, and an additional `required` string member naming the
+        required scope (e.g. `{"type":"scope_denied","title":"missing required scope:
+        counter:manage","status":403,"required":"counter:manage"}`); the key's own scope set is never
+        echoed.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -1711,10 +3266,29 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/DashboardEntitlementsStale' }
+    PreconditionFailed:
+      description: An optimistic-concurrency precondition failed (a stale `If-Match` revision).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: The request body exceeds the endpoint's size ceiling.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Conflict:
-      description: >-
-        The `Idempotency-Key` was first used for a different operation; replaying it here would return a
-        result this operation never produced. Retry with a fresh key (or the operation the key belongs to).
+      description: |
+        A state precondition was not met. Stable cases include:
+
+        - `urn:counters:problem:counter-not-declared`: the organization's
+          `undeclaredCounterWrites` policy is `reject` and an ordinary write targeted an absent key;
+          declare it with `POST /counters` before retrying.
+        - a bulk declaration's desired settings do not match existing counter state; the entire
+          declaration request was rolled back.
+        - `urn:counters:problem:counter-epoch-mismatch`: `expectedEpoch` differs from the counter's
+          current epoch.
+        - an `Idempotency-Key` was first used for a different operation; retry with a fresh key (or
+          the operation the key belongs to).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

@@ -63,9 +63,31 @@
     { "name": "member-series-garbage-key-401", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&member=w1", "auth": "garbage" }, "expect": { "status": 401 } },
     { "name": "member-series-member-and-groupby-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&member=w1&groupBy=member", "auth": "A" }, "expect": { "status": 400 } },
     { "name": "member-series-groupby-bad-value-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&groupBy=teams", "auth": "A" }, "expect": { "status": 400 } },
+    { "name": "member-series-top-without-groupby-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&top=1", "auth": "A" }, "expect": { "status": 400 } },
+    { "name": "member-series-other-invalid-400", "request": { "method": "GET", "path": "/v1/counters/rocks/series?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket=1h&groupBy=member&top=1&other=maybe", "auth": "A" }, "expect": { "status": 400 } },
     { "name": "window-leaderboard-no-auth-401", "request": { "method": "GET", "path": "/v1/counters/rocks/leaderboard?window=7d", "auth": null }, "expect": { "status": 401 } },
 
     { "name": "value-preflight-cors-204", "request": { "method": "OPTIONS", "path": "/v1/counters/anything/value", "auth": null }, "expect": { "status": 204, "headers": { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" } } },
-    { "name": "health-200", "request": { "method": "GET", "path": "/health", "auth": null }, "expect": { "status": 200 } }
+    { "name": "health-200", "request": { "method": "GET", "path": "/health", "auth": null }, "expect": { "status": 200 } },
+
+    { "name": "machine-alerts-no-auth-401", "request": { "method": "GET", "path": "/v1/alerts", "auth": null }, "expect": { "status": 401 } },
+    { "name": "machine-alerts-garbage-key-401", "request": { "method": "GET", "path": "/v1/alerts", "auth": "garbage" }, "expect": { "status": 401 } },
+    { "name": "machine-alerts-default-on-403", "request": { "method": "GET", "path": "/v1/alerts", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-alert-create-default-on-403", "request": { "method": "POST", "path": "/v1/alerts", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-alert-ack-default-on-403", "request": { "method": "POST", "path": "/v1/alerts/incidents/11111111-1111-1111-1111-111111111111/ack", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-derived-no-auth-401", "request": { "method": "GET", "path": "/v1/derived", "auth": null }, "expect": { "status": 401 } },
+    { "name": "machine-derived-garbage-key-401", "request": { "method": "GET", "path": "/v1/derived", "auth": "garbage" }, "expect": { "status": 401 } },
+    { "name": "machine-derived-default-on-403", "request": { "method": "GET", "path": "/v1/derived", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-derived-create-default-on-403", "request": { "method": "POST", "path": "/v1/derived", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-boards-no-auth-401", "request": { "method": "GET", "path": "/v1/boards", "auth": null }, "expect": { "status": 401 } },
+    { "name": "machine-boards-garbage-key-401", "request": { "method": "GET", "path": "/v1/boards", "auth": "garbage" }, "expect": { "status": 401 } },
+    { "name": "machine-boards-default-on-403", "request": { "method": "GET", "path": "/v1/boards", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-boards-create-default-on-403", "request": { "method": "POST", "path": "/v1/boards", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-board-default-on-403", "request": { "method": "GET", "path": "/v1/boards/11111111-1111-1111-1111-111111111111", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-keys-mint-no-auth-401", "request": { "method": "POST", "path": "/v1/keys", "auth": null }, "expect": { "status": 401 } },
+    { "name": "machine-keys-mint-garbage-key-401", "request": { "method": "POST", "path": "/v1/keys", "auth": "garbage" }, "expect": { "status": 401 } },
+    { "name": "machine-keys-mint-default-on-403", "request": { "method": "POST", "path": "/v1/keys", "auth": "A" }, "expect": { "status": 403 } },
+    { "name": "machine-keys-self-no-auth-401", "request": { "method": "DELETE", "path": "/v1/keys/self", "auth": null }, "expect": { "status": 401 } },
+    { "name": "machine-keys-self-garbage-key-401", "request": { "method": "DELETE", "path": "/v1/keys/self", "auth": "garbage" }, "expect": { "status": 401 } }
   ]
 }
