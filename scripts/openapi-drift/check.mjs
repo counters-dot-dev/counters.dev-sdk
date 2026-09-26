@@ -127,6 +127,8 @@ const NOT_SDK_SURFACE = {
   updateMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
   deleteMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
   previewMachineDerivedDefinition: "hub machine API-key surface for derived definitions (SDK clients land separately)",
+  mintMachineApiKey: "hub machine API-key surface for key minting (SDK clients land separately)",
+  revokeOwnMachineApiKey: "hub machine API-key surface for key self-destruct (SDK clients land separately)",
   tapPublicCounter: "keyless public demo endpoint — website-only by design",
 };
 
@@ -240,6 +242,7 @@ const NOT_SDK_SCHEMAS = new Set([
   "DashboardPlaneToken", // dashboard-only surface
   "DashboardUsage", // dashboard-only surface
   "DerivedPreviewRequest", // dashboard-only surface (previewDashboardReadDerived)
+  "KeyMintDeniedProblem", // hub machine surface (mintMachineApiKey)
   "MachineAckRequest", // hub machine surface (acknowledgeMachineAlertIncident)
   "MachineAlertIncident", // hub machine surface (acknowledgeMachineAlertIncident)
   "MachineAlertRule", // hub machine surface (listMachineAlertRules)
@@ -250,6 +253,8 @@ const NOT_SDK_SCHEMAS = new Set([
   "MachineCreateDerivedDefinitionRequest", // hub machine surface (createMachineDerivedDefinition)
   "MachineDerivedDefinition", // hub machine surface (listMachineDerivedDefinitions)
   "MachineDerivedDefinitionList", // hub machine surface (listMachineDerivedDefinitions)
+  "MachineMintKeyRequest", // hub machine surface (mintMachineApiKey)
+  "MachineMintKeyResponse", // hub machine surface (mintMachineApiKey)
   "MachinePreviewDerivedRequest", // hub machine surface (previewMachineDerivedDefinition)
   "MachineUpdateAlertRuleRequest", // hub machine surface (updateMachineAlertRule)
   "MachineUpdateDerivedDefinitionRequest", // hub machine surface (updateMachineDerivedDefinition)
